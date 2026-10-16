@@ -1,15 +1,40 @@
 #!/bin/sh
 # Small host-only runner/sentinel check (never part of the image context):
-#   scripts/dev-run-smoke.sh
+#   scripts/dev-run-smoke.sh [--tools-failure]
 # Runs the real scripts/dev-run.sh and Docker from a unique, ownership-checked
 # scratch snapshot of the admitted project inputs (explicit roots, with the final
 # nested secret and cache exclusions of .dockerignore applied before archiving,
 # so no owner-shaped nested file is ever copied), so repository drafts are never
 # touched. Seven direct assertions print `ok R<n>` or `not ok R<n>`;
 # `DEV-RUN-SMOKE-PASS checks=7` prints only when all seven pass, any failure exits 1.
+# `--tools-failure` instead runs the real eight-tool script in the scratch copy through ten
+# controls, each on a real child and Docker: a genuine compiler syntax error carrying the
+# sentinel (exactly one start record, redacted draft with tool/file/line), an unwritable draft
+# destination, a diagnostic log the child itself made unreadable (a real EACCES while the draft is
+# built), a preview server that never completes its response body, a real eight-tool success
+# next to a pre-seeded host draft, the capture rejection table (missing, empty, link, oversize,
+# malformed, wrong-dimension, wrong-challenge, selected-word diagnostic, no raw host staging),
+# missing or malformed capture variables, a non-none validator log driver (observed never started),
+# a failed host sink write (observed after a validator that exited 0) and a readable diagnostic log
+# whose last 40 lines are far over both the 6000-byte draft cap and a pipe buffer (the capped draft
+# is still written); only then `S5-FAILURE-PROOF-PASS draft=retained downstream=0` prints.
 set -u
 LC_ALL=C
 export LC_ALL
+
+MODE=checks
+case ${1:-} in
+'') ;;
+--tools-failure) MODE=tools-failure ;;
+*)
+	echo 'usage: scripts/dev-run-smoke.sh [--tools-failure]' >&2
+	exit 2
+	;;
+esac
+[ $# -le 1 ] || {
+	echo 'usage: scripts/dev-run-smoke.sh [--tools-failure]' >&2
+	exit 2
+}
 
 { [ -f scripts/dev-run.sh ] && [ -f deploy/dev/Dockerfile ] && [ -f .dockerignore ]; } || {
 	echo 'dev-run-smoke: run from the repository root' >&2
@@ -85,8 +110,15 @@ r1() {
 		r1_one timeout_invalid --timeout 0 -- true &&
 		r1_one write_path_invalid --write ../x -- true &&
 		r1_one ref_unavailable --ref -- true &&
-		r1_one capture_unavailable --capture d -- true &&
-		r1_one bench_unavailable --bench 1 -- true
+		r1_one capture_flag_invalid --capture &&
+		r1_one capture_destination_invalid --capture d -- true &&
+		r1_one capture_destination_invalid --capture .devrites/work/Bad/screenshots-20260101T000000Z -- true &&
+		r1_one capture_flag_invalid --capture .devrites/work/zz/screenshots-20260101T000000Z --bench 1 -- true &&
+		r1_one bench_unavailable --bench 1 -- true &&
+		mkdir -p "$S/repo/.devrites/work/zz/screenshots-20260101T000000Z" &&
+		printf prior >"$S/repo/.devrites/work/zz/screenshots-20260101T000000Z/marker" &&
+		r1_one capture_destination_exists --capture .devrites/work/zz/screenshots-20260101T000000Z -- true &&
+		[ "$(cat "$S/repo/.devrites/work/zz/screenshots-20260101T000000Z/marker")" = prior ]
 }
 
 # R2: exact argv reaches the child; the child's status is the runner's; a child that outlives
@@ -180,6 +212,10 @@ snap_ok() {
 # When the run selects BOXSET_SECRET_TEST, a nonempty retained `cperr` (the redacted copy
 # diagnostic, never the whole scratch: ordinary manifests legitimately hold common words) must
 # hold the redaction marker and not the selected value: `diag` when it does, `diagleak` when not.
+# When the run selects DR_OBS_STATE, it first reads each removed container back from the real
+# Docker and appends `state NAME STATUS STARTEDAT EXIT RUNID vs=N ks=N bytes=N`: the actual state
+# at the removal, and for a validator the retained attachment status, host sink status and size of
+# its canonical output (`-` where absent).
 # ponytail: this is a retained-at-removal snapshot; use syscall tracing only if a proof of
 # transient writes is ever needed.
 obs_setup() {
@@ -187,6 +223,26 @@ obs_setup() {
 	printf '%s\n' "$SENTINEL" synthetic-url-pass synthetic-query-secret >"$S/obs.needles" || return 1
 	cat >"$S/obs/docker" <<'EOF' || return 1
 #!/bin/sh
+if [ "${1:-}" = rm ] && [ -n "${DR_OBS_STATE:-}" ]; then
+	_t=$(find "$DR_OBS_TMP" -name vs -type f 2>/dev/null | sed 1q)
+	for _a in "$@"; do
+		case $_a in rm | -*) continue ;; esac
+		_i=$("$DR_OBS_DOCKER" inspect --format '{{.Name}} {{.State.Status}} {{.State.StartedAt}} {{.State.ExitCode}} {{index .Config.Labels "boxset.dev-run"}}' "$_a" 2>/dev/null) || continue
+		_v=-
+		_k=-
+		_b=-
+		_n=${_i%% *}
+		case $_n in
+		*-v-*)
+			_d=${_t%/vs}
+			[ -f "$_d/vs" ] && _v=$(cat "$_d/vs")
+			[ -f "$_d/ks" ] && _k=$(cat "$_d/ks")
+			[ -f "$_d/cap/${_n##*-v-}.png" ] && _b=$(wc -c <"$_d/cap/${_n##*-v-}.png" | tr -d ' ')
+			;;
+		esac
+		printf 'state %s vs=%s ks=%s bytes=%s\n' "$_i" "$_v" "$_k" "$_b" >>"$DR_OBS_OUT"
+	done
+fi
 "$DR_OBS_DOCKER" "$@"
 _s=$?
 if [ "${1:-}" = rm ]; then
@@ -303,7 +359,8 @@ r6() {
 # R7: the root alias /src/. gets the real admission controls (an unexpected child variable
 # is blocked beside them, never a PASS), a valid small noncanonical manifest copy prints only
 # the distinct manifest-only line (no admission PASS, no runtime control), then the real
-# admission through the runner blocks a stale annual evidence date and retains the draft.
+# admission through the runner blocks an impossible executed Bun date and a stale annual evidence
+# date (the latter retaining the draft).
 r7() {
 	rr -- env DEV_RUN_SMOKE_CHILD_MARKER=1 scripts/s5-toolchain.sh --admission --root /src/.
 	[ "$RC" = 1 ] &&
@@ -320,6 +377,19 @@ r7() {
 	_row=${_row#'| '}
 	_id=${_row%% *}
 	_old=$(date -u -d '366 days ago' +%F) || return 1
+	# The real executed form is admitted above (the one blocked row is the env variable); an
+	# impossible executed Bun date gets its own diagnostic, then the real report is restored.
+	grep -q "^| $_id .* | executed EVID-002 2026-10-16 |\$" "$_f" || return 1
+	sed -E "/^\| $_id /s/ \| executed EVID-002 [0-9-]+ \|\$/ | executed EVID-002 2026-02-30 |/" "$_f" >"$S/report.new" &&
+		grep -q "^| $_id .* | executed EVID-002 2026-02-30 |\$" "$S/report.new" &&
+		cp "$_f" "$S/report.orig" && cat "$S/report.new" >"$_f" || return 1
+	rr -- scripts/s5-toolchain.sh --admission
+	_e=$RC
+	cat "$S/report.orig" >"$_f" || return 1
+	[ "$_e" = 1 ] &&
+		grep -qx "ADMISSION-BLOCKED $_id: recorded Bun result date 2026-02-30 is not a valid date" "$S/out" &&
+		grep -qx 'S5-ADMISSION-FAIL blocked=1 unlisted=0' "$S/out" &&
+		! grep -q '^S5-ADMISSION-PASS' "$S/out" || return 1
 	sed -E "/^\| $_id /s/ [0-9]{4}-[0-9]{2}-[0-9]{2} (https:)/ $_old \1/" "$_f" >"$S/report.new" &&
 		grep -q "^| $_id .* $_old https:" "$S/report.new" &&
 		cat "$S/report.new" >"$_f" || return 1
@@ -330,6 +400,263 @@ r7() {
 		! grep -Fq "$SENTINEL" "$DRAFTS/s5-admission.md" &&
 		[ -z "$(find "$DRAFTS" -name '*.part*' -print)" ]
 }
+
+# runid: the run id of the runner's identification line in $S/out.
+runid() { sed -n 's/^dev-run: image=.* container=boxset-dev-run-\([0-9a-f]*\) log=none$/\1/p' "$S/out"; }
+# owned_gone: no container labelled with the run id of the runner's identification line is left
+# (the producer and every validator).
+owned_gone() {
+	_r=$(runid)
+	[ -n "$_r" ] && [ -z "$(docker ps -aq --filter "label=boxset.dev-run=$_r")" ]
+}
+# capdir: a fresh capture destination under the scratch copy's own workspace.
+capdir() {
+	mkdir -p "$S/repo/.devrites/work/smoke-tools-failure" || return 1
+	printf '.devrites/work/smoke-tools-failure/screenshots-%s' "$(date -u +%Y%m%dT%H%M%SZ)"
+}
+# no_cap: the capture destination was never published.
+no_cap() { [ ! -e "$S/repo/$_cap" ] && [ ! -L "$S/repo/$_cap" ]; }
+PROBE=$S/repo/web/src/lib/toolchain-probe/Probe.svelte
+VCONF=$S/repo/web/vite.config.ts
+RUNNER=$S/repo/scripts/dev-run.sh
+# starts_one: the complete run's start records are exactly the one given tool.
+starts_one() { [ "$(grep '^S5-TOOL-START ' "$S/out")" = "S5-TOOL-START id=$1" ]; }
+# bad_probe: a probe whose compiler syntax error site carries the selected synthetic sentinel.
+bad_probe() {
+	printf '<script lang="ts">\n\tlet count = $state(0; // %s\n</script>\n\n<button type="button">{count}</button>\n' "$SENTINEL" >"$PROBE"
+}
+
+# tf_fail: a real tool (vite build) fails at a genuine compiler syntax error carrying the sentinel:
+# overall nonzero, attribution, the redacted draft keeping tool, file and line with the marker where
+# the sentinel was and the raw value absent, exactly one start record in the whole run, no capture.
+tf_fail() {
+	_cap=$(capdir) && bad_probe || return 1
+	rr --write docs/spikes/issue-drafts --capture "$_cap" -- scripts/s5-toolchain.sh --tools
+	_d=$DRAFTS/s5-tools.md
+	_down=$(($(grep -c '^S5-TOOL-START ' "$S/out") - 1))
+	[ "$RC" = 1 ] &&
+		starts_one vite-build &&
+		grep -qx 'S5-TOOL-FAIL id=vite-build exit=1 reason=vite build exited nonzero' "$S/out" &&
+		grep -qx 'S5-TOOLS-FAIL tool=vite-build exit=1 bun_only=true' "$S/out" &&
+		grep -qx 'S5-TOOLS-BLOCKED dependents=svelte-check eslint prettier vitest-browser vite-dev playwright-axe sv' "$S/out" &&
+		grep -qx 'S5-DRAFT-WRITTEN name=s5-tools.md' "$S/out" &&
+		! grep -q '^S5-TOOLS-PASS' "$S/out" &&
+		[ -s "$_d" ] &&
+		grep -q '^tool=vite-build exit=1 ' "$_d" &&
+		grep -q 'blocked dependents: svelte-check eslint prettier' "$_d" &&
+		grep -Eq 'Probe\.svelte:[0-9]+' "$_d" &&
+		grep -Fq '[REDACTED]' "$_d" &&
+		! grep -Fq "$SENTINEL" "$_d" "$S/out" &&
+		[ -z "$(find "$DRAFTS" -name '*.part*' -print)" ] &&
+		[ ! -e "$DRAFTS/s5-admission.md" ] &&
+		no_cap && ctr_gone
+}
+
+# tf_write: the draft destination is genuinely unwritable (a read-only directory the child itself
+# made): the exact write-failure marker, nonzero, no later tool, no false "written", no capture.
+tf_write() {
+	_cap=$(capdir) && bad_probe && rm -f "$DRAFTS/s5-tools.md" || return 1
+	rr --write docs/spikes/issue-drafts --capture "$_cap" -- sh -c 'mkdir -p docs/spikes/issue-drafts && chmod a-w docs/spikes/issue-drafts && exec scripts/s5-toolchain.sh --tools'
+	[ "$RC" = 1 ] &&
+		starts_one vite-build &&
+		grep -qx 'S5-DRAFT-WRITE-FAILED name=s5-tools.md' "$S/out" &&
+		! grep -q '^S5-DRAFT-WRITTEN' "$S/out" &&
+		[ ! -e "$DRAFTS/s5-tools.md" ] &&
+		no_cap && owned_gone
+}
+
+# tf_read: a nonempty diagnostic log is genuinely unreadable: the scratch vite config removes every
+# permission from the tool's own output logs, so the draft's real tail gets EACCES as the file's
+# owner. The draft already holds its nonempty header, but its construction failed: the exact
+# write-failure marker, nonzero, nothing later started, no false "written", no capture.
+tf_read() {
+	_cap=$(capdir) && bad_probe && rm -f "$DRAFTS/s5-tools.md" || return 1
+	sed -e 's/^export default defineConfig({/import { fchmodSync } from "node:fs";\nfchmodSync(1, 0);\nfchmodSync(2, 0);\nexport default defineConfig({/' "$S/vite.orig" >"$VCONF" && ! cmp -s "$S/vite.orig" "$VCONF" || return 1
+	rr --write docs/spikes/issue-drafts --capture "$_cap" -- scripts/s5-toolchain.sh --tools
+	cp "$S/vite.orig" "$VCONF" || return 1
+	[ "$RC" = 1 ] &&
+		starts_one vite-build &&
+		grep -qx 'S5-TOOL-FAIL id=vite-build exit=1 reason=vite build exited nonzero' "$S/out" &&
+		grep -Eq '^tail: .*vite-build\.(out|err).*Permission denied' "$S/out" &&
+		grep -qx 'S5-DRAFT-WRITE-FAILED name=s5-tools.md' "$S/out" &&
+		! grep -q '^S5-DRAFT-WRITTEN' "$S/out" &&
+		[ -s "$DRAFTS/s5-tools.md" ] &&
+		grep -q '^tool=vite-build exit=1 ' "$DRAFTS/s5-tools.md" &&
+		grep -Eq '^## vite-build\.(out|err) \(last 40 lines\)$' "$DRAFTS/s5-tools.md" &&
+		no_cap && owned_gone &&
+		echo "# tf_read: tail EACCES on the owned log, partial draft $(wc -c <"$DRAFTS/s5-tools.md" | tr -d ' ') bytes, S5-DRAFT-WRITE-FAILED"
+}
+
+# tf_stall: a real preview server stays alive and never completes its response body: the readiness
+# failure is named, the draft is retained and the run ends with status 1 (not the runner's 124),
+# with no later tool. No elapsed threshold: the run includes the image builds.
+tf_stall() {
+	_cap=$(capdir) && cp "$S/Probe.orig" "$PROBE" && rm -f "$DRAFTS/s5-tools.md" || return 1
+	sed -e 's/^export default defineConfig({/const stall = { name: "stall", configurePreviewServer(server) { server.middlewares.use((_, res) => { res.writeHead(200, { "content-type": "text\/html" }); res.write("<!doctype html>"); }); } };\nexport default defineConfig({/' \
+		-e 's/^\tplugins: \[/\tplugins: [stall,/' "$S/vite.orig" >"$VCONF" && ! cmp -s "$S/vite.orig" "$VCONF" || return 1
+	rr --write docs/spikes/issue-drafts --capture "$_cap" -- scripts/s5-toolchain.sh --tools
+	cp "$S/vite.orig" "$VCONF" || return 1
+	[ "$RC" = 1 ] &&
+		starts_one vite-build &&
+		grep -qx 'S5-TOOL-FAIL id=vite-build exit=3 reason=vite preview did not serve the build on loopback' "$S/out" &&
+		grep -qx 'S5-DRAFT-WRITTEN name=s5-tools.md' "$S/out" &&
+		grep -q '^tool=vite-build exit=3 ' "$DRAFTS/s5-tools.md" &&
+		no_cap && ctr_gone
+}
+
+# tf_success: the real eight-tool run succeeds with a pre-seeded host draft: it writes no new draft,
+# leaves the pre-seeded bytes unchanged and publishes the owned scratch captures.
+tf_success() {
+	_cap=$(capdir) && printf 'preseeded host draft\n' >"$S/seed" && cp "$S/seed" "$DRAFTS/s5-tools.md" || return 1
+	rr --write docs/spikes/issue-drafts --capture "$_cap" -- scripts/s5-toolchain.sh --tools
+	[ "$RC" = 0 ] &&
+		grep -qx 'S5-TOOLS-PASS tools=8 failed=0 skipped=0 bun_only=true' "$S/out" &&
+		! grep -q -e '^S5-DRAFT-WRITTEN' -e '^S5-DRAFT-WRITE-FAILED' -e '^S5-TOOL-FAIL' "$S/out" &&
+		cmp -s "$S/seed" "$DRAFTS/s5-tools.md" &&
+		[ ! -e "$DRAFTS/s5-admission.md" ] &&
+		grep -q "^DEV-RUN-CAPTURE-PASS files=4 .* dir=$_cap " "$S/out" &&
+		[ "$(find "$S/repo/$_cap" -mindepth 1 -type f | wc -l | tr -d ' ')" = 5 ] &&
+		owned_gone
+}
+
+# cap_rej WORD ARGS...: a zero-exit child leaving real capture input is rejected with WORD: runner
+# status 125, no published capture, no owned container left, and the observer saw no raw value in
+# the runner's scratch (the raw producer bytes are never staged on the host).
+cap_rej() {
+	_w=$1
+	shift
+	_cap=$(capdir) || return 1
+	obs_rr --capture "$_cap" -- "$@"
+	[ "$RC" = 125 ] && grep -qx "dev-run: $_w" "$S/out" && ! grep -q '^DEV-RUN-CAPTURE-PASS' "$S/out" &&
+		! grep -Fq "$SENTINEL" "$S/out" && no_cap && owned_gone && obs_ok
+}
+# tf_cap: the runner's capture rejection table, each case a real child input.
+tf_cap() {
+	mkdir -p "$S/repo/testdata" || return 1
+	obs_setup && printf 'package main\n\nimport (\n\t"image"\n\t"image/png"\n\t"os"\n\t"strconv"\n)\n\nfunc main() {\n\tw, _ := strconv.Atoi(os.Args[1])\n\th, _ := strconv.Atoi(os.Args[2])\n\tch, _ := strconv.ParseUint(os.Args[3], 16, 64)\n\tif os.Args[4] == "flip" {\n\t\tch = ^ch\n\t}\n\timg := image.NewNRGBA(image.Rect(0, 0, w, h))\n\tfor i := range img.Pix {\n\t\timg.Pix[i] = 255\n\t}\n\tfor k := 0; k < 64; k++ {\n\t\tif ch>>(63-k)&1 == 0 {\n\t\t\tcontinue\n\t\t}\n\t\tfor y := h - 16 + 8*(k/33); y < h-8+8*(k/33); y++ {\n\t\t\tfor x := 8 * (k %% 33); x < 8*(k%%33)+8; x++ {\n\t\t\t\tif x >= w || y >= h {\n\t\t\t\t\tcontinue\n\t\t\t\t}\n\t\t\t\ti := img.PixOffset(x, y)\n\t\t\t\timg.Pix[i], img.Pix[i+1], img.Pix[i+2] = 0, 0, 0\n\t\t\t}\n\t\t}\n\t}\n\tif png.Encode(os.Stdout, img) != nil {\n\t\tos.Exit(1)\n\t}\n}\n' >"$S/repo/testdata/pnggen.go" || return 1
+	cap_rej capture_missing true &&
+		cap_rej capture_missing sh -c ': >/capture/dev-desktop.png' &&
+		cap_rej capture_copy_failed sh -c 'ln -s /etc/passwd /capture/dev-desktop.png' &&
+		cap_rej capture_oversize sh -c 'head -c 3145728 /dev/zero >/capture/dev-desktop.png' &&
+		cap_rej capture_not_png sh -c 'printf "%s\n" "$1" >/capture/dev-desktop.png' x "$SENTINEL" &&
+		cap_rej capture_dimensions sh -c 'go run testdata/pnggen.go 100 100 "$BOXSET_CAPTURE_CHALLENGE" keep >/capture/dev-desktop.png' &&
+		cap_rej capture_challenge_mismatch sh -c 'go run testdata/pnggen.go 1440 900 "$BOXSET_CAPTURE_CHALLENGE" flip >/capture/dev-desktop.png' || return 1
+	# A selected value that also occurs in Docker's missing-file sentence must not hide the missing
+	# capture, and the retained copy diagnostic is redacted, never raw.
+	RRENV=BOXSET_SECRET_TEST=file
+	cap_rej capture_missing true
+	_e=$?
+	RRENV=
+	[ "$_e" = 0 ] && obs_diag
+}
+
+# tf_env: missing or malformed capture variables (the challenge and the directory, each missing or
+# malformed beside a valid runner-provided sibling) stop --tools with the fixed word and publish nothing.
+tf_env() {
+	for _v in 'env -u BOXSET_CAPTURE_CHALLENGE' 'env -u BOXSET_CAPTURE_DIR' 'env BOXSET_CAPTURE_CHALLENGE=zzzzzzzzzzzzzzzz' 'env BOXSET_CAPTURE_DIR=/wrong'; do
+		_cap=$(capdir) || return 1
+		rr --capture "$_cap" -- $_v scripts/s5-toolchain.sh --tools
+		[ "$RC" = 2 ] && grep -qx 'S5-TOOLS-CAPTURE-UNSET' "$S/out" && ! grep -q '^S5-TOOL-START' "$S/out" && no_cap && owned_gone || return 1
+	done
+}
+
+# tf_log: a validator created by the real Docker with a non-none log driver (a one-token change in
+# the scratch runner copy) is rejected before it starts: fixed word, no validator observation, no
+# capture; and the passive observer, reading the real Docker back before the owned validator is
+# removed, sees it created and never started (zero StartedAt).
+tf_log() {
+	_cap=$(capdir) || return 1
+	[ -d "$S/obs" ] || obs_setup || return 1
+	sed '/--memory 64m/s/--log-driver=none/--log-driver=local/' "$S/runner.orig" >"$RUNNER" &&
+		[ "$(grep -c -- '--log-driver=local' "$RUNNER")" = 1 ] || return 1
+	RRENV=DR_OBS_STATE=1
+	obs_rr --capture "$_cap" -- true
+	_e=$RC
+	RRENV=
+	cp "$S/runner.orig" "$RUNNER" || return 1
+	_r=$(runid)
+	[ "$_e" = 125 ] && grep -qx 'dev-run: log_driver_invalid' "$S/out" && ! grep -q 'dev-run: validator=' "$S/out" &&
+		! grep -q '^DEV-RUN-CAPTURE-PASS' "$S/out" && no_cap && owned_gone &&
+		grep -qx "state /boxset-dev-run-$_r-v-dev-desktop created 0001-01-01T00:00:00Z 0 $_r vs=- ks=- bytes=-" "$S/obs.tok" &&
+		echo "# tf_log: owned validator observed created, StartedAt=0001-01-01T00:00:00Z, before removal"
+}
+
+# tf_sink: after a real validator exit 0 the host sink fails partway while still draining its input
+# (a real size-limited write in the scratch runner copy, the file-size signal ignored). The same
+# child through the unchanged runner is first accepted by the validator (it stops only at the next,
+# missing, file). The passive observer then reads the faulted validator back before its removal:
+# exited 0, attachment status 0, a nonzero sink status and a nonempty output shorter than the
+# accepted one; only then the fixed word, no publication and no pass line.
+tf_sink() {
+	_cap=$(capdir) || return 1
+	[ -d "$S/obs" ] || obs_setup || return 1
+	RRENV=DR_OBS_STATE=1
+	obs_rr --capture "$_cap" -- sh -c 'go run testdata/pnggen.go 1440 900 "$BOXSET_CAPTURE_CHALLENGE" keep >/capture/dev-desktop.png'
+	RRENV=
+	grep -qx 'dev-run: capture_missing' "$S/out" && grep -q 'dev-run: validator=dev-mobile ' "$S/out" || return 1
+	_r=$(runid)
+	_vb=$(sed -n "s#^state /boxset-dev-run-$_r-v-dev-desktop exited [^ ]* 0 $_r vs=0 ks=0 bytes=\([1-9][0-9]*\)\$#\1#p" "$S/obs.tok")
+	[ -n "$_vb" ] || return 1
+	sed 's#{ head -c "\$DR_SINK" >"\$DR_OUT";#{ (ulimit -f 1; trap "" XFSZ; head -c "$DR_SINK" || { _k=$?; cat >/dev/null; exit "$_k"; }) >"$DR_OUT";#' "$S/runner.orig" >"$RUNNER" &&
+		[ "$(grep -c 'ulimit -f 1; trap "" XFSZ' "$RUNNER")" = 1 ] || return 1
+	RRENV=DR_OBS_STATE=1
+	obs_rr --capture "$_cap" -- sh -c 'go run testdata/pnggen.go 1440 900 "$BOXSET_CAPTURE_CHALLENGE" keep >/capture/dev-desktop.png'
+	_e=$RC
+	RRENV=
+	cp "$S/runner.orig" "$RUNNER" || return 1
+	_r=$(runid)
+	set -- $(sed -n "s#^state /boxset-dev-run-$_r-v-dev-desktop exited [^ ]* 0 $_r vs=0 ks=\([1-9][0-9]*\) bytes=\([1-9][0-9]*\)\$#\1 \2#p" "$S/obs.tok")
+	[ $# = 2 ] && [ "$2" -lt "$_vb" ] &&
+		[ "$_e" = 125 ] && grep -qx 'dev-run: capture_copy_failed' "$S/out" && ! grep -q 'dev-run: validator=dev-mobile ' "$S/out" &&
+		! grep -q '^DEV-RUN-CAPTURE-PASS' "$S/out" && no_cap && owned_gone &&
+		echo "# tf_sink: faulted validator exit 0, attachment 0, sink status $1, output $2 of $_vb bytes, then capture_copy_failed"
+}
+
+# tf_big: the real vite build fails with a readable stderr log whose last 40 lines are far over the
+# draft's 6000-byte cap and over a 64 KiB pipe buffer (the scratch vite config prints 64 numbered
+# 4000-byte lines before the real syntax error). The draft's own first tail line proves how many
+# whole numbered lines the tail held, so a tail too small to force the drain fails here. The tool's
+# section is then exactly the 6000-byte cap, the draft is written (never the write-failure marker:
+# the tail's status stays zero), the tool and exit are attributed, nothing later starts and nothing
+# is captured.
+tf_big() {
+	_cap=$(capdir) && bad_probe && rm -f "$DRAFTS/s5-tools.md" || return 1
+	sed -e 's/^export default defineConfig({/for (let i = 0; i < 64; i++) console.error("OVERCAP-" + i + "-" + "x".repeat(4000));\nexport default defineConfig({/' "$S/vite.orig" >"$VCONF" && ! cmp -s "$S/vite.orig" "$VCONF" || return 1
+	rr --write docs/spikes/issue-drafts --capture "$_cap" -- scripts/s5-toolchain.sh --tools
+	cp "$S/vite.orig" "$VCONF" || return 1
+	_d=$DRAFTS/s5-tools.md
+	[ -s "$_d" ] && sed -n '/^## vite-build\.err (last 40 lines)$/,/^Owner review:/p' "$_d" | sed '1d;$d' >"$S/sec" || return 1
+	_i=$(sed -n '1s/^OVERCAP-\([0-9][0-9]*\)-x\{4000\}$/\1/p' "$S/sec")
+	[ -n "$_i" ] && [ "$_i" -lt 64 ] && _tail=$(((64 - _i) * 4000)) && [ "$_tail" -gt 65536 ] || return 1
+	[ "$RC" = 1 ] &&
+		starts_one vite-build &&
+		grep -qx 'S5-TOOL-FAIL id=vite-build exit=1 reason=vite build exited nonzero' "$S/out" &&
+		grep -qx 'S5-TOOLS-FAIL tool=vite-build exit=1 bun_only=true' "$S/out" &&
+		grep -qx 'S5-TOOLS-BLOCKED dependents=svelte-check eslint prettier vitest-browser vite-dev playwright-axe sv' "$S/out" &&
+		grep -qx 'S5-DRAFT-WRITTEN name=s5-tools.md' "$S/out" &&
+		! grep -q -e '^S5-DRAFT-WRITE-FAILED' -e '^S5-TOOLS-PASS' -e '^tail:' "$S/out" &&
+		grep -q '^tool=vite-build exit=1 ' "$_d" &&
+		[ "$(wc -c <"$S/sec" | tr -d ' ')" = 6002 ] &&
+		[ "$(wc -c <"$_d" | tr -d ' ')" -lt 8000 ] &&
+		! grep -Fq "$SENTINEL" "$_d" "$S/out" &&
+		no_cap && owned_gone &&
+		echo "# tf_big: tail held >= $_tail bytes in whole numbered lines from OVERCAP-$_i, section capped at 6000 bytes, draft $(wc -c <"$_d" | tr -d ' ') bytes written"
+}
+
+if [ "$MODE" = tools-failure ]; then
+	cp "$PROBE" "$S/Probe.orig" && cp "$VCONF" "$S/vite.orig" && cp "$RUNNER" "$S/runner.orig" || exit 2
+	for _s in tf_fail tf_write tf_read tf_stall tf_success tf_cap tf_env tf_log tf_sink tf_big; do
+		if "$_s"; then
+			echo "ok $_s"
+		else
+			echo "not ok $_s"
+			head -c 3000 "$S/out" | sed 's/^/# /'
+			exit 1
+		fi
+	done
+	echo "S5-FAILURE-PROOF-PASS draft=retained downstream=$_down"
+	exit 0
+fi
 
 PASS=0
 for n in 1 2 3 4 5 6 7; do

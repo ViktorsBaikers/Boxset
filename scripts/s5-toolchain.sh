@@ -17,13 +17,27 @@
 # `S5-MANIFEST-ONLY-PASS`, never admission. `--facts` prints
 # the installed per-package facts a row's licence cell needs; it admits nothing.
 # The support-list block is immutable report data; this script never fetches.
+#
+# `--tools` runs the eight web tools (vite-build, svelte-check, eslint, prettier,
+# vitest-browser, vite-dev, playwright-axe, sv) with Bun against the synthetic probe
+# page in /src/web, in that order, and stops at the first failing tool (nothing after
+# it runs):
+#   scripts/dev-run.sh --write docs/spikes/issue-drafts --capture DIR -- scripts/s5-toolchain.sh --tools
+# It requires the runner's BOXSET_CAPTURE_DIR=/capture and 16-hex
+# BOXSET_CAPTURE_CHALLENGE (else S5-TOOLS-CAPTURE-UNSET, status 2). Each tool prints
+# `S5-TOOL id=... exit=0 bun=<version> ...` with its own positive assertions and
+# `S5-TOOLS-PASS tools=8 failed=0 skipped=0 bun_only=true` prints only when all eight
+# passed and the four capture files exist. A failure prints `S5-TOOL-FAIL`,
+# `S5-TOOLS-FAIL` and `S5-TOOLS-BLOCKED`, writes a bounded owner-reviewable draft
+# straight to /src/docs/spikes/issue-drafts/s5-tools.md (no temporary file, every
+# write status checked) and exits 1; a normal pass writes none and nothing is filed.
 set -u
 set -f
 LC_ALL=C
 export LC_ALL
 
 usage() {
-	printf '%s\n' 'usage: s5-toolchain.sh (--admission|--facts) [--root DIR]' >&2
+	printf '%s\n' 'usage: s5-toolchain.sh (--admission|--facts|--tools) [--root DIR]' >&2
 	exit 2
 }
 
@@ -33,11 +47,7 @@ while [ $# -gt 0 ]; do
 	case $1 in
 	--admission) MODE=admission ;;
 	--facts) MODE=facts ;;
-	--tools)
-		# Owned by the SLICE that runs the eight web tools; never a success stub.
-		printf '%s\n' 'S5-TOOLS-UNAVAILABLE: the eight-tool Bun execution is not part of toolchain admission' >&2
-		exit 2
-		;;
+	--tools) MODE=tools ;;
 	--root)
 		shift
 		ROOT=${1:-}
@@ -182,6 +192,300 @@ if [ "$MODE" = facts ]; then
 			"$id" "${info%%|*}" "$(printf '%s' "$info" | cut -d'|' -f2)" "$(printf '%s' "$info" | cut -d'|' -f3)" \
 			"$(printf '%s' "$info" | cut -d'|' -f4)" "$1" "$(dep5_set "$cf")"
 	done
+	exit 0
+fi
+
+# --- tools: the eight web tools, executed by Bun, against the synthetic probe -----------------
+# Order is fixed; the first failing tool stops the run (nothing after it starts) and its
+# bounded draft is written in place to the fixed name. Servers listen on container loopback only.
+if [ "$MODE" = tools ]; then
+	[ "$ROOT" = /src ] || usage
+	TDRAFT=/src/docs/spikes/issue-drafts/s5-tools.md
+	WEB=/src/web
+	CAPNAMES='dev-desktop dev-mobile preview-desktop preview-mobile'
+	ORDER='vite-build svelte-check eslint prettier vitest-browser vite-dev playwright-axe sv'
+	CHAL=${BOXSET_CAPTURE_CHALLENGE:-}
+	case ${BOXSET_CAPTURE_DIR:-}:$CHAL in
+	/capture:????????????????) ;;
+	*) CHAL= ;;
+	esac
+	case $CHAL in
+	'' | *[!0-9a-f]*)
+		printf 'S5-TOOLS-CAPTURE-UNSET\n'
+		exit 2
+		;;
+	esac
+	BUN_V=$(sed -n 's/^ARG BUN_VERSION=//p' "$DOCKERFILE")
+	{ [ -n "$BUN_V" ] && [ "$(bun --version 2>&1)" = "$BUN_V" ]; } || {
+		printf 'S5-TOOLS-BUN-MISMATCH\n'
+		exit 125
+	}
+	RES=$T/res
+	mkdir "$RES" || exit 125
+	: >"$RES/ident"
+	# Every Bun process of a tool (the tool itself and any worker it starts) records its
+	# runtime through this preload; the tool name comes from S5_TOOL in its environment.
+	cat >"$RES/ident.ts" <<'EOF'
+import { appendFileSync } from 'node:fs';
+appendFileSync(
+	process.env.S5_IDENT_FILE ?? '/dev/null',
+	`${process.env.S5_TOOL ?? '-'} ${process.pid} ${process.versions.bun ?? 'none'}\n`
+);
+EOF
+	S5_IDENT_FILE=$RES/ident
+	BUN_OPTIONS="--preload $RES/ident.ts"
+	export S5_IDENT_FILE BUN_OPTIONS
+	PIDS=
+	stop_servers() {
+		for _p in $PIDS; do kill "$_p" 2>/dev/null; done
+		for _p in $PIDS; do
+			wait "$_p" 2>/dev/null
+			printf 'S5-SERVER-STOPPED pid=%s status=%s\n' "$_p" "$?"
+		done
+		PIDS=
+	}
+	trap 'stop_servers >/dev/null; rm -rf "$T"' EXIT
+	bin() { readlink -f "$WEB/node_modules/.bin/$1"; }
+	# run TOOL LOG TIMEOUT COMMAND...: stdout and stderr to $RES/LOG.out and $RES/LOG.err.
+	run() {
+		_id=$1
+		_log=$2
+		_to=$3
+		shift 3
+		S5_TOOL=$_id timeout --foreground --kill-after=5s "$_to" "$@" >"$RES/$_log.out" 2>"$RES/$_log.err" </dev/null
+	}
+	# start_server TOOL LOG COMMAND...: a background server; sets SRVPID.
+	start_server() {
+		_tool=$1
+		_log=$2
+		shift 2
+		S5_TOOL=$_tool "$@" >"$RES/$_log.out" 2>"$RES/$_log.err" </dev/null &
+		SRVPID=$!
+		PIDS="$PIDS $SRVPID"
+	}
+	# http_has URL NEEDLE [SECONDS]: a successful response whose body holds NEEDLE ('' = any body),
+	# request and body together bounded by SECONDS (default 30).
+	http_has() {
+		env S5_TOOL=control U="$1" N="$2" timeout "${3:-30}" bun -e 'const r = await fetch(process.env.U); const t = await r.text(); process.exit(r.ok && t.includes(process.env.N) ? 0 : 1)' >/dev/null 2>&1
+	}
+	# wait_http URL PID: 0 when ready, 2 when the server died, 3 when 60 s of elapsed time (every
+	# request and body wait included) pass without a ready response.
+	wait_http() {
+		_end=$(($(date +%s) + 60))
+		while :; do
+			kill -0 "$2" 2>/dev/null || return 2
+			_left=$((_end - $(date +%s)))
+			[ "$_left" -gt 0 ] || return 3
+			http_has "$1" '' $((_left < 5 ? _left : 5)) && return 0
+			sleep 0.5
+		done
+	}
+	CUR=
+	CMD=
+	DONE=0
+	IDENT=
+	start() {
+		CUR=$1
+		CMD=$2
+		printf 'S5-TOOL-START id=%s\n' "$1"
+	}
+	# ident ID MINPROCESSES: every identity record of the tool is the admitted Bun.
+	ident() {
+		_n=$(grep -c "^$1 " "$RES/ident")
+		_bad=$(grep "^$1 " "$RES/ident" | grep -vc " $BUN_V\$")
+		_pids=$(grep "^$1 " "$RES/ident" | cut -d' ' -f2 | LC_ALL=C sort -u | wc -l | tr -d ' ')
+		IDENT="records=$_n processes=$_pids"
+		{ [ "$_bad" = 0 ] && [ "$_pids" -ge "$2" ]; }
+	}
+	pass() {
+		DONE=$((DONE + 1))
+		printf 'S5-TOOL id=%s exit=0 bun=%s %s %s\n' "$CUR" "$BUN_V" "$IDENT" "$1"
+	}
+	# draft_body LOG...: the failed-tool draft on stdout; nonzero when any of its writes or reads
+	# fails. Each log's tail is read by its own producer, whose status is kept apart from the 6000-byte
+	# consumer's; that consumer drains what it does not emit, so the cap never breaks the producer.
+	draft_body() {
+		printf '# S5 tools failed\n\n' &&
+			printf 'tool=%s exit=%s bun=%s bun_only=%s\n' "$CUR" "$_fx" "$BUN_V" "$_bo" &&
+			printf 'reason: %s\n' "$_why" &&
+			printf 'command: %s\n' "$CMD" &&
+			printf 'blocked dependents: %s\n\n' "${_blocked:-none}" || return 1
+		for _l in "$@"; do
+			for _s in out err; do
+				[ -s "$RES/$_l.$_s" ] || continue
+				printf '## %s.%s (last 40 lines)\n' "$_l" "$_s" || return 1
+				rm -f "$RES/ts" || return 1
+				{ tail -n 40 "$RES/$_l.$_s"; printf '%s' "$?" >"$RES/ts"; } | { head -c 6000; _k=$?; cat >/dev/null; exit "$_k"; } || return 1
+				[ "$(cat "$RES/ts" 2>/dev/null)" = 0 ] || return 1
+				printf '\n' || return 1
+			done
+		done
+		printf '\nOwner review: this draft is never filed by agents; stack, pin or policy replacement needs the owner.\n'
+	}
+	# fail EXIT REASON LOG...: report, write the draft in place, stop; nothing after runs.
+	fail() {
+		_fx=$1
+		_why=$2
+		shift 2
+		stop_servers
+		_blocked=
+		_seen=0
+		for _t in $ORDER; do
+			[ "$_seen" = 0 ] || _blocked="$_blocked${_blocked:+ }$_t"
+			[ "$_t" != "$CUR" ] || _seen=1
+		done
+		_bo=true
+		if command -v node >/dev/null 2>&1 || grep -q ' none$' "$RES/ident"; then _bo=false; fi
+		printf 'S5-TOOL-FAIL id=%s exit=%s reason=%s\n' "$CUR" "$_fx" "$_why"
+		find "$RES" -name '*.out' -exec grep -h 'S5-CAPTURE-VIEWPORT-MISMATCH name=' {} + 2>/dev/null | head -n 4
+		draft_body "$@" | head -c 8000
+		printf 'S5-TOOLS-FAIL tool=%s exit=%s bun_only=%s\n' "$CUR" "$_fx" "$_bo"
+		printf 'S5-TOOLS-BLOCKED dependents=%s\n' "${_blocked:-none}"
+		# The draft is generated straight into the fixed name (no intermediate file): the
+		# construction status and the capped sink's status are both checked.
+		rm -f "$RES/gs" "$RES/ks"
+		if mkdir -p "${TDRAFT%/*}" &&
+			{ { draft_body "$@"; printf '%s' "$?" >"$RES/gs"; } | { head -c 60000 >"$TDRAFT"; printf '%s' "$?" >"$RES/ks"; cat >/dev/null; }; } &&
+			[ "$(cat "$RES/gs" 2>/dev/null)" = 0 ] && [ "$(cat "$RES/ks" 2>/dev/null)" = 0 ] && [ -s "$TDRAFT" ]; then
+			printf 'S5-DRAFT-WRITTEN name=s5-tools.md\n'
+		else
+			printf 'S5-DRAFT-WRITE-FAILED name=s5-tools.md\n'
+		fi
+		exit 1
+	}
+	cd "$WEB" || exit 125
+	VITE=$(bin vite)
+
+	# 1. vite-build: production build, then a loopback preview of that build.
+	start vite-build 'bun vite build; bun vite preview --host 127.0.0.1 --port 4173 (loopback check)'
+	run vite-build vite-build 240 bun "$VITE" build
+	_st=$?
+	[ "$_st" = 0 ] || fail "$_st" 'vite build exited nonzero' vite-build
+	[ -f build/index.html ] || fail 1 'build/index.html is missing' vite-build
+	_js=$(find build/_app -type f -name '*.js' 2>/dev/null | wc -l | tr -d ' ')
+	[ "$_js" -ge 1 ] || fail 1 'no JavaScript chunk was emitted' vite-build
+	grep -rqF 'Add one activation' build/_app || fail 1 'the probe button label is not in the built output' vite-build
+	_o=$(env S5_TOOL=control bun -e 'import { m } from "./.svelte-kit/paraglide/messages.js"; const en = await Bun.file("messages/en.json").json(); const k = Object.keys(en); console.log(k.length, k.every((x) => typeof m[x] === "function" && m[x]() === en[x]))' 2>&1)
+	[ "$_o" = '3 true' ] || fail 1 "the generated Paraglide messages do not return the en.json values ($_o)" vite-build
+	start_server vite-build preview-check bun "$VITE" preview --host 127.0.0.1 --port 4173 --strictPort
+	wait_http http://127.0.0.1:4173/ "$SRVPID"
+	_st=$?
+	[ "$_st" = 0 ] || fail "$_st" 'vite preview did not serve the build on loopback' vite-build preview-check
+	http_has http://127.0.0.1:4173/ '__sveltekit' || fail 1 'vite preview did not serve the SvelteKit shell' vite-build preview-check
+	stop_servers >/dev/null
+	ident vite-build 1 || fail 1 'vite-build did not run on Bun only' vite-build
+	pass "build_js_files=$_js preview=served"
+
+	# 2. svelte-check: sync first, then a threshold-warning check that must count files.
+	start svelte-check 'bun svelte-kit sync; bun svelte-check --tsconfig ./tsconfig.json --output machine --threshold warning --fail-on-warnings'
+	run svelte-check sync 120 bun "$(bin svelte-kit)" sync
+	_st=$?
+	[ "$_st" = 0 ] || fail "$_st" 'svelte-kit sync exited nonzero' sync
+	run svelte-check svelte-check 240 bun "$(bin svelte-check)" --tsconfig ./tsconfig.json --output machine --threshold warning --fail-on-warnings
+	_st=$?
+	[ "$_st" = 0 ] || fail "$_st" 'svelte-check exited nonzero' svelte-check
+	set -- $(sed -n 's/^[0-9]* COMPLETED \([0-9]*\) FILES \([0-9]*\) ERRORS \([0-9]*\) WARNINGS.*/\1 \2 \3/p' "$RES/svelte-check.out")
+	{ [ "${1:-0}" -ge 3 ] && [ "${2:-1}" = 0 ] && [ "${3:-1}" = 0 ]; } || fail 1 "svelte-check summary files=${1:-?} errors=${2:-?} warnings=${3:-?}" svelte-check
+	ident svelte-check 1 || fail 1 'svelte-check did not run on Bun only' svelte-check
+	pass "files=$1 errors=0 warnings=0"
+
+	# 3. eslint: zero findings over a positive file count, and a planted defect is rejected.
+	start eslint 'bun eslint --max-warnings 0 --format json .; bun eslint --stdin --stdin-filename e2e/control.ts'
+	run eslint eslint 240 bun "$(bin eslint)" --max-warnings 0 --format json .
+	_st=$?
+	[ "$_st" = 0 ] || fail "$_st" 'eslint exited nonzero' eslint
+	_o=$(env S5_TOOL=control F="$RES/eslint.out" bun -e 'const r = JSON.parse(await Bun.file(process.env.F).text()); console.log(r.length, r.reduce((a, x) => a + x.errorCount, 0), r.reduce((a, x) => a + x.warningCount, 0))')
+	set -- $_o
+	{ [ "${1:-0}" -ge 5 ] && [ "${2:-1}" = 0 ] && [ "${3:-1}" = 0 ]; } || fail 1 "eslint summary files=${1:-?} errors=${2:-?} warnings=${3:-?}" eslint
+	_f=$1
+	printf 'const unused = 1;\n' | env S5_TOOL=eslint timeout 120 bun "$(bin eslint)" --stdin --stdin-filename e2e/control.ts --format json >"$RES/eslint-control.out" 2>"$RES/eslint-control.err"
+	_st=$?
+	{ [ "$_st" = 1 ] && grep -q 'no-unused-vars' "$RES/eslint-control.out"; } || fail 1 "planted unused variable not rejected (status $_st)" eslint-control
+	ident eslint 1 || fail 1 'eslint did not run on Bun only' eslint
+	pass "files=$_f errors=0 warnings=0 control=rejected"
+
+	# 4. prettier: check passes and the same configuration really reformats a planted input.
+	start prettier 'bun prettier --check src e2e messages and the config files'
+	run prettier prettier 120 bun "$(bin prettier)" --check 'src/**/*.{ts,svelte}' 'e2e/**/*.ts' 'messages/*.json' '*.config.{js,ts}'
+	_st=$?
+	[ "$_st" = 0 ] || fail "$_st" 'prettier --check exited nonzero' prettier
+	grep -qF 'All matched files use Prettier code style!' "$RES/prettier.out" || fail 1 'prettier did not report the matched files as formatted' prettier
+	ident prettier 1 || fail 1 'prettier did not run on Bun only' prettier
+	pass 'check=formatted'
+
+	# 5. vitest browser mode: real chromium-headless-shell tests with positive counts.
+	start vitest-browser 'bun vitest run --reporter=json --outputFile=<report>'
+	run vitest-browser vitest 300 bun "$(bin vitest)" run --reporter=json --outputFile="$RES/vitest.json"
+	_st=$?
+	[ "$_st" = 0 ] || fail "$_st" 'vitest exited nonzero' vitest
+	_o=$(env S5_TOOL=control F="$RES/vitest.json" bun -e 'const r = JSON.parse(await Bun.file(process.env.F).text()); console.log(r.numTotalTests, r.numPassedTests, r.numFailedTests, r.numPendingTests ?? 0)')
+	set -- $_o
+	{ [ "${1:-0}" -ge 2 ] && [ "${2:-0}" = "${1:-1}" ] && [ "${3:-1}" = 0 ] && [ "${4:-1}" = 0 ]; } || fail 1 "vitest summary total=${1:-?} passed=${2:-?} failed=${3:-?} skipped=${4:-?}" vitest
+	ident vitest-browser 1 || fail 1 'vitest did not run on Bun only' vitest
+	pass "tests=$1 passed=$2 failed=0 skipped=0 browser=chromium-headless-shell"
+
+	# 6. vite dev: the dev server transforms the probe module on loopback (kept up for the browser run).
+	start vite-dev 'bun vite dev --host 127.0.0.1 --port 5173 --strictPort'
+	start_server vite-dev vite-dev bun "$VITE" dev --host 127.0.0.1 --port 5173 --strictPort
+	_dev=$SRVPID
+	wait_http http://127.0.0.1:5173/ "$_dev"
+	_st=$?
+	[ "$_st" = 0 ] || fail "$_st" 'vite dev did not serve on loopback' vite-dev
+	http_has http://127.0.0.1:5173/src/lib/toolchain-probe/Probe.svelte 'svelte_internal_client' || fail 1 'vite dev did not transform the probe component' vite-dev
+	ident vite-dev 1 || fail 1 'vite dev did not run on Bun only' vite-dev
+	pass 'served=transformed-probe-module'
+
+	# 7. playwright + axe: dev and preview, desktop and mobile, with four captures.
+	start playwright-axe 'bun playwright test (dev http://127.0.0.1:5173, preview http://127.0.0.1:4173)'
+	start_server vite-build preview bun "$VITE" preview --host 127.0.0.1 --port 4173 --strictPort
+	wait_http http://127.0.0.1:4173/ "$SRVPID"
+	_st=$?
+	[ "$_st" = 0 ] || fail "$_st" 'vite preview did not serve the build on loopback' preview
+	run playwright-axe playwright 400 env S5_DEV_URL=http://127.0.0.1:5173 S5_PREVIEW_URL=http://127.0.0.1:4173 bun "$(bin playwright)" test
+	_st=$?
+	[ "$_st" = 0 ] || fail "$_st" 'playwright test exited nonzero' playwright
+	_o=$(env S5_TOOL=control F="$WEB/test-results/report.json" bun -e 'const r = JSON.parse(await Bun.file(process.env.F).text()); const s = r.stats; console.log(s.expected, s.unexpected, s.skipped, s.flaky)')
+	set -- $_o
+	{ [ "${1:-0}" -ge 5 ] && [ "${2:-1}" = 0 ] && [ "${3:-1}" = 0 ] && [ "${4:-1}" = 0 ]; } || fail 1 "playwright summary passed=${1:-?} failed=${2:-?} skipped=${3:-?} flaky=${4:-?}" playwright
+	for _n in $CAPNAMES; do
+		{ [ -f "/capture/$_n.png" ] && [ ! -L "/capture/$_n.png" ] && [ -s "/capture/$_n.png" ]; } || fail 1 "capture $_n.png was not written" playwright
+	done
+	ident playwright-axe 2 || fail 1 'playwright did not run its runner and worker on Bun only' playwright
+	pass "tests=$1 failed=0 skipped=0 axe_violations=0 captures=4"
+	stop_servers
+
+	# 8. sv: noninteractive TypeScript minimal project in a disposable directory, then sync and check it.
+	start sv 'bun sv create <tmp> --template minimal --types ts --no-add-ons --no-install --no-dir-check; bun svelte-kit sync; bun svelte-check'
+	SVP=$T/svproj
+	run sv sv-create 120 bun "$(bin sv)" create "$SVP" --template minimal --types ts --no-add-ons --no-install --no-dir-check
+	_st=$?
+	[ "$_st" = 0 ] || fail "$_st" 'sv create exited nonzero' sv-create
+	for _g in package.json vite.config.ts tsconfig.json src/routes/+page.svelte; do
+		[ -f "$SVP/$_g" ] || fail 1 "sv did not generate $_g" sv-create
+	done
+	grep -q '"typescript"' "$SVP/package.json" || fail 1 'sv did not generate a TypeScript project' sv-create
+	# The generated project is checked with the already installed packages; its default adapter
+	# package is not part of the admitted set, so the disposable copy uses the admitted one.
+	sed -i 's#@sveltejs/adapter-auto#@sveltejs/adapter-static#' "$SVP/vite.config.ts"
+	# Packages are linked one by one: Kit writes its generated $app/tsconfig.json next to them, and
+	# a whole-directory link would put that file (and its relative paths) into the probe's tree.
+	mkdir "$SVP/node_modules" || fail 1 'could not prepare the generated project packages' sv-create
+	find "$WEB/node_modules" -mindepth 1 -maxdepth 1 ! -name '$app' | while IFS= read -r _e; do ln -s "$_e" "$SVP/node_modules/${_e##*/}"; done
+	(cd "$SVP" && run sv sv-sync 120 bun "$(bin svelte-kit)" sync)
+	_st=$?
+	[ "$_st" = 0 ] || fail "$_st" 'svelte-kit sync of the generated project exited nonzero' sv-sync
+	(cd "$SVP" && run sv sv-check 240 bun "$(bin svelte-check)" --tsconfig ./tsconfig.json --output machine --threshold warning --fail-on-warnings)
+	_st=$?
+	[ "$_st" = 0 ] || fail "$_st" 'svelte-check of the generated project exited nonzero' sv-check
+	set -- $(sed -n 's/^[0-9]* COMPLETED \([0-9]*\) FILES \([0-9]*\) ERRORS \([0-9]*\) WARNINGS.*/\1 \2 \3/p' "$RES/sv-check.out")
+	{ [ "${1:-0}" -ge 1 ] && [ "${2:-1}" = 0 ] && [ "${3:-1}" = 0 ]; } || fail 1 "generated project check files=${1:-?} errors=${2:-?} warnings=${3:-?}" sv-check
+	ident sv 1 || fail 1 'sv did not run on Bun only' sv-create
+	pass "generated_files=4 template=minimal types=ts check_files=$1 errors=0"
+
+	CUR=sv
+	if command -v node >/dev/null 2>&1 || grep -q ' none$' "$RES/ident"; then fail 1 'a non-Bun runtime was observed' sv-create; fi
+	[ "$DONE" = 8 ] || fail 1 "only $DONE of 8 tools passed" sv-create
+	printf 'S5-TOOLS-PASS tools=%s failed=0 skipped=0 bun_only=true\n' "$DONE"
 	exit 0
 fi
 
@@ -484,7 +788,11 @@ while IFS='|' read -r _ id kind category name version pin source publisher licen
 		if ! grep -F "\"$name@$version\"" "$LOCK" | grep -Fq "$pin"; then
 			block "$id" "web/bun.lock lacks $name@$version with the recorded integrity"
 		fi
-		[ "$bun" = pending-SLICE-002 ] || block "$id" "Bun compatibility must stay pending-SLICE-002 until executed ($bun)"
+		case $bun in
+		pending-SLICE-002) ;;
+		executed\ EVID-[0-9][0-9][0-9]\ [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) valid_date "${bun##* }" || block "$id" "recorded Bun result date ${bun##* } is not a valid date" ;;
+		*) block "$id" "Bun compatibility must be pending-SLICE-002 or 'executed EVID-NNN YYYY-MM-DD' ($bun)" ;;
+		esac
 		if [ "$ROOT" = /src ]; then
 			grep -Eq "\"version\": ?\"$version\"" "/src/web/node_modules/$name/package.json" 2>/dev/null ||
 				block "$id" "installed node_modules/$name is not $version"
@@ -657,7 +965,7 @@ if cmt CMT-IMAGES; then
 	done
 fi
 if cmt CMT-P07; then case $CMT_TEXT in *openapi-fetch*) ;; *) block CMT-P07 "openapi-fetch exception not recorded" ;; esac; fi
-if cmt CMT-BUN; then case $CMT_TEXT in *SLICE-002*) ;; *) block CMT-BUN "Bun compatibility not recorded as pending SLICE-002" ;; esac; fi
+if cmt CMT-BUN; then case $CMT_TEXT in *SLICE-002*) ;; *) block CMT-BUN "Bun compatibility is not recorded against SLICE-002 (pending or executed)" ;; esac; fi
 cmt CMT-REGEXP2 || true
 cmt CMT-GOMOD || true
 

@@ -1,0 +1,11 @@
+{
+	"extends": "$app/tsconfig",
+	"compilerOptions": {
+		"allowJs": true,
+		"allowSyntheticDefaultImports": true,
+		"checkJs": true,
+		"resolveJsonModule": true
+	},
+	"include": ["src", "e2e", "*"],
+	"exclude": ["src/service-worker"]
+}

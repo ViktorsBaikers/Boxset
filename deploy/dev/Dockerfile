@@ -177,7 +177,9 @@ COPY --from=redact-build /redact /redact
 # their manifests/locks and never regenerate a lock. /src and the existing
 # ancestors of the issue-draft root stay root:root 1777, so the child can
 # create its own entries there but cannot replace a root-owned one; everything
-# else under /src belongs to the child.
+# else under /src belongs to the child. `/capture` (1000:1000, 0700) is the
+# child's own private browser-capture directory, exported only after the
+# container stopped; it is never mounted.
 FROM dev AS work
 WORKDIR /src
 COPY --from=capture-check-build /capture-check /usr/local/libexec/boxset/capture-check
@@ -198,5 +200,6 @@ RUN set -eu; \
     for d in /src /src/testdata /src/docs /src/docs/spikes /src/docs/spikes/data; do \
       if [ -d "$d" ]; then chown root:root "$d"; chmod 1777 "$d"; fi; \
     done; \
+    install -d -o 1000 -g 1000 -m 0700 /capture; \
     find /usr /etc -xtype l -delete; \
     find /usr /etc ! -type l -perm /022 -exec chmod go-w {} +

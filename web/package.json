@@ -7,6 +7,7 @@
     "@axe-core/playwright": "4.13.0",
     "@eslint/js": "10.0.1",
     "@inlang/paraglide-js": "2.26.0",
+    "@inlang/plugin-message-format": "4.4.0",
     "@playwright/test": "1.64.0",
     "@sveltejs/adapter-static": "4.0.0",
     "@sveltejs/kit": "3.0.1",
