@@ -1,0 +1,38 @@
+# Deny by default: only the allowlisted project inputs below enter the build
+# context. Owner secrets (.env), reference/, prototypes/, design/, workspaces
+# (.devrites/), caches, the host-only runner, its smoke check, the preserved
+# predecessor runner and its test driver never do.
+*
+!go.mod
+!go.sum
+!.golangci.yml
+!deploy/dev/Dockerfile
+!deploy/dev/capture-check
+!deploy/dev/redact
+!internal
+!bench
+!testdata
+!docs/spikes/*.md
+!scripts/*.sh
+scripts/dev-run.sh
+scripts/dev-run-smoke.sh
+scripts/dev-run-hardening.sh
+scripts/dev-run-test.sh
+!web
+web/node_modules
+web/.svelte-kit
+web/build
+web/test-results
+# Final rules: re-exclude at every depth below every admitted root, so a broad
+# `!root` re-inclusion above never admits nested owner files or caches.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/.npmrc
+**/.netrc
+**/.git
+**/.devrites
+**/node_modules
+**/.svelte-kit
+**/.cache
