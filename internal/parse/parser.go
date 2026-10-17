@@ -6,6 +6,11 @@
 // match; any limit, budget, cancellation or matching failure is a
 // *ReasonError and never a usable value.
 //
+// Custom formats are compiled once per revision by CompileFormats and
+// evaluated by Evaluate and EvaluateBatch (formats.go); the same fail-closed
+// budget applies: an incomplete evaluation is an error, never a passed
+// condition.
+//
 // Quality parsing ports the GPL-3.0 QualityParser of the series reference
 // (kind KindSeries) and of the movie reference (kind KindMovie); see
 // quality_series.go and quality_movie.go for the exact source commits.
@@ -96,12 +101,14 @@ type Options struct {
 	Location *time.Location
 }
 
-// Parser is the immutable, concurrency-safe release name parser.
+// Parser is the concurrency-safe release name parser. Its built-in tables are
+// immutable; its one mutable part is the format state, owned by formats.go.
 type Parser struct {
 	now      func() time.Time
 	location *time.Location
 	series   *seriesTable
 	movie    *movieTable
+	formats  formatState
 }
 
 // NewParser compiles the fixed attributed pattern tables once. An invalid

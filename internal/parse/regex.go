@@ -21,6 +21,12 @@ const (
 	// releaseBudget is the elapsed-work budget of one public parse operation,
 	// shared by every nested helper of that operation.
 	releaseBudget = 250 * time.Millisecond
+
+	// batchDeadline is the decision safety bound of one EvaluateBatch call,
+	// shared by every release of that batch. It is checked wherever the
+	// release budget is, ahead of it, so an expired batch is terminal rather
+	// than a per-release rejection.
+	batchDeadline = 30 * time.Second
 )
 
 // compiler compiles the fixed attributed pattern tables of a Parser. The
@@ -46,29 +52,71 @@ func (c *compiler) re(src string, opts regexp2.RegexOptions) *regexp2.Regexp {
 }
 
 // budget is the elapsed-work budget and cancellation state of one public
-// operation. All regexp2 work goes through it.
+// operation. All regexp2 work goes through it. A zero decision means the
+// operation has no decision deadline beyond its context.
 type budget struct {
 	ctx      context.Context
 	now      func() time.Time
 	deadline time.Time
+	decision time.Time
 }
 
 func newBudget(ctx context.Context, now func() time.Time) *budget {
 	return &budget{ctx: ctx, now: now, deadline: now().Add(releaseBudget)}
 }
 
-// check reports a cancelled or expired context, or an exhausted budget.
-func (b *budget) check() error {
-	if err := b.ctx.Err(); err != nil {
+// ctxReason maps a cancelled or expired context to its fixed reason; nil when
+// the context is live.
+func ctxReason(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return newReasonError(codeDeadlineExceeded, nil)
 		}
 		return newReasonError(codeCancelled, nil)
 	}
-	if !b.now().Before(b.deadline) {
+	return nil
+}
+
+// check reports a cancelled or expired context, an expired decision deadline
+// or an exhausted budget. It reads the clock once.
+func (b *budget) check() error {
+	if err := ctxReason(b.ctx); err != nil {
+		return err
+	}
+	t := b.now()
+	if !b.decision.IsZero() && !t.Before(b.decision) {
+		return decisionError()
+	}
+	if !t.Before(b.deadline) {
 		return newReasonError(codeWorkBudgetExhausted, map[string]int64{"limit_ms": releaseBudget.Milliseconds()})
 	}
 	return nil
+}
+
+func decisionError() error {
+	return newReasonError(codeDeadlineExceeded, map[string]int64{"limit_ms": batchDeadline.Milliseconds()})
+}
+
+// terminal reports a cancelled or expired context or an expired decision
+// deadline: the conditions that end a whole operation, not just one release.
+func (b *budget) terminal() error {
+	if err := ctxReason(b.ctx); err != nil {
+		return err
+	}
+	if !b.decision.IsZero() && !b.now().Before(b.decision) {
+		return decisionError()
+	}
+	return nil
+}
+
+// failed maps a regexp2 failure. A terminal condition observed after the
+// failure outranks it, so the failure never surfaces as a release-local reason
+// of a batch that is already over.
+func (b *budget) failed(err error) error {
+	if terr := b.terminal(); terr != nil {
+		return terr
+	}
+	return matchError(err)
 }
 
 // matchError maps a regexp2 failure to a fixed reason; the dependency error
@@ -88,7 +136,7 @@ func (b *budget) isMatch(re *regexp2.Regexp, s string) (bool, error) {
 	}
 	ok, err := re.MatchString(s)
 	if err != nil {
-		return false, matchError(err)
+		return false, b.failed(err)
 	}
 	if err := b.check(); err != nil {
 		return false, err
@@ -103,7 +151,7 @@ func (b *budget) first(re *regexp2.Regexp, s string) (*regexp2.Match, error) {
 	}
 	m, err := re.FindStringMatch(s)
 	if err != nil {
-		return nil, matchError(err)
+		return nil, b.failed(err)
 	}
 	if err := b.check(); err != nil {
 		return nil, err
@@ -118,7 +166,7 @@ func (b *budget) next(re *regexp2.Regexp, m *regexp2.Match) (*regexp2.Match, err
 	}
 	n, err := re.FindNextMatch(m)
 	if err != nil {
-		return nil, matchError(err)
+		return nil, b.failed(err)
 	}
 	if err := b.check(); err != nil {
 		return nil, err

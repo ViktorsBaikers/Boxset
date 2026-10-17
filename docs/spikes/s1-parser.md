@@ -1,14 +1,16 @@
 # S1 parser spike: attributed quality corpora and the native quality parser
 
-Status: quality parsing for the series and movie sides is implemented and checked against the complete extracted source test
-corpora. Title parsing, custom-format evaluation, batch evaluation and the production latency benchmark are later work and
-are not present in `internal/parse` yet. Nothing here is a performance claim and no ARM latency is claimed.
+Status: quality parsing for the series and movie sides and custom-format compilation, evaluation and batch evaluation are
+implemented. Quality parsing is checked against the complete extracted source test corpora. Title parsing and the production
+latency benchmark are later work and are not present in `internal/parse` yet. Nothing here is a performance claim and no ARM
+latency claim is made.
 
 ## What exists
 
 | Part | Path | Role |
 | --- | --- | --- |
 | Native parser | `internal/parse/parser.go`, `limits.go`, `regex.go`, `vocab.go`, `quality_series.go`, `quality_movie.go` | `NewParser`, `ParseQuality`, bounded regexp2 matching, explicit code maps, the two ported quality parsers |
+| Format evaluator | `internal/parse/formats.go` | `CompileFormats`, `Evaluate`, `EvaluateBatch`, typed `FormatResult`/`ReleaseResult`; the compiled payload never leaves the `Parser` |
 | Corpus contract | `internal/parse/corpus/corpus.go` | Header/Case/Value schema, bounded JSONL `Read`/`Marshal`, count reconciliation, dispositions, `TimeContext.Materialize` |
 | Extractor | `internal/parse/corpus/extract/main.go` | Reads the reference C# test text (never executes it) and writes the two corpora |
 | Corpora | `testdata/parser/series.jsonl`, `movie.jsonl`, `dispositions.json` | Attributed, counted, committed inputs and the (currently empty) owner dispositions |
@@ -71,6 +73,83 @@ Faithful-adapter decisions: `Trim`/whitespace follow `char.IsWhiteSpace`; `Path.
 follow Linux (only NUL is invalid, only `/` separates); `ContainsIgnoreCase` is used only with ASCII needles; extension
 lookups compare with per-rune upper-casing (ordinal ignore case). regexp2 runs on runes where .NET runs on UTF-16 units; they
 agree on the Basic Multilingual Plane.
+
+## Custom formats: compile, evaluate, batch
+
+```go
+specs := []parse.FormatSpec{{
+	ID: "hdtv-720p",
+	Conditions: []parse.ConditionSpec{
+		{Pattern: `720p`, Required: true},
+		{Pattern: `hdtv`, Required: true},
+		{Pattern: `\bnuked\b`, Negate: true, Required: true},
+	},
+}}
+if err := p.CompileFormats(ctx, 1, specs); err != nil { /* *parse.ReasonError: correct the profile or use a higher revision */ }
+
+results, err := p.Evaluate(ctx, "Show.S01E01.720p.HDTV.x264-GRP")
+// results[0] == parse.FormatResult{ID: "hdtv-720p", Outcome: parse.OutcomeMatched}; on any error results is nil
+
+rows, err := p.EvaluateBatch(ctx, names)
+if err != nil { /* terminal: rows are diagnostic only, authorize nothing */ }
+for _, r := range rows { /* r.Index, r.State (Completed|Rejected|Unscheduled), r.Formats, r.Reason */ }
+```
+
+Matching. A format matches when every `Required` condition holds and, if it has any non-required condition, at least one of
+those holds; `Negate` inverts one condition. A format with no conditions matches nothing. Patterns are .NET-style regexp2
+sources and compile case-insensitively (use `(?-i)` to opt out). Every condition of every format is evaluated, even when the
+outcome is already decided, so an error in any condition fails the whole evaluation instead of being skipped behind an earlier
+result. `OutcomeIndeterminate` exists in the typed vocabulary but is never returned in a usable list: an evaluation that did not
+complete is an error (single) or a `Rejected` row (batch), never a format outcome.
+
+Fail closed. `Evaluate` returns the complete ordered list or `(nil, *ReasonError)`. A match timeout, the backtracking stack
+limit, an exhausted budget or a cancelled context is an error; neither negation nor an earlier match turns it into a match, and
+a match that completes after the budget expired (checked after every successful match and once more after the last format) is an
+error too. One 250 ms budget covers the whole evaluation; the regexp2 timeout is fixed at 50 ms.
+
+| Condition | `ReasonError` code | Numeric params |
+| --- | --- | --- |
+| more than 256 formats | `too_many_formats` | `limit`, `observed` |
+| more than 32 conditions in a format | `too_many_conditions` | `format_index`, `limit`, `observed` |
+| regex source over 8192 UTF-8 bytes | `regex_source_too_long` | `format_index`, `condition_index`, `limit_bytes`, `observed_bytes` |
+| format ID over 64 UTF-8 bytes / not valid UTF-8 | `format_id_too_long` / `format_id_invalid_utf8` | `format_index`, `limit_bytes`, `observed_bytes` / `offset` |
+| regex source not valid UTF-8 or not compilable | `regex_compile_failed` | `format_index`, `condition_index` |
+| same revision, different content / lower revision | `format_revision_conflict` / `format_revision_stale` | none |
+| `Evaluate`/`EvaluateBatch` before any `CompileFormats` | `format_not_configured` | none |
+| two evaluations already admitted | `evaluator_busy` | `limit` |
+| batch of more than 1024 names / over 4 MiB of names | `too_many_releases` / `batch_name_bytes_exceeded` | `limit`, `observed` / `limit_bytes`, `observed_bytes` |
+| a batch name over 4096 bytes or not valid UTF-8 | `release_name_too_long` / `release_name_invalid_utf8` | the name params plus `index` |
+| 30 s batch decision deadline reached | `decision_deadline_exceeded` | `limit_ms` |
+
+All counts, sizes and encodings are checked before anything is compiled or matched (for a profile, in format then condition
+order, so the first violation by index is reported); the reasons never carry an ID, a pattern, a name or a dependency error, and
+`errors.As(err, &re)` reaches the `*ReasonError` through wrapping. Match, budget, stack, cancellation and deadline codes are the
+ones in the limits table above.
+
+Revisions. `CompileFormats(ctx, revision, specs)` takes a revision that never decreases. The same revision with the same
+content is a no-op (nothing is recompiled); changed content needs a higher revision. A profile is compiled once per revision,
+completely, and only then published; any failure leaves the previous profile current. The compiled payload is private to the
+`Parser`. `Evaluate` and `EvaluateBatch` pin the profile that is current at entry; at most two evaluations are admitted at once
+(a third gets `evaluator_busy`, there is no queue), so publication can never leave more than two replaced profiles alive, and
+each is reclaimed with its last reader, on success, error or cancellation alike. Retained format source is a private copy.
+
+Batch. `EvaluateBatch` validates the count (1024), aggregate bytes (4 MiB) and every name before any work and allocates its
+output once; a validation, configuration or admission error returns nil rows. The whole batch uses the profile pinned at entry.
+Each release gets a fresh 250 ms budget under one 30 s decision deadline, and the result has exactly one row per name at that
+name's index. A release that fails on its own (its match timeout, stack limit or budget) is `Rejected` with its reason and no
+formats, and the batch continues. Cancellation or the 30 s deadline is terminal: the release in flight and every later one are
+`Unscheduled` carrying the terminal reason, and the terminal error is returned with the rows. With any non-nil error every row,
+earlier `Completed` ones included, is diagnostic only and must not authorize an effect. The output backing is bounded by the
+admitted maxima (a compile-time check keeps it far under the 64 MiB cap), so no runtime output-cap reason exists.
+
+Timeout overshoot. regexp2 checks its timeout against a coarse clock, so a running match can overshoot the 50 ms timeout and no
+hard deadline is claimed. `TestTimeoutOvershootReport` (excluded under `-race`) runs 100 real default-clock evaluations of a
+catastrophic pattern and logs the distribution; one run in the dev image logged elapsed beyond the 50 ms timeout of min 147.7 ms,
+median 150.4 ms, p99 150.7 ms, max 150.7 ms. That is a measurement of one run, not a bound.
+
+```sh
+scripts/dev-run.sh -- go test ./internal/parse -run '^TestTimeoutOvershootReport$' -count=1 -v
+```
 
 ## Corpus contract
 
