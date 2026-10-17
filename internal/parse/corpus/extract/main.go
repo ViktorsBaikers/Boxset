@@ -24,6 +24,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,8 +33,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -55,6 +58,7 @@ const (
 const (
 	resultKey      = "$result"
 	dirKey         = "$isDir"
+	noThrowKey     = resultKey + ".NoThrow" // a case that only requires the call not to fail
 	movieTitleCall = "ParseMovieTitle"
 	movieTitleOwn  = "Parser.ParseMovieTitle"
 	cleanTitleOwn  = "Parser.CleanMovieTitle"
@@ -64,6 +68,23 @@ const (
 	// title before normalization: the assertion is that both sides normalize alike.
 	cleanTitleKey = "MovieTitle.CleanMovieTitle"
 	cleanTag      = "clean"
+
+	// The series side's title entry points: ParseTitle, the ParseSeriesName
+	// helper whose result the source normalizes, and the CleanSeriesTitle
+	// normalization itself. cleanSeriesKey is the property path of the parsed
+	// series name after that normalization; as on the movie side its recorded
+	// value is the expected title before normalization.
+	seriesTitleCall = "ParseTitle"
+	seriesTitleOwn  = "Parser.ParseTitle"
+	seriesNameCall  = "ParseSeriesName"
+	seriesNameOwn   = "Parser.ParseSeriesName"
+	cleanSeriesOwn  = "Parser.CleanSeriesTitle"
+	cleanSeriesKey  = "SeriesName.CleanSeriesTitle"
+
+	// airDateFormat is the source's Episode.AIR_DATE_FORMAT. The constant is not
+	// in the delivered areas; its value is the date-only form the series parser
+	// writes for AirDate.
+	airDateFormat = "yyyy-MM-dd"
 )
 
 // Interpreter work limits per side, checked before the step or the growth each
@@ -76,10 +97,35 @@ const (
 )
 
 // work is the cumulative interpreter budget of one side, shared by every file.
+// neutral turns on the release group substitution of neutralGroup.
 type work struct {
 	steps, observations int
 	bytes               int
+	neutral             bool
 }
+
+// neutralName is the fixed release group every match of groupToken becomes in
+// the series corpus. The reference tests name a release group after the
+// upstream products; the repository never carries those names, so the
+// extractor replaces each case-insensitive match, in every recorded string
+// (input, argument, expected value, date template), before the corpus is
+// encoded and before a case identity is hashed. The token is held base64
+// encoded for the same reason: it is the pattern of the repository's name gate.
+const (
+	neutralName   = "Neutral"
+	groupTokenB64 = "c29uYXJyfHJhZGFycg=="
+)
+
+var groupToken = func() *regexp.Regexp {
+	pattern, err := base64.StdEncoding.DecodeString(groupTokenB64)
+	if err != nil {
+		panic(err)
+	}
+	return regexp.MustCompile("(?i)" + string(pattern))
+}()
+
+// neutralGroup applies the substitution documented at neutralName.
+func neutralGroup(s string) string { return groupToken.ReplaceAllLiteralString(s, neutralName) }
 
 // appSpec names the source files one side contributes. Paths are relative to
 // the side's neutral root (/ref/<side>, whose tests/, parser/ and qualities/
@@ -98,6 +144,8 @@ type appSpec struct {
 	titles     []string
 	languages  string
 	provenance []string
+	// neutralizeGroup selects the release group substitution for this side's records.
+	neutralizeGroup bool
 }
 
 func appSpecs() [2]appSpec {
@@ -115,6 +163,21 @@ func appSpecs() [2]appSpec {
 				"qualities/QualitySource.cs",
 				"qualities/QualityDetectionSource.cs",
 			},
+			titles: []string{
+				test("ParserFixture.cs"), test("SingleEpisodeParserFixture.cs"), test("MultiEpisodeParserFixture.cs"),
+				test("MiniSeriesEpisodeParserFixture.cs"), test("SeasonParserFixture.cs"), test("SeasonTitleParserFixture.cs"),
+				test("AbsoluteEpisodeNumberParserFixture.cs"), test("AnimeMetadataParserFixture.cs"),
+				test("DailyEpisodeParserFixture.cs"), test("CrapParserFixture.cs"), test("HashedReleaseFixture.cs"),
+				test("ReleaseGroupParserFixture.cs"), test("SubGroupParserFixture.cs"), test("UnicodeReleaseParserFixture.cs"),
+				test("UrlFixture.cs"), test("SeriesTitleInfoFixture.cs"), test("IsPossibleSpecialEpisodeFixture.cs"),
+				test("LanguageParserFixture.cs"), test("NormalizeSeriesTitleFixture.cs"),
+			},
+			languages: "parser/LanguageParser.cs",
+			provenance: []string{
+				"parser/Parser.cs", "parser/ReleaseGroupParser.cs", "parser/ParserCommon.cs", "parser/RegexReplace.cs",
+				"parser/Model/ParsedEpisodeInfo.cs", "parser/Model/SeriesTitleInfo.cs",
+			},
+			neutralizeGroup: true,
 		},
 		{
 			name:       "movie",
@@ -291,7 +354,7 @@ func extractApp(spec appSpec, dir, commit string) (*corpus.Corpus, []sourceInfo,
 		return nil, nil, fmt.Errorf("%s root is unreadable", spec.name)
 	}
 	defer func() { _ = root.Close() }() // read-only handle: a close error cannot change the result
-	w := &work{}
+	w := &work{neutral: spec.neutralizeGroup}
 	m := &model{enums: map[string]map[string]int64{}, names: map[string]string{}}
 	var infos []sourceInfo
 	for _, rel := range spec.models {
@@ -316,11 +379,7 @@ func extractApp(spec appSpec, dir, commit string) (*corpus.Corpus, []sourceInfo,
 		if err != nil {
 			return nil, nil, err
 		}
-		lx, err := lex(spec.languages, src)
-		if err != nil {
-			return nil, nil, err
-		}
-		if err := m.scanLanguages(spec.languages, lx.toks); err != nil {
+		if err := m.scanLanguages(spec.languages, src); err != nil {
 			return nil, nil, err
 		}
 		infos = append(infos, info)
@@ -694,6 +753,16 @@ type (
 		name, op string
 		x        expr
 	}
+	anonE struct {
+		p     pos
+		names []string
+		vals  []expr
+	}
+	ctorE struct {
+		p    pos
+		typ  string
+		args []expr
+	}
 )
 
 type stmt interface{}
@@ -739,6 +808,7 @@ type attr struct {
 type param struct {
 	typ, name string
 	def       expr
+	variadic  bool // params T[]: the trailing arguments of a test case are one array
 }
 
 type method struct {
@@ -769,7 +839,8 @@ type parser struct {
 	file  string
 	t     []token
 	i     int
-	title bool // title fixture: a body that asserts no title entry point is not interpreted
+	title bool   // title fixture: a body that asserts no title entry point is not interpreted
+	app   string // the side: it decides which entry points a title fixture names
 }
 
 func (p *parser) cur() token { return p.t[p.i] }
@@ -1005,8 +1076,12 @@ func (p *parser) parseMember(c *class) error {
 		m := &method{p: name.p(), name: name.text, attrs: attrs}
 		p.advance()
 		for !p.isP(")") {
-			if p.isID("params") || p.isID("this") {
+			if p.isID("this") {
 				return p.fail(p.cur(), "unsupported parameter modifier")
+			}
+			variadic := p.isID("params")
+			if variadic {
+				p.advance()
 			}
 			pt, err := p.parseType()
 			if err != nil {
@@ -1016,7 +1091,7 @@ func (p *parser) parseMember(c *class) error {
 			if err != nil {
 				return err
 			}
-			prm := param{typ: pt, name: pn.text}
+			prm := param{typ: pt, name: pn.text, variadic: variadic}
 			if p.isP("=") {
 				p.advance()
 				if prm.def, err = p.parseExpr(); err != nil {
@@ -1040,7 +1115,7 @@ func (p *parser) parseMember(c *class) error {
 			return p.fail(p.cur(), "unterminated block")
 		}
 		m.toks = p.t[open+1 : end]
-		if scope, _ := classify(m.toks); p.title && scope != corpus.ScopeTitle {
+		if scope, _ := classify(p.app, m.toks); p.title && scope != corpus.ScopeTitle {
 			// Retained out of scope with its source arguments; the body is never interpreted.
 			p.i = end + 1
 		} else if m.body, err = p.parseBlock(); err != nil {
@@ -1284,6 +1359,16 @@ func (p *parser) parseStmt() (stmt, error) {
 			return nil, p.fail(t, "unsupported const declaration")
 		}
 		return s, nil
+	case t.kind == tIdent && p.at(1).kind == tPunct && p.at(1).text == "=":
+		// Assignment to a parameter or a local: name = expr;
+		p.advance()
+		p.advance()
+		x, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		_, err = p.expectP(";")
+		return &exprS{&assignE{p: t.p(), name: t.text, op: "=", x: x}}, err
 	case p.looksLikeDecl():
 		if _, err := p.parseType(); err != nil {
 			return nil, err
@@ -1387,7 +1472,7 @@ func (p *parser) parseBin(level int) (expr, error) {
 	}
 }
 
-var castTypes = map[string]bool{"int": true, "long": true}
+var castTypes = map[string]bool{"int": true, "long": true, "decimal": true, "double": true, "Language": true}
 
 func (p *parser) parseUnary() (expr, error) {
 	t := p.cur()
@@ -1486,11 +1571,21 @@ func (p *parser) parsePrimary() (expr, error) {
 			return &litE{val{k: vNull}}, nil
 		case "new":
 			p.advance()
-			if p.isP("[") && p.at(1).kind == tPunct && p.at(1).text == "]" {
+			typ := ""
+			switch {
+			case p.isP("{"):
+				return p.parseAnon(t)
+			case p.isP("[") && p.at(1).kind == tPunct && p.at(1).text == "]":
 				p.advance()
 				p.advance()
-			} else if _, err := p.parseType(); err != nil {
-				return nil, err
+			default:
+				var err error
+				if typ, err = p.parseType(); err != nil {
+					return nil, err
+				}
+			}
+			if typ != "" && p.isP("(") {
+				return p.parseCtor(t, typ)
 			}
 			if p.isP("[") && p.at(1).kind == tNum && p.at(1).text == "0" && p.at(2).kind == tPunct && p.at(2).text == "]" {
 				p.advance()
@@ -1519,6 +1614,54 @@ func (p *parser) parsePrimary() (expr, error) {
 		}
 	}
 	return nil, p.fail(t, "unsupported expression")
+}
+
+// parseCtor parses the argument list of `new Type(...)`.
+func (p *parser) parseCtor(t token, typ string) (expr, error) {
+	p.advance()
+	c := &ctorE{p: t.p(), typ: typ}
+	for !p.isP(")") {
+		a, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		c.args = append(c.args, a)
+		if p.isP(",") {
+			p.advance()
+		} else if !p.isP(")") {
+			return nil, p.fail(p.cur(), "malformed argument list")
+		}
+	}
+	p.advance()
+	return c, nil
+}
+
+// parseAnon parses an anonymous object `new { name = expr, ... }`.
+func (p *parser) parseAnon(t token) (expr, error) {
+	p.advance()
+	a := &anonE{p: t.p()}
+	for !p.isP("}") {
+		n, err := p.expectIdent()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expectP("="); err != nil {
+			return nil, err
+		}
+		x, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		a.names = append(a.names, n.text)
+		a.vals = append(a.vals, x)
+		if p.isP(",") {
+			p.advance()
+		} else if !p.isP("}") {
+			return nil, p.fail(p.cur(), "malformed anonymous object")
+		}
+	}
+	p.advance()
+	return a, nil
 }
 
 // ---- model sources (enums and the Quality table) -----------------------------
@@ -1626,14 +1769,33 @@ func (m *model) scanQuality(file string, toks []token, i int) error {
 
 // scanLanguages records the Language members the parser source names. The
 // Language declaration is outside the delivered areas, so the members a title
-// assertion may name are the ones the parser itself produces.
-func (m *model) scanLanguages(file string, toks []token) error {
+// assertion may name are the ones the parser itself produces. The source is
+// only mined for names, never interpreted, so it is scanned as text (line
+// comments skipped): it may hold forms the lexer rejects, such as an
+// interpolated pattern.
+func (m *model) scanLanguages(file, src string) error {
 	members := map[string]int64{}
-	for i := 0; i+2 < len(toks); i++ {
-		if toks[i].kind == tIdent && toks[i].text == "Language" && toks[i+1].kind == tPunct && toks[i+1].text == "." && toks[i+2].kind == tIdent {
-			if _, dup := members[toks[i+2].text]; !dup {
-				members[toks[i+2].text] = int64(len(members))
+	for _, line := range strings.Split(src, "\n") {
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		for rest := line; ; {
+			i := strings.Index(rest, "Language.")
+			if i < 0 {
+				break
 			}
+			after := rest[i+len("Language."):]
+			inWord := i > 0 && (unicode.IsLetter(rune(rest[i-1])) || unicode.IsDigit(rune(rest[i-1])) || rest[i-1] == '_')
+			n := 0
+			for n < len(after) && (after[n] == '_' || after[n] >= 'a' && after[n] <= 'z' || after[n] >= 'A' && after[n] <= 'Z' || n > 0 && after[n] >= '0' && after[n] <= '9') {
+				n++
+			}
+			if name := after[:n]; !inWord && n > 0 {
+				if _, dup := members[name]; !dup {
+					members[name] = int64(len(members))
+				}
+			}
+			rest = after
 		}
 	}
 	if len(members) == 0 {
@@ -1660,6 +1822,9 @@ const (
 	vSym
 	vType
 	vDec
+	vCivil
+	vPart
+	vAnon
 )
 
 // val is a runtime value of the symbolic interpreter. vRes is the (untouched)
@@ -1673,6 +1838,7 @@ type val struct {
 	i   int64
 	b   bool
 	arr []val
+	obj map[string]val
 }
 
 type observation struct {
@@ -1906,16 +2072,48 @@ func (it *interp) eval(e expr) (val, error) {
 			out.arr = append(out.arr, v)
 		}
 		return out, nil
+	case *anonE:
+		out := val{k: vAnon, obj: map[string]val{}}
+		for i, name := range e.names {
+			v, err := it.eval(e.vals[i])
+			if err != nil {
+				return val{}, err
+			}
+			out.obj[name] = v
+		}
+		return out, nil
+	case *ctorE:
+		args, err := it.evalArgs(e.args)
+		if err != nil {
+			return val{}, err
+		}
+		if e.typ == "DateTime" && len(args) == 3 && args[0].k == vInt && args[1].k == vInt && args[2].k == vInt {
+			y, m, d := args[0].i, args[1].i, args[2].i
+			if t := time.Date(int(y), time.Month(m), int(d), 0, 0, 0, 0, time.UTC); y >= 1 && y <= 9999 && int64(t.Year()) == y && int64(t.Month()) == m && int64(t.Day()) == d {
+				return val{k: vCivil, i: y*10000 + m*100 + d}, nil
+			}
+			return val{}, it.fail(e.p, "invalid DateTime")
+		}
+		return val{}, it.fail(e.p, "unsupported constructor "+e.typ)
 	case *castE:
 		v, err := it.eval(e.x)
 		if err != nil {
 			return val{}, err
 		}
-		switch v.k {
-		case vInt:
+		switch {
+		case (e.typ == "int" || e.typ == "long") && v.k == vInt:
 			return v, nil
-		case vEnum:
+		case (e.typ == "int" || e.typ == "long") && v.k == vEnum:
 			return val{k: vInt, i: it.m.enums[v.t][v.s]}, nil
+		case (e.typ == "decimal" || e.typ == "double") && v.k == vDec:
+			return v, nil
+		case (e.typ == "decimal" || e.typ == "double") && v.k == vInt:
+			return val{k: vDec, s: strconv.FormatInt(v.i, 10)}, nil
+		case e.typ == "Language" && v.k == vStr:
+			if _, ok := it.m.enums["Language"][v.s]; !ok {
+				return val{}, it.fail(e.p, "unknown member Language."+v.s)
+			}
+			return val{k: vEnum, t: "Language", s: v.s}, nil
 		}
 		return val{}, it.fail(e.p, "unsupported cast")
 	case *unE:
@@ -1961,6 +2159,17 @@ func (it *interp) eval(e expr) (val, error) {
 		}
 		return val{}, it.fail(e.p, "unsupported index operand")
 	case *assignE:
+		if e.op == "=" {
+			x, err := it.eval(e.x)
+			if err != nil {
+				return val{}, err
+			}
+			if _, ok := it.lookup(e.name); !ok {
+				return val{}, it.fail(e.p, "assignment target is not declared")
+			}
+			it.assign(e.name, x)
+			return val{k: vNull}, nil
+		}
 		cur, ok := it.lookup(e.name)
 		if !ok || cur.k != vInt {
 			return val{}, it.fail(e.p, "assignment target is not an integer variable")
@@ -2028,7 +2237,14 @@ func (it *interp) binary(e *binE) (val, error) {
 			holds = l.i >= r.i
 		}
 		return val{k: vBool, b: holds}, nil
+	case "-":
+		if l.k == vInt && r.k == vInt {
+			return val{k: vInt, i: l.i - r.i}, nil
+		}
 	case "+":
+		if l.k == vInt && r.k == vInt {
+			return val{k: vInt, i: l.i + r.i}, nil
+		}
 		if l.k == vStr && (r.k == vStr || r.k == vInt || r.k == vChar) {
 			rt := text(r)
 			it.at = e.p
@@ -2077,8 +2293,11 @@ func (it *interp) member(e *memberE) (val, error) {
 	}
 	switch recv.k {
 	case vType:
-		if recv.s == "DateTime" && e.name == "Today" {
+		if recv.s == "DateTime" && (e.name == "Today" || e.name == "Now") {
 			return val{k: vDate}, nil
+		}
+		if recv.s == "Episode" && e.name == "AIR_DATE_FORMAT" {
+			return val{k: vStr, s: airDateFormat}, nil
 		}
 		if recv.s == "Parser" && (e.name == "Parser" || e.name == "ReleaseGroupParser") {
 			return val{k: vType, s: e.name}, nil
@@ -2098,6 +2317,15 @@ func (it *interp) member(e *memberE) (val, error) {
 		if recv.t == "Language" && e.name == "Id" {
 			// A Language is identified by its Id, so an Id comparison is a member comparison.
 			return recv, nil
+		}
+	case vDate:
+		switch e.name {
+		case "Year":
+			return val{k: vPart, s: "yyyy", i: recv.i}, nil
+		case "Month":
+			return val{k: vPart, s: "M", i: recv.i}, nil
+		case "Day":
+			return val{k: vPart, s: "d", i: recv.i}, nil
 		}
 	case vArr:
 		if e.name == "Length" {
@@ -2146,10 +2374,10 @@ func (it *interp) call(e *callE) (val, error) {
 		}
 		return val{}, it.invoke(h, args, e.p)
 	case *memberE:
-		if kind := fn.name; (kind == "Be" || kind == "Contain") && len(e.args) == 1 || kind == "BeNull" && len(e.args) == 0 {
+		if arity, ok := assertions[fn.name]; ok && len(e.args) == arity {
 			if in, ok := fn.x.(*callE); ok && len(in.args) == 0 {
 				if im, ok := in.fn.(*memberE); ok && im.name == "Should" {
-					return val{}, it.assert(kind, im.x, e.args, e.p)
+					return val{}, it.assert(fn.name, im.x, e.args, e.p)
 				}
 			}
 		}
@@ -2166,10 +2394,25 @@ func (it *interp) call(e *callE) (val, error) {
 	return val{}, it.fail(e.p, "unsupported call form")
 }
 
+// assertions are the FluentAssertions methods the scoped cases use and the
+// number of arguments of each.
+var assertions = map[string]int{
+	"Be": 1, "Contain": 1, "BeNull": 0, "NotBeNull": 0, "NotBe": 1, "BeTrue": 0, "BeFalse": 0,
+	"BeEmpty": 0, "NotBeEmpty": 0, "HaveCount": 1, "BeEquivalentTo": 1, "Equal": 1,
+}
+
+// cleanKeys are the property paths of a normalized title.
+var cleanKeys = map[string]bool{cleanTitleKey: true, cleanSeriesKey: true}
+
 // assert records one FluentAssertions assertion on the entry point's result.
-// Be and BeNull set the asserted value of a property path (the result itself
-// is the reserved result key); Contain collects, under the path plus
-// ".Contain", the members a list must contain.
+// Be, BeNull, BeTrue and BeFalse set the asserted value of a property path (the
+// result itself is the reserved result key); Contain collects, under the path
+// plus ".Contain", the members a list must contain. The other assertions are
+// recorded under the path plus a fixed suffix: NotBeNull ".NotNull" (true),
+// NotBe ".NotBe", BeEmpty and HaveCount ".Count", NotBeEmpty ".NotEmpty"
+// (true), BeEquivalentTo ".Equivalent" and Equal ".Equal" (an array). A Be
+// against another property of the same result is recorded as the path pair
+// "path==other" (true).
 func (it *interp) assert(kind string, target expr, args []expr, p pos) error {
 	tv, err := it.eval(target)
 	if err != nil {
@@ -2185,15 +2428,15 @@ func (it *interp) assert(kind string, target expr, args []expr, p pos) error {
 	// A normalized-title property is compared only with a normalized title, and the
 	// reverse; the recorded value is then the title that both sides are normalized from.
 	want := val{k: vNull}
-	if key == cleanTitleKey && kind != "Be" {
+	if cleanKeys[key] && kind != "Be" {
 		return it.fail(p, "unsupported assertion on a normalized title")
 	}
-	if kind != "BeNull" {
+	if len(args) == 1 {
 		if want, err = it.eval(args[0]); err != nil {
 			return err
 		}
 	}
-	if (key == cleanTitleKey) != (want.k == vStr && want.t == cleanTag) {
+	if cleanKeys[key] != (want.k == vStr && want.t == cleanTag) {
 		return it.fail(p, "a normalized title is compared only with a normalized title")
 	}
 	o := &it.obs[tv.i]
@@ -2221,9 +2464,54 @@ func (it *interp) assert(kind string, target expr, args []expr, p pos) error {
 		o.asserts[key] = list
 		return nil
 	}
-	cv, err := it.toCorpus(want, p)
-	if err != nil {
-		return err
+
+	var cv corpus.Value
+	switch kind {
+	case "BeTrue", "BeFalse":
+		cv = corpus.Value{Kind: corpus.KindBool, Bool: kind == "BeTrue"}
+	case "NotBeNull":
+		key += ".NotNull"
+		cv = corpus.Value{Kind: corpus.KindBool, Bool: true}
+	case "NotBeEmpty":
+		key += ".NotEmpty"
+		cv = corpus.Value{Kind: corpus.KindBool, Bool: true}
+	case "BeEmpty":
+		key += ".Count"
+		cv = corpus.Value{Kind: corpus.KindInt}
+	case "HaveCount":
+		if want = it.concrete(want); want.k != vInt {
+			return it.fail(p, "HaveCount is not given an integer")
+		}
+		key += ".Count"
+		cv = corpus.Value{Kind: corpus.KindInt, Int: want.i}
+	case "BeEquivalentTo", "Equal":
+		if want.k != vArr {
+			if kind == "BeEquivalentTo" {
+				return it.fail(p, "BeEquivalentTo is not given an array")
+			}
+			want = val{k: vArr, arr: []val{want}}
+		}
+		key += "." + strings.TrimPrefix(kind, "Be")
+		if cv, err = it.toCorpus(want, p); err != nil {
+			return err
+		}
+	case "NotBe":
+		key += ".NotBe"
+		if cv, err = it.toCorpus(want, p); err != nil {
+			return err
+		}
+	default:
+		if want.k == vRes {
+			if want.i != tv.i || want.s == "" {
+				return it.fail(p, "a property is compared only with another property of the same result")
+			}
+			key += "==" + want.s
+			cv = corpus.Value{Kind: corpus.KindBool, Bool: true}
+			break
+		}
+		if cv, err = it.toCorpus(want, p); err != nil {
+			return err
+		}
 	}
 	if prior, ok := o.asserts[key]; ok && !corpus.Equal(prior, cv) {
 		return it.fail(p, "conflicting assertions on "+key)
@@ -2237,6 +2525,43 @@ func (it *interp) method(recv val, name string, args []val, p pos) (val, error) 
 	switch {
 	case recv.k == vType && recv.s == "string" && name == "Format":
 		return it.format(args, p)
+	case recv.k == vType && recv.s == "Enumerable" && name == "Range" && len(args) == 2 && args[0].k == vInt && args[1].k == vInt:
+		return it.rangeOf(args[0].i, args[1].i, p)
+	case recv.k == vArr && name == "ToArray" && len(args) == 0:
+		return recv, nil
+	case recv.k == vType && recv.s == "XmlCleaner" && name == "ReplaceUnicode" && len(args) == 1 && args[0].k == vStr:
+		return val{k: vStr, s: xmlClean(args[0].s)}, nil
+	case recv.k == vStr && name == "Expand" && len(args) == 1 && args[0].k == vAnon:
+		return it.expand(recv.s, args[0], p)
+	case recv.k == vPart && name == "ToString" && len(args) == 1 && args[0].k == vStr && args[0].s == "00" && (recv.s == "M" || recv.s == "d"):
+		// A month or day padded to two digits is the two-letter date specifier.
+		return val{k: vPart, s: recv.s + recv.s, i: recv.i}, nil
+	case recv.k == vCivil && name == "ToString" && len(args) == 1 && args[0].k == vStr && args[0].s == airDateFormat:
+		return val{k: vStr, s: fmt.Sprintf("%04d-%02d-%02d", recv.i/10000, recv.i/100%100, recv.i%100)}, nil
+	case recv.k == vRes && (name == "Single" || name == "SingleOrDefault") && len(args) == 0:
+		path := name + "()"
+		if recv.s != "" {
+			path = recv.s + "." + path
+		}
+		return val{k: vRes, s: path, i: recv.i}, nil
+	case recv.k == vStr && name == "CleanSeriesTitle" && len(args) == 0 && it.entry == cleanSeriesOwn:
+		// The helper is the entry point: its input is the string it normalizes.
+		in, err := it.toCorpus(recv, p)
+		if err != nil {
+			return val{}, err
+		}
+		it.at = p
+		if it.w.observations >= maxObservations {
+			return val{}, it.fail(p, "observation limit exceeded")
+		}
+		it.w.observations++
+		it.obs = append(it.obs, observation{input: in, asserts: map[string]corpus.Value{}})
+		return val{k: vRes, i: int64(len(it.obs) - 1)}, nil
+	case recv.k == vRes && name == "CleanSeriesTitle" && len(args) == 0 && recv.s == "" && it.entry == seriesNameOwn:
+		return val{k: vRes, s: cleanSeriesKey, i: recv.i}, nil
+	case recv.k == vStr && name == "CleanSeriesTitle" && len(args) == 0 && it.entry == seriesNameOwn:
+		// The expected side of a normalized-name assertion, tagged as on the movie side.
+		return val{k: vStr, s: recv.s, t: cleanTag}, nil
 	case recv.k == vType && recv.s+"."+name == it.entry:
 		dir := false
 		switch {
@@ -2307,6 +2632,13 @@ func (it *interp) method(recv val, name string, args []val, p pos) (val, error) 
 			return val{}, err
 		}
 		return val{k: vStr, s: strings.ReplaceAll(recv.s, old, repl)}, nil
+	case recv.k == vStr && name == "ToLower" && len(args) == 0:
+		// The fixtures lower-case ASCII words only, where every culture agrees.
+		it.at = p
+		if err := it.charge(len(recv.s)); err != nil {
+			return val{}, err
+		}
+		return val{k: vStr, s: strings.ToLower(recv.s)}, nil
 	}
 	return val{}, it.fail(p, "unsupported method "+name)
 }
@@ -2388,6 +2720,98 @@ func (it *interp) format(args []val, p pos) (val, error) {
 	return val{k: vStr, s: plain.String()}, nil
 }
 
+// maxRangeItems bounds Enumerable.Range so the loop it expands is charged
+// per item before the array grows.
+const maxRangeItems = 4096
+
+// rangeOf is Enumerable.Range(start, count): count consecutive integers, each
+// charged as one interpreter step before it is appended.
+func (it *interp) rangeOf(start, count int64, p pos) (val, error) {
+	if count < 0 || count > maxRangeItems || start+count-1 > 1<<31-1 {
+		return val{}, it.fail(p, "Enumerable.Range is outside the supported bound")
+	}
+	out := val{k: vArr, arr: make([]val, 0, count)}
+	for i := range count {
+		it.at = p
+		if err := it.step(); err != nil {
+			return val{}, err
+		}
+		out.arr = append(out.arr, val{k: vInt, i: start + i})
+	}
+	return out, nil
+}
+
+// xmlClean is XmlCleaner.ReplaceUnicode. The helper is not in the delivered
+// areas; it is read as dropping the characters XML 1.0 does not allow, which
+// no release name of the fixtures contains.
+func xmlClean(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == 0x9 || r == 0xA || r == 0xD || r >= 0x20 && r <= 0xD7FF || r >= 0xE000 && r <= 0xFFFD || r >= 0x10000 && r <= 0x10FFFF {
+			return r
+		}
+		return -1
+	}, s)
+}
+
+// expand is the source's s.Expand(new { name = value, ... }): each {name} is
+// replaced by the named value. A date part (Year, Month or Day of a symbolic
+// date) keeps the result a symbolic template, so the relative date is never
+// baked into the corpus; every date part must belong to one date.
+func (it *interp) expand(s string, anon val, p pos) (val, error) {
+	it.at = p
+	if err := it.charge(2 * len(s)); err != nil {
+		return val{}, err
+	}
+	var plain, tmpl strings.Builder
+	hasDate, offset := false, int64(0)
+	lit := func(t string) error {
+		if err := it.charge(2 * len(t)); err != nil {
+			return err
+		}
+		plain.WriteString(t)
+		tmpl.WriteString(strings.NewReplacer("{", "{{", "}", "}}").Replace(t))
+		return nil
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '}':
+			return val{}, it.fail(p, "unbalanced brace in expansion")
+		case c != '{':
+			plain.WriteByte(c)
+			tmpl.WriteByte(c)
+			continue
+		}
+		end := strings.IndexByte(s[i:], '}')
+		if end < 0 {
+			return val{}, it.fail(p, "unterminated expansion key")
+		}
+		v, ok := anon.obj[s[i+1:i+end]]
+		if !ok {
+			return val{}, it.fail(p, "unknown expansion key "+s[i+1:i+end])
+		}
+		switch v.k {
+		case vInt, vStr:
+			if err := lit(text(v)); err != nil {
+				return val{}, err
+			}
+		case vPart:
+			if hasDate && v.i != offset {
+				return val{}, it.fail(p, "expansion uses two different symbolic dates")
+			}
+			hasDate, offset = true, v.i
+			tmpl.WriteString("{0:" + v.s + "}")
+		default:
+			return val{}, it.fail(p, "unsupported expansion value")
+		}
+		i += end
+	}
+	if hasDate {
+		return val{k: vSym, s: tmpl.String(), i: offset}, nil
+	}
+	return val{k: vStr, s: plain.String()}, nil
+}
+
 // maxValueDepth is the deepest array level a recorded value may start at: the
 // record nests the case object and the args or expected container (three
 // levels with the value's own object), then an object and an array per level.
@@ -2396,8 +2820,49 @@ const maxValueDepth = (corpus.MaxNesting - 3) / 2
 // toCorpus converts v to its corpus value. Every node is charged to the side's
 // shared step and byte budget, and checked against the supported nesting,
 // before it is built, so a shared array that expands exponentially is rejected
-// with its source location before the expansion grows.
-func (it *interp) toCorpus(v val, p pos) (corpus.Value, error) { return it.convert(v, p, 0) }
+// with its source location before the expansion grows. The release group
+// substitution runs on the value once it is admitted whole, so a rejected walk
+// never pays for the token regexp.
+func (it *interp) toCorpus(v val, p pos) (corpus.Value, error) {
+	out, err := it.convert(v, p, 0)
+	if err != nil || !it.w.neutral {
+		return out, err
+	}
+	if err = it.group(&out, p); err != nil {
+		return corpus.Value{}, err
+	}
+	return out, nil
+}
+
+// group applies the release group substitution to every string and date
+// template of an admitted value, where the side asks for it. A match drops the
+// name-letter escape of its "arr" and gains a byte, so the charge is settled
+// to the recorded value's, and a changed date template is read back by the
+// canonical writer as it was before.
+func (it *interp) group(v *corpus.Value, p pos) error {
+	if v.Kind == corpus.KindString || v.Kind == corpus.KindDate {
+		raw, tmpl := nodeBytes(*v, 0), v.Template
+		v.Str, v.Template = neutralGroup(v.Str), neutralGroup(v.Template)
+		if d := nodeBytes(*v, 0) - raw; d > 0 {
+			if err := it.charge(d); err != nil {
+				return err
+			}
+		} else {
+			it.w.bytes += d
+		}
+		if v.Kind == corpus.KindDate && v.Template != tmpl {
+			if _, err := v.MarshalJSON(); err != nil {
+				return it.fail(p, err.Error())
+			}
+		}
+	}
+	for i := range v.Items {
+		if err := it.group(&v.Items[i], p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func (it *interp) convert(v val, p pos, depth int) (corpus.Value, error) {
 	it.at = p
@@ -2533,6 +2998,10 @@ func (it *interp) typeOK(typ string, v val) bool {
 		return v.k == vBool
 	case "int", "long":
 		return v.k == vInt
+	case "double", "decimal":
+		return v.k == vDec || v.k == vInt
+	case "int[]":
+		return v.k == vArr
 	case "char":
 		return v.k == vChar
 	case "object[]":
@@ -2555,7 +3024,7 @@ func (it *interp) invoke(m *method, args []val, p pos) error {
 	if it.depth >= maxHelperDepth {
 		return it.fail(p, "helper nesting is too deep")
 	}
-	if len(args) > len(m.params) {
+	if len(args) > len(m.params) && (len(m.params) == 0 || !m.params[len(m.params)-1].variadic) {
 		return it.fail(p, "too many arguments for "+m.name)
 	}
 	saved := it.scopes
@@ -2568,6 +3037,11 @@ func (it *interp) invoke(m *method, args []val, p pos) error {
 	for i, prm := range m.params {
 		var v val
 		switch {
+		case prm.variadic:
+			v = val{k: vArr}
+			if i < len(args) {
+				v.arr = append(v.arr, args[i:]...)
+			}
 		case i < len(args):
 			v = args[i]
 		case prm.def != nil:
@@ -2577,6 +3051,9 @@ func (it *interp) invoke(m *method, args []val, p pos) error {
 			}
 		default:
 			return it.fail(p, "missing argument "+prm.name+" for "+m.name)
+		}
+		if (prm.typ == "double" || prm.typ == "decimal") && v.k == vInt {
+			v = val{k: vDec, s: strconv.FormatInt(v.i, 10)}
 		}
 		if !it.typeOK(prm.typ, v) {
 			return it.fail(p, "argument "+prm.name+" does not match parameter type "+prm.typ)
@@ -2616,7 +3093,7 @@ func hasAttr(attrs []attr, name string) bool {
 // typeNames are the identifiers the interpreter treats as static types.
 var typeNames = map[string]bool{
 	"string": true, "DateTime": true, "QualityParser": true, "Parser": true, "LanguageParser": true,
-	"ReleaseGroupParser": true, "ExceptionVerification": true,
+	"ReleaseGroupParser": true, "ExceptionVerification": true, "Enumerable": true, "XmlCleaner": true, "Episode": true,
 }
 
 // titleEntries are the entry points whose results title cases assert, with the
@@ -2645,7 +3122,7 @@ var (
 // calls CleanMovieTitle alone is a title case of the helper itself (its input
 // is the string it normalizes), and one that builds its names with MD5 or
 // Random has no recordable input.
-func classify(toks []token) (scope, owner string) {
+func classify(app string, toks []token) (scope, owner string) {
 	has := func(name string) bool {
 		for _, t := range toks {
 			if t.kind == tIdent && t.text == name {
@@ -2653,6 +3130,9 @@ func classify(toks []token) (scope, owner string) {
 			}
 		}
 		return false
+	}
+	if app == "series" {
+		return classifySeries(has)
 	}
 	switch {
 	case has("CleanMovieTitle") && has(movieTitleCall):
@@ -2675,6 +3155,51 @@ func classify(toks []token) (scope, owner string) {
 	return "", ""
 }
 
+// seriesTitleEntries are the entry points whose results the series title cases
+// assert; seriesOtherEntries those of the other tests of the series title
+// fixtures, retained out of scope under the owner named here.
+var (
+	seriesTitleEntries = [...]struct{ call, owner string }{
+		{seriesTitleCall, seriesTitleOwn},
+		{"ParseReleaseGroup", "ReleaseGroupParser.ParseReleaseGroup"},
+		{"ParseLanguages", "LanguageParser.ParseLanguages"},
+	}
+	seriesOtherEntries = [...]struct{ call, owner string }{
+		{"ParsePath", "Parser.ParsePath"},
+		{"ParseSeasonTitle", "Parser.ParseSeasonTitle"},
+		{"ParseSubtitleLanguageInformation", "LanguageParser.ParseSubtitleLanguageInformation"},
+		{"ParseSubtitleLanguage", "LanguageParser.ParseSubtitleLanguage"},
+		{"ParsedEpisodeInfo", "ParsedEpisodeInfo.IsPossibleSpecialEpisode"},
+	}
+)
+
+// classifySeries is classify for the series side: a method that parses a series
+// name and normalizes it through CleanSeriesTitle is a title case of
+// ParseSeriesName; one that calls CleanSeriesTitle alone is a title case of the
+// helper itself; one that builds its names with MD5 or Random has no
+// recordable input.
+func classifySeries(has func(string) bool) (scope, owner string) {
+	switch {
+	case has("CleanSeriesTitle") && has(seriesNameCall):
+		return corpus.ScopeTitle, seriesNameOwn
+	case has("CleanSeriesTitle"):
+		return corpus.ScopeTitle, cleanSeriesOwn
+	case has("MD5") || has("Random"):
+		return corpus.ScopeOutOfScope, seriesTitleOwn
+	}
+	for _, e := range seriesTitleEntries {
+		if has(e.call) {
+			return corpus.ScopeTitle, e.owner
+		}
+	}
+	for _, e := range seriesOtherEntries {
+		if has(e.call) {
+			return corpus.ScopeOutOfScope, e.owner
+		}
+	}
+	return "", ""
+}
+
 func fileCases(app, rel, src string, m *model, w *work, title bool) ([]corpus.Case, fileStats, error) {
 	var st fileStats
 	lx, err := lex(rel, src)
@@ -2686,7 +3211,7 @@ func fileCases(app, rel, src string, m *model, w *work, title bool) ([]corpus.Ca
 			st.commented++
 		}
 	}
-	p := &parser{file: rel, t: lx.toks, title: title}
+	p := &parser{file: rel, t: lx.toks, title: title, app: app}
 	classes, err := p.parseFile()
 	if err != nil {
 		return nil, st, err
@@ -2753,7 +3278,7 @@ func fileCases(app, rel, src string, m *model, w *work, title bool) ([]corpus.Ca
 			st.testMethods++
 			scope, owner := corpus.ScopeQuality, qualityOwner
 			if title {
-				if scope, owner = classify(mt.toks); scope == "" {
+				if scope, owner = classify(app, mt.toks); scope == "" {
 					return nil, st, &srcError{rel, mt.p.line, mt.p.col, "test method " + mt.name + " has no recognized entry point"}
 				}
 			}
@@ -2872,18 +3397,49 @@ func runRow(rel string, mt *method, r row, helpers map[string]*method, m *model,
 		if len(it.obs) == 0 {
 			return fail("the case never calls " + owner)
 		}
-		first := it.obs[0].asserts
-		if len(first) == 0 {
-			return fail("the result of " + owner + " is never asserted")
+		// A case may assert each property on its own call of the entry point: the
+		// observations of one input accumulate their assertions, and every input of
+		// the case must then expect alike.
+		type group struct {
+			input   corpus.Value
+			asserts map[string]corpus.Value
 		}
+		var groups []*group
 		for _, o := range it.obs {
-			if !equalAsserts(first, o.asserts) {
-				return fail("invocations assert different expectations")
-			}
 			if o.dir != it.obs[0].dir {
 				return fail("invocations differ in the isDir argument")
 			}
 			inputs.Items = append(inputs.Items, o.input)
+			var g *group
+			for _, c := range groups {
+				if corpus.Equal(c.input, o.input) {
+					g = c
+					break
+				}
+			}
+			if g == nil {
+				g = &group{o.input, map[string]corpus.Value{}}
+				groups = append(groups, g)
+			}
+			for k, v := range o.asserts {
+				if prior, ok := g.asserts[k]; ok && !corpus.Equal(prior, v) {
+					return fail("invocations assert different expectations of " + k)
+				}
+				g.asserts[k] = v
+			}
+		}
+		first := groups[0].asserts
+		for _, g := range groups[1:] {
+			if !equalAsserts(first, g.asserts) {
+				return fail("invocations assert different expectations")
+			}
+		}
+		if len(first) == 0 {
+			if owner != seriesTitleOwn {
+				return fail("the result of " + owner + " is never asserted")
+			}
+			// The source only requires the call not to throw.
+			first = map[string]corpus.Value{noThrowKey: {Kind: corpus.KindBool, Bool: true}}
 		}
 		for k, v := range first {
 			expected[k] = v

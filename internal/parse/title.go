@@ -33,11 +33,113 @@ type MovieInfo struct {
 	TmdbID             int
 }
 
+// SeriesTitleInfo is the parsed series title of a release name: the title as
+// parsed, the same without its year, the year (0 when the title has none) and
+// every alternative title the name lists (empty when it lists one).
+type SeriesTitleInfo struct {
+	Title            string
+	TitleWithoutYear string
+	Year             int
+	AllTitles        []string
+}
+
+// ReleaseType is the kind of release an EpisodeInfo describes.
+type ReleaseType uint8
+
+const (
+	ReleaseTypeUnknown ReleaseType = iota
+	ReleaseTypeSingleEpisode
+	ReleaseTypeMultiEpisode
+	ReleaseTypeSeasonPack
+)
+
+// EpisodeInfo is the parsed series title of a release name. Strings and lists
+// follow the source's ParsedEpisodeInfo: empty means the source-native absence
+// (a null string and an empty one are not distinguished), lists are empty when
+// the source returns none. Languages holds stable Boxset language codes from the
+// explicit map of vocab.go. AirDate is the source's date-only text of the air
+// date, never a UTC instant. SpecialAbsoluteEpisodeNumbers are exact decimal
+// text, never floats. The first season (SeasonNumber) and the predicates below
+// derive from the stored fields; none is stored twice.
+type EpisodeInfo struct {
+	ReleaseTitle                  string
+	SeriesTitle                   string
+	AirDate                       string
+	ReleaseGroup                  string
+	ReleaseHash                   string
+	ReleaseTokens                 string
+	SeriesTitleInfo               SeriesTitleInfo
+	Quality                       Quality
+	SeasonNumbers                 []int
+	EpisodeNumbers                []int
+	AbsoluteEpisodeNumbers        []int
+	SpecialAbsoluteEpisodeNumbers []string
+	Languages                     []string
+	FullSeason                    bool
+	IsPartialSeason               bool
+	IsSeasonExtra                 bool
+	IsSeasonTitle                 bool
+	IsSplitEpisode                bool
+	IsMiniSeries                  bool
+	Special                       bool
+	SeasonPart                    int
+	DailyPart                     *int
+}
+
+// SeasonNumber is the first season, or false when there is none.
+func (e *EpisodeInfo) SeasonNumber() (int, bool) {
+	if len(e.SeasonNumbers) == 0 {
+		return 0, false
+	}
+	return e.SeasonNumbers[0], true
+}
+
+// IsMultiSeason reports whether the release spans more than one season.
+func (e *EpisodeInfo) IsMultiSeason() bool { return len(e.SeasonNumbers) > 1 }
+
+// IsDaily reports whether the release has an air date.
+func (e *EpisodeInfo) IsDaily() bool { return !isBlank(e.AirDate) }
+
+// IsAbsoluteNumbering reports whether the release has absolute episode numbers.
+func (e *EpisodeInfo) IsAbsoluteNumbering() bool { return len(e.AbsoluteEpisodeNumbers) > 0 }
+
+// IsPossibleSpecialEpisode is the source's predicate: a release without air
+// date or series title and without episodes or in season 0, one with a series
+// title and the special flag, or the single episode 0.
+func (e *EpisodeInfo) IsPossibleSpecialEpisode() bool {
+	season, hasSeason := e.SeasonNumber()
+	return (isBlank(e.AirDate) && isBlank(e.SeriesTitle) && (len(e.EpisodeNumbers) == 0 || hasSeason && season == 0)) ||
+		(!isBlank(e.SeriesTitle) && e.Special) ||
+		(len(e.EpisodeNumbers) == 1 && e.EpisodeNumbers[0] == 0)
+}
+
+// IsPossibleSceneSeasonSpecial reports whether the release is episode 0 of a
+// season other than 0.
+func (e *EpisodeInfo) IsPossibleSceneSeasonSpecial() bool {
+	season, hasSeason := e.SeasonNumber()
+	return hasSeason && season != 0 && len(e.EpisodeNumbers) == 1 && e.EpisodeNumbers[0] == 0
+}
+
+// ReleaseType is the kind of release: multi-episode, single episode, season
+// pack, or unknown.
+func (e *EpisodeInfo) ReleaseType() ReleaseType {
+	switch {
+	case len(e.EpisodeNumbers) > 1 || len(e.AbsoluteEpisodeNumbers) > 1:
+		return ReleaseTypeMultiEpisode
+	case len(e.EpisodeNumbers) == 1 || len(e.AbsoluteEpisodeNumbers) == 1:
+		return ReleaseTypeSingleEpisode
+	case e.FullSeason:
+		return ReleaseTypeSeasonPack
+	}
+	return ReleaseTypeUnknown
+}
+
 // ParsedTitle is the result of ParseTitle: exactly one kind-specific value
 // is set on success.
 type ParsedTitle struct {
-	Kind  Kind
-	Movie *MovieInfo
+	Kind    Kind
+	Movie   *MovieInfo
+	Episode *EpisodeInfo
 }
 
 // ParseTitle parses a release name as a title of kind. The name is validated
@@ -45,10 +147,9 @@ type ParsedTitle struct {
 // matching; the whole parse, including the quality, language and release
 // group parsing it runs, is then one operation under one 250 ms elapsed-work
 // budget, checked once more before the result is returned. KindMovie ports the
-// movie reference's ParseMovieTitle; a name it cannot parse is a
-// title_unrecognized *ReasonError, and KindSeries has no title parser yet and
-// is a kind_unsupported *ReasonError. On any error the ParsedTitle is the zero
-// value.
+// movie reference's ParseMovieTitle and KindSeries the series reference's
+// ParseTitle; a name it cannot parse is a title_unrecognized *ReasonError. On
+// any error the ParsedTitle is the zero value.
 func (p *Parser) ParseTitle(ctx context.Context, name string, kind Kind) (ParsedTitle, error) {
 	return p.parseTitle(ctx, name, kind, false)
 }
@@ -56,7 +157,7 @@ func (p *Parser) ParseTitle(ctx context.Context, name string, kind Kind) (Parsed
 // parseTitle is ParseTitle with the source's isDir argument of
 // ParseMovieTitle: a directory name also tries the year-first folder pattern.
 func (p *Parser) parseTitle(ctx context.Context, name string, kind Kind, isDir bool) (ParsedTitle, error) {
-	if kind != KindMovie {
+	if kind != KindMovie && kind != KindSeries {
 		return ParsedTitle{}, newReasonError(codeKindUnsupported, map[string]int64{"kind": int64(kind)})
 	}
 	if err := validateName(name); err != nil {
@@ -66,7 +167,16 @@ func (p *Parser) parseTitle(ctx context.Context, name string, kind Kind, isDir b
 	if err := b.check(); err != nil {
 		return ParsedTitle{}, err
 	}
-	info, err := p.movieTitle.parse(b, name, isDir)
+	var (
+		movie   *MovieInfo
+		episode *EpisodeInfo
+		err     error
+	)
+	if kind == KindMovie {
+		movie, err = p.movieTitle.parse(b, name, isDir)
+	} else {
+		episode, err = p.seriesTitle.parse(b, p.location, name)
+	}
 	if err != nil {
 		return ParsedTitle{}, err
 	}
@@ -76,10 +186,10 @@ func (p *Parser) parseTitle(ctx context.Context, name string, kind Kind, isDir b
 	if err := b.check(); err != nil {
 		return ParsedTitle{}, err
 	}
-	if info == nil {
+	if movie == nil && episode == nil {
 		return ParsedTitle{}, newReasonError(codeTitleUnrecognized, nil)
 	}
-	return ParsedTitle{Kind: KindMovie, Movie: info}, nil
+	return ParsedTitle{Kind: kind, Movie: movie, Episode: episode}, nil
 }
 
 // ---- budgeted replacement and split of the source's Regex API -----------------

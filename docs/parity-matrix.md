@@ -1,7 +1,7 @@
 # Parser parity matrix
 
 Local parity records for the native ports of the series and movie release-name parsers. The matrix covers the quality entry
-point of both sides and the movie title entry points; series title rows are added when that port lands. A row is evidence of an
+point of both sides and the title entry points of both sides. A row is evidence of an
 observed comparison, not a claim of completeness beyond the named entry point. Cross-app closure remains the closure audit's job.
 
 Legend: enabled = upstream-enabled in-scope cases; disabled = upstream `Ignore`/`Explicit`, retained and not asserted;
@@ -79,6 +79,18 @@ entry points outside the title branch, plus the tests that have no recordable in
 verification and asserts no parse result, so it is not part of the inventory. The language and slug fixtures other than the
 listed ones, the numeral and ISO language tests and the scene checker assert no title result and are not extracted.
 
+## Series title (`Parser.ParseTitle`, `ReleaseGroupParser.ParseReleaseGroup`, `LanguageParser.ParseLanguages`)
+
+Scope `title` of `series.jsonl` (commit `57816c149d02f95543973fefb4780c4495f8121c`): the `ParseTitle` series branch (with the
+`ParseSeriesName` and `CleanSeriesTitle` helpers) and the release group and language parsers it runs under the same budget.
+1166 enabled title cases ran (754 `ParseTitle`, 33 `ParseSeriesName`, 44 `CleanSeriesTitle`, 166 `ParseReleaseGroup`, 169
+`ParseLanguages`), 1166 passed, 0 disposed, 0 disabled. 75 other-entry cases stay out of scope. `TestCorpusCoverage` asserts every
+enabled scoped case ran. The 43 cases of `NormalizeSeriesTitleFixture.cs` are `CleanSeriesTitle` title cases, `Ríkið` (expected
+`rikid`) included. The series source names the Brazilian member `PortugueseBrazil`; it maps to `portuguese-br`. The series extractor
+records the release group the reference tests name after the two upstream products as `Neutral` (one documented substitution in
+`internal/parse/corpus/extract/main.go`, applied to every recorded input and expected string before identities are hashed); a
+`CleanSeriesTitle` expectation that carries it is compared lower-cased.
+
 ## Known movie-title source-fidelity decisions
 
 | Topic | Decision |
@@ -88,7 +100,7 @@ listed ones, the numeral and ISO language tests and the scene checker assert no 
 | Reversed names | A name containing the reversed-title marker is converted exactly as the source converts it: the interpolated character array formats as its type name, so the title becomes that text plus the untouched tail. |
 | File extension helper | The source's extension helper is outside the delivered areas. The port removes a trailing dot plus two to four letters or digits only when it is a media extension of the movie quality table (or `.par2`/`.nzb`), as the source's helper does by this author's reading; the corpus cases that carry `.mkv`, `.mp4`, `.avi` and similar extensions pass, but no case pins the `.par2`/`.nzb` members or an extension outside the table. |
 | Language members | The `Language` declaration is outside the delivered areas; the extractor accepts the members the language parser names, and `vocab.go` maps every source member (including those the parser never produces) to a code. |
-| Accent removal | The source's `CleanMovieTitle` ends in `RemoveAccent`, an extension outside the delivered areas, and the standard library has no Unicode normalization. The consumer ports `CleanMovieTitle` (normalization pattern, lower-casing, umlaut spelling) and `RemoveAccent` as the standard-library equivalent of decompose, drop non-spacing marks, recompose: a table of the lower-case Latin-1 Supplement and Latin Extended-A letters that have a canonical decomposition, plus removal of combining marks of already decomposed text. Letters without a decomposition (ø, æ, œ, ł, đ and the like) are deliberately absent, as in the source. Any other non-ASCII letter (Cyrillic, Vietnamese, Latin Extended-B) is a hard error, never a wrongly folded string, because it might carry a decomposition the table does not know. The 15 URL title cases are ASCII and the accent test (`Carnivàle`, precomposed) folds to `carnivale`; both run as title cases. |
+| Accent removal | The source's `CleanMovieTitle` ends in `RemoveAccent`, an extension outside the delivered areas, and the standard library has no Unicode normalization. The consumer ports `CleanMovieTitle` (normalization pattern, lower-casing, umlaut spelling) and `RemoveAccent` as the standard-library equivalent of decompose, drop non-spacing marks, recompose: a table of the lower-case Latin-1 Supplement and Latin Extended-A letters that have a canonical decomposition, plus removal of combining marks of already decomposed text. Letters without a decomposition (ø, æ, œ, ł, đ and the like) are deliberately absent, as in the source, with one exception: ð folds to d, because the series source asserts that `Ríkið` cleans to `rikid` (`CleanSeriesTitle` shares the table). Any other non-ASCII letter (Cyrillic, Vietnamese, Latin Extended-B) is a hard error, never a wrongly folded string, because it might carry a decomposition the table does not know. The 15 URL title cases are ASCII and the accent test (`Carnivàle`, precomposed) folds to `carnivale`; both run as title cases. |
 | String indexes | The title group's index is converted to UTF-16 code units for the simple-release-title replacement; a range outside the string is the source's exception, reported as no result. |
 | Long names | A 4096-byte name whose bulk is a trailing word parses (18 ms in the dev image). A name whose title, or whose German tag, is thousands of characters long exceeds the 50 ms match timeout in the source's unanchored bracketed-alternative and German-remux patterns and fails closed with `match_timeout`; it never returns a partial result. |
 

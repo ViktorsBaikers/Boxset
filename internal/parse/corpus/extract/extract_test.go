@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -449,6 +450,535 @@ const (
 	modelModifier  = "namespace Fixture.Qualities\n{\n    public enum Modifier\n    {\n        NONE = 0,\n        REMUX\n    }\n}\n"
 )
 
+// modelSeriesLanguages names the Language members the series parser produces. The
+// source holds an interpolated pattern the lexer rejects: the language source is
+// only mined for member names, so it is scanned as text.
+const modelSeriesLanguages = `namespace Fixture.Parser
+{
+    public static class LanguageParser
+    {
+        private static readonly Regex LanguageRegex = new(@$"(?:{LanguagesOnlyRegex})", RegexOptions.IgnoreCase);
+
+        public static List<Language> ParseLanguages(string title)
+        {
+            // Language.Commented is not a member of the source
+            languages.Add(Language.Unknown);
+            languages.Add(Language.German);
+            languages.Add(Language.Hindi);
+            languages.Add(Language.English);
+            languages.Add(Language.French);
+            languages.Add(Language.Original);
+            var x = SubLanguage.Hidden;
+        }
+    }
+}
+`
+
+// The series title fixtures of the synthetic tree: every NUnit and
+// FluentAssertions form the series title cases use. A title fixture not listed
+// is empty.
+var seriesTitleFixtures = map[string]string{
+	"tests/ParserFixture.cs":                      fixtureSeriesParser,
+	"tests/MultiEpisodeParserFixture.cs":          fixtureSeriesMulti,
+	"tests/SeasonParserFixture.cs":                fixtureSeriesSeason,
+	"tests/SeasonTitleParserFixture.cs":           fixtureSeriesSeasonTitle,
+	"tests/AbsoluteEpisodeNumberParserFixture.cs": fixtureSeriesAbsolute,
+	"tests/DailyEpisodeParserFixture.cs":          fixtureSeriesDaily,
+	"tests/CrapParserFixture.cs":                  fixtureSeriesCrap,
+	"tests/HashedReleaseFixture.cs":               fixtureSeriesHashed,
+	"tests/ReleaseGroupParserFixture.cs":          fixtureSeriesGroups,
+	"tests/UnicodeReleaseParserFixture.cs":        fixtureSeriesUnicode,
+	"tests/IsPossibleSpecialEpisodeFixture.cs":    fixtureSeriesSpecial,
+	"tests/LanguageParserFixture.cs":              fixtureSeriesLanguages,
+}
+
+const fixtureSeriesParser = `using System.Linq;
+using FluentAssertions;
+using NUnit.Framework;
+using NzbDrone.Core.Languages;
+using NzbDrone.Core.Qualities;
+
+namespace Fixture.ParserTests
+{
+    [TestFixture]
+    public class ParserFixture
+    {
+        [TestCase("Series Title - 4x05 - Title", "seriestitle")]
+        public void should_parse_series_name(string postTitle, string title)
+        {
+            var result = Parser.Parser.ParseSeriesName(postTitle).CleanSeriesTitle();
+            result.Should().Be(title.CleanSeriesTitle());
+        }
+
+        [TestCase("Series 2022 S03E14 720p", "Series", 2022)]
+        [TestCase("Series S03E14 720p", "Series")]
+        public void should_parse_series_title_info(string postTitle, string titleWithoutYear, int year = 0)
+        {
+            var seriesTitleInfo = Parser.Parser.ParseTitle(postTitle).SeriesTitleInfo;
+            seriesTitleInfo.TitleWithoutYear.Should().Be(titleWithoutYear);
+            seriesTitleInfo.Year.Should().Be(year);
+        }
+
+        [Test]
+        public void should_have_same_title_for_title_and_title_without_year()
+        {
+            const string title = "Series.Title.S01E01.pilot.720p.hdtv";
+
+            var result = Parser.Parser.ParseTitle(title).SeriesTitleInfo;
+
+            result.Title.Should().Be(result.TitleWithoutYear);
+        }
+
+        [Test]
+        public void should_remove_accents_from_title()
+        {
+            const string title = "Seri\u00E0es";
+
+            title.CleanSeriesTitle().Should().Be("seriaes");
+        }
+
+        [TestCase("Show TV - Series Title : 02 Road [S04].mp4")]
+        public void should_clean_up_invalid_path_characters(string postTitle)
+        {
+            Parser.Parser.ParseTitle(postTitle);
+        }
+
+        [TestCase("Series.S01E02.Chained.Title.mkv")]
+        public void should_parse_quality_from_extension(string title)
+        {
+            Parser.Parser.ParseTitle(title).Quality.Quality.Should().NotBe(Quality.Unknown);
+            Parser.Parser.ParseTitle(title).Quality.SourceDetectionSource.Should().Be(QualityDetectionSource.Extension);
+        }
+
+        [TestCase("One / Two / S2E1-4 of 10", "One", "Two")]
+        public void should_parse_multiple_series_titles(string postTitle, params string[] titles)
+        {
+            var seriesTitleInfo = Parser.Parser.ParseTitle(postTitle).SeriesTitleInfo;
+            seriesTitleInfo.AllTitles.Should().BeEquivalentTo(titles);
+        }
+
+        [TestCase("Series in Russian - S01E08", "Unknown")]
+        public void should_parse_language_after_parsing_title(string postTitle, string expectedLanguage)
+        {
+            var result = Parser.Parser.ParseTitle(postTitle);
+
+            result.Languages.Count.Should().Be(1);
+            result.Languages.Should().Contain((Language)expectedLanguage);
+        }
+    }
+}
+`
+
+const fixtureSeriesMulti = `using FluentAssertions;
+using NUnit.Framework;
+
+namespace Fixture.ParserTests
+{
+    [TestFixture]
+    public class MultiEpisodeParserFixture
+    {
+        [TestCase("Series.S03E01-06", "Series", 3, new[] { 1, 2, 3, 4, 5, 6 })]
+        [TestCase("Series.Title.103.104", "Series Title", 1, new[] { 3, 4 })]
+
+        // [TestCase("", "", , new [] {  })]
+        public void should_parse_multiple_episodes(string postTitle, string title, int season, int[] episodes)
+        {
+            var result = Parser.Parser.ParseTitle(postTitle);
+            result.SeasonNumber.Should().Be(season);
+            result.EpisodeNumbers.Should().BeEquivalentTo(episodes);
+            result.SeriesTitle.Should().Be(title);
+            result.AbsoluteEpisodeNumbers.Should().BeEmpty();
+            result.FullSeason.Should().BeFalse();
+        }
+    }
+}
+`
+
+const fixtureSeriesSeason = `using FluentAssertions;
+using NUnit.Framework;
+
+namespace Fixture.ParserTests
+{
+    [TestFixture]
+    public class SeasonParserFixture
+    {
+        [TestCase("The Series S01-05", "The Series", new[] { 1, 2, 3, 4, 5 })]
+        public void should_parse_multi_season_release(string postTitle, string title, int[] expectedSeasons)
+        {
+            var result = Parser.Parser.ParseTitle(postTitle);
+            result.SeriesTitle.Should().Be(title);
+            result.IsMultiSeason.Should().BeTrue();
+            result.SeasonNumbers.Should().Equal(expectedSeasons);
+        }
+
+        [TestCase("Series.S02.720p", 2)]
+        public void should_not_be_multi_season_for_a_single_season_release(string postTitle, int season)
+        {
+            var result = Parser.Parser.ParseTitle(postTitle);
+            result.IsMultiSeason.Should().BeFalse();
+            result.SeasonNumbers.Should().Equal(season);
+        }
+
+        [Test]
+        public void should_not_parse_season_folders()
+        {
+            var result = Parser.Parser.ParseTitle("Season 3");
+            result.Should().BeNull();
+        }
+    }
+}
+`
+
+const fixtureSeriesSeasonTitle = `using FluentAssertions;
+using NUnit.Framework;
+
+namespace Fixture.ParserTests;
+
+[TestFixture]
+public class SeasonTitleParserFixture
+{
+    [TestCase("[Group] Series Title Curse (BS11 1280x720 x264 AAC)", "Series Title Curse")]
+    public void should_return_the_title_when_there_is_no_season_or_episode(string releaseTitle, string expectedTitle)
+    {
+        var result = Parser.Parser.ParseSeasonTitle(releaseTitle);
+
+        result.Should().NotBeNull();
+        result.SeasonNumber.Should().BeNull();
+    }
+
+    [TestCase("Series Title S02E05 1080p WEB-DL")]
+    public void should_not_flag_a_release_the_regexes_can_parse(string releaseTitle)
+    {
+        Parser.Parser.ParseTitle(releaseTitle).IsSeasonTitle.Should().BeFalse();
+    }
+}
+`
+
+const fixtureSeriesAbsolute = `using System.IO;
+using System.Linq;
+using FluentAssertions;
+using NUnit.Framework;
+
+namespace Fixture.ParserTests
+{
+    [TestFixture]
+    public class AbsoluteEpisodeNumberParserFixture
+    {
+        [TestCase("[Sub] Show - 07 [720p]", "Show", 7, 0, 0)]
+        public void should_parse_absolute_numbers(string postTitle, string title, int absoluteEpisodeNumber, int seasonNumber, int episodeNumber)
+        {
+            var result = Parser.Parser.ParseTitle(postTitle);
+            result.Should().NotBeNull();
+            result.AbsoluteEpisodeNumbers.Single().Should().Be(absoluteEpisodeNumber);
+            result.SeasonNumber.Should().Be(seasonNumber);
+            result.EpisodeNumbers.SingleOrDefault().Should().Be(episodeNumber);
+            result.SeriesTitle.Should().Be(title);
+        }
+
+        [TestCase("[Doutei] Some Good - 01-12 [BD]", "Some Good", 1, 12)]
+        public void should_parse_multi_episode_absolute_numbers(string postTitle, string title, int firstAbsoluteEpisodeNumber, int lastAbsoluteEpisodeNumber)
+        {
+            var absoluteEpisodeNumbers = Enumerable.Range(firstAbsoluteEpisodeNumber, lastAbsoluteEpisodeNumber - firstAbsoluteEpisodeNumber + 1)
+                                                        .ToArray();
+            var result = Parser.Parser.ParseTitle(postTitle);
+            result.Should().NotBeNull();
+            result.AbsoluteEpisodeNumbers.Should().BeEquivalentTo(absoluteEpisodeNumbers);
+            result.SeriesTitle.Should().Be(title);
+        }
+
+        [TestCase("[Anime Time] Series no Mayo - 12.5.mkv", "Series no Mayo", 12.5)]
+        public void should_handle_anime_recap_numbering(string postTitle, string title, double specialEpisodeNumber)
+        {
+            var result = Parser.Parser.ParseTitle(postTitle);
+            result.Should().NotBeNull();
+            result.SpecialAbsoluteEpisodeNumbers.Should().NotBeEmpty();
+            result.SpecialAbsoluteEpisodeNumbers.Should().BeEquivalentTo(new[] { (decimal)specialEpisodeNumber });
+        }
+
+        [TestCase("[A] Anime Series - 05.5 - S00E01 [BD]", "Anime Series", 5.5, 0, 1)]
+        public void should_parse_absolute_followed_by_standard_as_standard(string releaseName, string title, decimal specialEpisodeNumber, int seasonNumber, int episodeNumber)
+        {
+            var result = Parser.Parser.ParseTitle(releaseName);
+
+            result.SpecialAbsoluteEpisodeNumbers.Should().HaveCount(1);
+            result.SpecialAbsoluteEpisodeNumbers.First().Should().Be(specialEpisodeNumber);
+        }
+
+        [TestCase("Series Title 921-928", "921.mkv", "Series Title", 921)]
+        public void should_handle_ambiguously_named_anime_files_in_batch_release(string releaseName, string filename, string title, int absoluteEpisodeNumber)
+        {
+            var result = Parser.Parser.ParsePath(Path.Combine(@"C:\Test".AsOsAgnostic(), releaseName, filename));
+            result.Should().NotBeNull();
+        }
+    }
+}
+`
+
+const fixtureSeriesDaily = `using System;
+using FluentAssertions;
+using NUnit.Framework;
+
+namespace Fixture.ParserTests
+{
+    [TestFixture]
+    public class DailyEpisodeParserFixture
+    {
+        [TestCase("Series Title 2011 04 18 Emma Roberts HDTV", "Series Title", 2011, 04, 18)]
+        public void should_parse_daily_episode(string postTitle, string title, int year, int month, int day)
+        {
+            var result = Parser.Parser.ParseTitle(postTitle);
+            var airDate = new DateTime(year, month, day);
+            result.Should().NotBeNull();
+            result.SeriesTitle.Should().Be(title);
+            result.AirDate.Should().Be(airDate.ToString(Episode.AIR_DATE_FORMAT));
+            result.EpisodeNumbers.Should().BeEmpty();
+        }
+
+        [TestCase("Series.Title.2015.09.07.Part.2.720p", "Series Title", 2015, 9, 7, 2)]
+        public void should_parse_daily_episode_with_multiple_parts(string postTitle, string title, int year, int month, int day, int part)
+        {
+            var result = Parser.Parser.ParseTitle(postTitle);
+            result.DailyPart.Should().Be(part);
+        }
+
+        [TestCase("A Late Talk Show {year} {month} {day} Emma Roberts HDTV")]
+        public void should_not_accept_ancient_daily_series(string title)
+        {
+            var yearTooLow = title.Expand(new { year = 1950, month = 10, day = 14 });
+            Parser.Parser.ParseTitle(yearTooLow).Should().BeNull();
+        }
+
+        [TestCase("A Late Talk Show {year} {month} {day} Emma Roberts HDTV")]
+        public void should_accept_dates_within_future_limit(string title)
+        {
+            var twoDaysFromNow = DateTime.Now.AddDays(2);
+
+            var validDate = title.Expand(new { year = twoDaysFromNow.Year, month = twoDaysFromNow.Month.ToString("00"), day = twoDaysFromNow.Day.ToString("00") });
+
+            var result = Parser.Parser.ParseTitle(validDate);
+
+            result.Should().NotBeNull();
+            result.AirDate.Should().NotBeNull();
+            result.AirDate.Should().Be(twoDaysFromNow.ToString(Episode.AIR_DATE_FORMAT));
+        }
+
+        [TestCase(7)]
+        public void should_parse_episodes_released_before_their_air_date(int days)
+        {
+            var airDate = DateTime.Today.AddDays(days);
+            var title = string.Format("A.Talk.Show.{0:yyyy.MM.dd}.1080p.WEB-DL.H264-RlsGrp", airDate);
+
+            Parser.Parser.ParseTitle(title).AirDate.Should().Be(airDate.ToString(Episode.AIR_DATE_FORMAT));
+        }
+    }
+}
+`
+
+const fixtureSeriesCrap = `using System;
+using FluentAssertions;
+using NUnit.Framework;
+
+namespace Fixture.ParserTests
+{
+    [TestFixture]
+    public class CrapParserFixture
+    {
+        [TestCase("THIS SHOULD NEVER PARSE")]
+        public void should_not_parse_crap(string title)
+        {
+            Parser.Parser.ParseTitle(title).Should().BeNull();
+            ExceptionVerification.IgnoreWarns();
+        }
+
+        [TestCase("ror-240618_1007-1022-")]
+        public void should_parse_unknown_formats_without_error(string title)
+        {
+            Parser.Parser.ParseTitle(title).Should().NotBeNull();
+        }
+
+        [Test]
+        public void should_not_parse_md5()
+        {
+            var hash = "CRAPPY TEST SEED";
+            var hashAlgo = System.Security.Cryptography.MD5.Create();
+            if (Parser.Parser.ParseTitle(hash) == null)
+            {
+                hash.Should().NotBeNull();
+            }
+        }
+    }
+}
+`
+
+const fixtureSeriesHashed = `using FluentAssertions;
+using NUnit.Framework;
+using NzbDrone.Core.Qualities;
+
+namespace Fixture.ParserTests
+{
+    [TestFixture]
+    public class HashedReleaseFixture
+    {
+        public static object[] HashedReleaseParserCases =
+        {
+            new object[]
+            {
+                @"C:\Test\Some.Hashed.Release.S01E01\0e895c37245186812cb08aab1529cf8ee389dd05.mkv".AsOsAgnostic(),
+                "Some Hashed Release",
+                Quality.SDTV,
+                "Mercury"
+            },
+            new object[]
+            {
+                @"50E50S.denorD.mkv".AsOsAgnostic(),
+                "Droned",
+                Quality.Bluray720p,
+                null
+            },
+        };
+
+        [Test]
+        [TestCaseSource(nameof(HashedReleaseParserCases))]
+        public void should_properly_parse_hashed_releases(string path, string title, Quality quality, string releaseGroup)
+        {
+            var result = Parser.Parser.ParsePath(path);
+            result.SeriesTitle.Should().Be(title);
+        }
+    }
+}
+`
+
+const fixtureSeriesGroups = `using FluentAssertions;
+using NUnit.Framework;
+
+namespace Fixture.ParserTests
+{
+    [TestFixture]
+    public class ReleaseGroupParserFixture
+    {
+        [TestCase("Series.2009.S01E14.English.HDTV.XviD-LOL", "LOL")]
+        [TestCase("Series 2009 S01E14 English HDTV XviD LOL", null)]
+        public void should_parse_release_group(string title, string expected)
+        {
+            Parser.ReleaseGroupParser.ParseReleaseGroup(title).Should().Be(expected);
+        }
+
+        [Test]
+        public void should_not_include_extension_in_release_group()
+        {
+            const string path = @"C:\Test\Doctor.Series.2005.s01e01.internal.bdrip.x264-archivist.mkv";
+
+            Parser.Parser.ParsePath(path).ReleaseGroup.Should().Be("archivist");
+        }
+    }
+}
+`
+
+const fixtureSeriesUnicode = `using System.Linq;
+using FluentAssertions;
+using NUnit.Framework;
+
+namespace Fixture.ParserTests
+{
+    [TestFixture]
+    public class UnicodeReleaseParserFixture
+    {
+        [TestCase("[Group] Show\u0001 - 12 [720p]", "Show", "Group", 12)]
+        public void should_parse_chinese_anime_releases(string postTitle, string title, string subgroup, int absoluteEpisodeNumber)
+        {
+            postTitle = XmlCleaner.ReplaceUnicode(postTitle);
+
+            var result = Parser.Parser.ParseTitle(postTitle);
+            result.Should().NotBeNull();
+            result.ReleaseGroup.Should().Be(subgroup);
+            result.AbsoluteEpisodeNumbers.Single().Should().Be(absoluteEpisodeNumber);
+        }
+    }
+}
+`
+
+const fixtureSeriesSpecial = `using FluentAssertions;
+using NUnit.Framework;
+using NzbDrone.Core.Parser.Model;
+
+namespace Fixture.ParserTests
+{
+    [TestFixture]
+    public class IsPossibleSpecialEpisodeFixture
+    {
+        [Test]
+        public void should_not_treat_files_without_a_series_title_as_a_special()
+        {
+            var parsedEpisodeInfo = new ParsedEpisodeInfo
+                                    {
+                                        EpisodeNumbers = [7],
+                                        SeasonNumbers = [1],
+                                        SeriesTitle = ""
+                                    };
+
+            parsedEpisodeInfo.IsPossibleSpecialEpisode.Should().BeFalse();
+        }
+
+        [TestCase("Title.the.Series.S05.Special.HDTV.x264-2HD")]
+        public void IsPossibleSpecialEpisode_should_be_true(string title)
+        {
+            Parser.Parser.ParseTitle(title).IsPossibleSpecialEpisode.Should().BeTrue();
+        }
+    }
+}
+`
+
+const fixtureSeriesLanguages = `using FluentAssertions;
+using NUnit.Framework;
+using NzbDrone.Core.Languages;
+
+namespace Fixture.ParserTests
+{
+    [TestFixture]
+    public class LanguageParserFixture
+    {
+        [TestCase("Series Title - S01E01 - Pilot.sub")]
+        public void should_parse_subtitle_language_unknown(string fileName)
+        {
+            var result = LanguageParser.ParseSubtitleLanguage(fileName);
+            result.Should().Be(Language.Unknown);
+        }
+
+        [TestCase("Title.the.Series.2009.S01E14.French.HDTV.XviD-LOL")]
+        public void should_parse_language_french(string postTitle)
+        {
+            var result = LanguageParser.ParseLanguages(postTitle);
+            result.Should().Contain(Language.French);
+        }
+
+        [TestCase("Series S02 Hindi+English")]
+        public void should_parse_hindi_and_english(string postTitle)
+        {
+            var result = LanguageParser.ParseLanguages(postTitle);
+            result.Should().BeEquivalentTo(new[] { Language.Hindi, Language.English });
+        }
+
+        [TestCase("Series.Title.2023.S01E01.German.DL.EAC3.1080p")]
+        public void should_add_original_language_to_german_release_with_dl_tag(string postTitle)
+        {
+            var result = Parser.Parser.ParseTitle(postTitle);
+            result.Languages.Count.Should().Be(2);
+            result.Languages.Should().Contain(Language.German);
+            result.Languages.Should().Contain(Language.Original);
+        }
+
+        [TestCase("Name (2020) - S01E20 - [AAC 2.0].testtitle.default.eng.forced.ass", new[] { "default", "forced" }, "testtitle", "English")]
+        public void should_parse_title_and_tags(string postTitle, string[] expectedTags, string expectedTitle, string expectedLanguage)
+        {
+            var subtitleTitleInfo = LanguageParser.ParseSubtitleLanguageInformation(postTitle);
+
+            subtitleTitleInfo.LanguageTags.Should().BeEquivalentTo(expectedTags);
+            subtitleTitleInfo.Language.Should().BeEquivalentTo((Language)expectedLanguage);
+        }
+    }
+}
+`
+
 // writeTree lays out a synthetic source tree for spec under a fresh directory.
 func writeTree(t *testing.T, spec appSpec, quality string) string {
 	t.Helper()
@@ -475,6 +1005,14 @@ func writeTree(t *testing.T, spec appSpec, quality string) string {
 		}
 	}
 	for _, rel := range spec.titles {
+		if spec.name == "series" {
+			if src, ok := seriesTitleFixtures[rel]; ok {
+				content[rel] = src
+			} else {
+				content[rel] = fixtureTitleEmpty
+			}
+			continue
+		}
 		switch rel {
 		case "tests/ParserFixture.cs":
 			content[rel] = fixtureTitleParser
@@ -492,6 +1030,9 @@ func writeTree(t *testing.T, spec appSpec, quality string) string {
 	}
 	if spec.languages != "" {
 		content[spec.languages] = modelLanguages
+		if spec.name == "series" {
+			content[spec.languages] = modelSeriesLanguages
+		}
 	}
 	for _, rel := range spec.provenance {
 		content[rel] = provenanceStub
@@ -572,10 +1113,15 @@ func TestExtractRecordsEverySourceCase(t *testing.T) {
 			if h.App != spec.name || h.SourceRepository != spec.repository || h.SourceCommit != testCommit || h.License != "GPL-3.0" {
 				t.Errorf("attribution lost: %+v", h)
 			}
-			// The quality fixtures give 15 cases (14 enabled, 1 ignored); the movie side's title
-			// fixtures add 24: 16 enabled title cases, 1 ignored title case and 7 out of scope.
+			// The quality fixtures give 15 cases (14 enabled, 1 ignored); each side's title
+			// fixtures add more. The movie side's add 24: 16 enabled title cases, 1 ignored title
+			// case and 7 out of scope. The series side's add 42: 33 enabled title cases and 9 out
+			// of scope (no title case is ignored).
 			wantCounts := map[string]int{"cases": 15, "enabled": 14, "disabled": 1, "out_of_scope": 0}
-			if len(spec.titles) > 0 {
+			switch {
+			case spec.name == "series":
+				wantCounts = map[string]int{"cases": 57, "enabled": 47, "disabled": 1, "out_of_scope": 9}
+			case len(spec.titles) > 0:
 				wantCounts = map[string]int{"cases": 39, "enabled": 30, "disabled": 2, "out_of_scope": 7}
 			}
 			for k, want := range wantCounts {
@@ -719,7 +1265,7 @@ func TestExtractRejectsUnsupportedFormsWithLocation(t *testing.T) {
 		{"loop statement", body("while (true) { }"), "while (true)", "unsupported statement while"},
 		{"unknown attribute", wrap("\n        [Category(\"slow\")]\n        [TestCase(\"x\")]\n        public void m(string title) { QualityParser.ParseQuality(title).Quality.Should().Be(Quality.SDTV); }\n"), "[Category", "unsupported attribute Category"},
 		{"never asserted", body("QualityParser.ParseQuality(title);"), "QualityParser.ParseQuality(title);", "is never asserted"},
-		{"unsupported assertion", body("QualityParser.ParseQuality(title).Quality.Should().NotBe(Quality.SDTV);"), "NotBe", "unsupported method"},
+		{"unsupported assertion", body("QualityParser.ParseQuality(title).Revision.Version.Should().BeGreaterThan(0);"), "BeGreaterThan", "unsupported method"},
 		{"interpolated string", body("var t = $\"{title}\";"), "$\"", "interpolated string is not supported"},
 		{"property member", wrap("\n        public int Count { get; set; }\n"), "{ get;", "unsupported member"},
 		{"missing source", wrap("\n        [Test]\n        [TestCaseSource(\"Nope\")]\n        public void m(string title) { }\n"), "[TestCaseSource", "is not a static object[] field"},
@@ -780,7 +1326,9 @@ func TestExtractPublishesBothCorporaDeterministically(t *testing.T) {
 			t.Errorf("summary lacks %s hash:\n%s", name, stdout)
 		}
 	}
-	if !strings.Contains(stdout, "extract: ok version=1 files=2") || !strings.Contains(stdout, "cases=15 enabled=14 disabled=1 out_of_scope=0") {
+	if !strings.Contains(stdout, "extract: ok version=1 files=2") ||
+		!strings.Contains(stdout, "app=series file=series.jsonl cases=57 enabled=47 disabled=1 out_of_scope=9") ||
+		!strings.Contains(stdout, "app=movie file=movie.jsonl cases=39 enabled=30 disabled=2 out_of_scope=7") {
 		t.Errorf("summary: %s", stdout)
 	}
 	if !strings.Contains(stdout, "extract: source app=series path="+fixtureRel+" bytes=") {
@@ -1703,16 +2251,207 @@ func TestExtractRecordsEveryTitleCaseWithItsAssertedProperties(t *testing.T) {
 	}
 }
 
-func TestExtractSeriesSideRecordsNoTitleCases(t *testing.T) {
+// seriesTitleCorpus extracts the synthetic series tree and reads it back through
+// the one canonical reader.
+func seriesTitleCorpus(t *testing.T) *corpus.Corpus {
+	t.Helper()
 	spec := appSpecs()[0]
-	if len(spec.titles) != 0 || spec.languages != "" || len(spec.provenance) != 0 {
-		t.Fatalf("the series side must not extract titles yet: %+v", spec)
+	c, _, err := extractApp(spec, writeTree(t, spec, fixtureQuality), testCommit)
+	if err != nil {
+		t.Fatalf("extractApp: %v", err)
 	}
-	for _, cs := range extractSynthetic(t, spec).Cases {
-		if cs.Scope != corpus.ScopeQuality {
-			t.Errorf("series case %s has scope %s", cs.ID, cs.Scope)
+	data, err := corpus.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := corpus.Read(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("corpus.Read: %v", err)
+	}
+	return got
+}
+
+func TestExtractRecordsEverySeriesTitleCaseWithItsAssertedProperties(t *testing.T) {
+	got := seriesTitleCorpus(t)
+	input := func(names ...string) corpus.Value {
+		items := make([]corpus.Value, len(names))
+		for i, n := range names {
+			items[i] = str(n)
+		}
+		return arr(items...)
+	}
+	date := func(offset int, template string) corpus.Value {
+		return corpus.Value{Kind: corpus.KindDate, Offset: offset, Template: template}
+	}
+	truth := corpus.Value{Kind: corpus.KindBool, Bool: true}
+	falsity := corpus.Value{Kind: corpus.KindBool}
+	ints := func(n ...int64) corpus.Value {
+		items := make([]corpus.Value, len(n))
+		for i, v := range n {
+			items[i] = num(v)
+		}
+		return arr(items...)
+	}
+	dec := func(s string) corpus.Value { return corpus.Value{Kind: corpus.KindDecimal, Str: s} }
+	language := func(m string) corpus.Value { return enum("Language", m) }
+	extension := enum("QualityDetectionSource", "Extension")
+	const (
+		parseTitle = "Parser.ParseTitle"
+		seriesName = "Parser.ParseSeriesName"
+		cleanTitle = "Parser.CleanSeriesTitle"
+		groupOwner = "ReleaseGroupParser.ParseReleaseGroup"
+		langOwner  = "LanguageParser.ParseLanguages"
+	)
+	for _, tc := range []struct {
+		method, entry, owner string
+		want                 map[string]corpus.Value
+	}{
+		{"should_parse_series_name", "TestCase#1", seriesName, map[string]corpus.Value{
+			corpus.InputKey: input("Series Title - 4x05 - Title"), "SeriesName.CleanSeriesTitle": str("seriestitle")}},
+		{"should_parse_series_title_info", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("Series 2022 S03E14 720p"), "SeriesTitleInfo.TitleWithoutYear": str("Series"), "SeriesTitleInfo.Year": num(2022)}},
+		{"should_parse_series_title_info", "TestCase#2", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("Series S03E14 720p"), "SeriesTitleInfo.TitleWithoutYear": str("Series"), "SeriesTitleInfo.Year": num(0)}},
+		{"should_have_same_title_for_title_and_title_without_year", "Test", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("Series.Title.S01E01.pilot.720p.hdtv"), "SeriesTitleInfo.Title==SeriesTitleInfo.TitleWithoutYear": truth}},
+		{"should_remove_accents_from_title", "Test", cleanTitle, map[string]corpus.Value{
+			corpus.InputKey: input("Seri\u00E0es"), "$result": str("seriaes")}},
+		{"should_clean_up_invalid_path_characters", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("Show TV - Series Title : 02 Road [S04].mp4"), "$result.NoThrow": truth}},
+		// Each property is asserted on its own call of the same input: the assertions accumulate.
+		{"should_parse_quality_from_extension", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey:         input("Series.S01E02.Chained.Title.mkv", "Series.S01E02.Chained.Title.mkv"),
+			"Quality.Quality.NotBe": enum("Quality", "Unknown"), "Quality.SourceDetectionSource": extension}},
+		{"should_parse_multiple_series_titles", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("One / Two / S2E1-4 of 10"), "SeriesTitleInfo.AllTitles.EquivalentTo": input("One", "Two")}},
+		{"should_parse_language_after_parsing_title", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("Series in Russian - S01E08"), "Languages.Count": num(1), "Languages.Contain": arr(language("Unknown"))}},
+		{"should_parse_multiple_episodes", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("Series.S03E01-06"), "SeasonNumber": num(3), "EpisodeNumbers.EquivalentTo": ints(1, 2, 3, 4, 5, 6),
+			"SeriesTitle": str("Series"), "AbsoluteEpisodeNumbers.Count": num(0), "FullSeason": falsity}},
+		{"should_parse_multi_season_release", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("The Series S01-05"), "SeriesTitle": str("The Series"), "IsMultiSeason": truth, "SeasonNumbers.Equal": ints(1, 2, 3, 4, 5)}},
+		// A scalar Equal is a list of one.
+		{"should_not_be_multi_season_for_a_single_season_release", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("Series.S02.720p"), "IsMultiSeason": falsity, "SeasonNumbers.Equal": ints(2)}},
+		{"should_not_parse_season_folders", "Test", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("Season 3"), "$result": null}},
+		{"should_not_flag_a_release_the_regexes_can_parse", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("Series Title S02E05 1080p WEB-DL"), "IsSeasonTitle": falsity}},
+		{"should_parse_absolute_numbers", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("[Sub] Show - 07 [720p]"), "$result.NotNull": truth, "AbsoluteEpisodeNumbers.Single()": num(7),
+			"SeasonNumber": num(0), "EpisodeNumbers.SingleOrDefault()": num(0), "SeriesTitle": str("Show")}},
+		// Enumerable.Range(first, last - first + 1).ToArray() is a list of the integers between.
+		{"should_parse_multi_episode_absolute_numbers", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("[Doutei] Some Good - 01-12 [BD]"), "$result.NotNull": truth,
+			"AbsoluteEpisodeNumbers.EquivalentTo": ints(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12), "SeriesTitle": str("Some Good")}},
+		// A double argument cast to decimal is exact decimal text.
+		{"should_handle_anime_recap_numbering", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("[Anime Time] Series no Mayo - 12.5.mkv"), "$result.NotNull": truth,
+			"SpecialAbsoluteEpisodeNumbers.NotEmpty": truth, "SpecialAbsoluteEpisodeNumbers.EquivalentTo": arr(dec("12.5"))}},
+		{"should_parse_absolute_followed_by_standard_as_standard", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("[A] Anime Series - 05.5 - S00E01 [BD]"), "SpecialAbsoluteEpisodeNumbers.Count": num(1),
+			"SpecialAbsoluteEpisodeNumbers.First()": dec("5.5")}},
+		{"should_handle_ambiguously_named_anime_files_in_batch_release", "TestCase#1", "Parser.ParsePath", nil},
+		{"should_return_the_title_when_there_is_no_season_or_episode", "TestCase#1", "Parser.ParseSeasonTitle", nil},
+		// new DateTime(year, month, day).ToString(Episode.AIR_DATE_FORMAT) is the concrete date.
+		{"should_parse_daily_episode", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("Series Title 2011 04 18 Emma Roberts HDTV"), "$result.NotNull": truth, "SeriesTitle": str("Series Title"),
+			"AirDate": str("2011-04-18"), "EpisodeNumbers.Count": num(0)}},
+		{"should_parse_daily_episode_with_multiple_parts", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("Series.Title.2015.09.07.Part.2.720p"), "DailyPart": num(2)}},
+		// Expand with literals is a plain name.
+		{"should_not_accept_ancient_daily_series", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("A Late Talk Show 1950 10 14 Emma Roberts HDTV"), "$result": null}},
+		// Expand with the year, month and day of a symbolic date stays symbolic.
+		{"should_accept_dates_within_future_limit", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: arr(date(2, "A Late Talk Show {0:yyyy} {0:MM} {0:dd} Emma Roberts HDTV")), "$result.NotNull": truth,
+			"AirDate.NotNull": truth, "AirDate": date(2, "{0:yyyy-MM-dd}")}},
+		{"should_parse_episodes_released_before_their_air_date", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: arr(date(7, "A.Talk.Show.{0:yyyy.MM.dd}.1080p.WEB-DL.H264-RlsGrp")), "AirDate": date(7, "{0:yyyy-MM-dd}")}},
+		{"should_not_parse_crap", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("THIS SHOULD NEVER PARSE"), "$result": null}},
+		{"should_parse_unknown_formats_without_error", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("ror-240618_1007-1022-"), "$result.NotNull": truth}},
+		// A name built with MD5 has no recordable input.
+		{"should_not_parse_md5", "Test", parseTitle, nil},
+		{"should_properly_parse_hashed_releases", "TestCaseSource:HashedReleaseParserCases#1", "Parser.ParsePath", nil},
+		{"should_properly_parse_hashed_releases", "TestCaseSource:HashedReleaseParserCases#2", "Parser.ParsePath", nil},
+		{"should_parse_release_group", "TestCase#1", groupOwner, map[string]corpus.Value{
+			corpus.InputKey: input("Series.2009.S01E14.English.HDTV.XviD-LOL"), "$result": str("LOL")}},
+		{"should_parse_release_group", "TestCase#2", groupOwner, map[string]corpus.Value{
+			corpus.InputKey: input("Series 2009 S01E14 English HDTV XviD LOL"), "$result": null}},
+		{"should_not_include_extension_in_release_group", "Test", "Parser.ParsePath", nil},
+		// An assignment to the parameter: XmlCleaner.ReplaceUnicode drops the characters XML does not allow.
+		{"should_parse_chinese_anime_releases", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("[Group] Show - 12 [720p]"), "$result.NotNull": truth, "ReleaseGroup": str("Group"), "AbsoluteEpisodeNumbers.Single()": num(12)}},
+		{"should_not_treat_files_without_a_series_title_as_a_special", "Test", "ParsedEpisodeInfo.IsPossibleSpecialEpisode", nil},
+		{"IsPossibleSpecialEpisode_should_be_true", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("Title.the.Series.S05.Special.HDTV.x264-2HD"), "IsPossibleSpecialEpisode": truth}},
+		{"should_parse_subtitle_language_unknown", "TestCase#1", "LanguageParser.ParseSubtitleLanguage", nil},
+		{"should_parse_language_french", "TestCase#1", langOwner, map[string]corpus.Value{
+			corpus.InputKey: input("Title.the.Series.2009.S01E14.French.HDTV.XviD-LOL"), "$result.Contain": arr(language("French"))}},
+		{"should_parse_hindi_and_english", "TestCase#1", langOwner, map[string]corpus.Value{
+			corpus.InputKey: input("Series S02 Hindi+English"), "$result.EquivalentTo": arr(language("Hindi"), language("English"))}},
+		{"should_add_original_language_to_german_release_with_dl_tag", "TestCase#1", parseTitle, map[string]corpus.Value{
+			corpus.InputKey: input("Series.Title.2023.S01E01.German.DL.EAC3.1080p"), "Languages.Count": num(2),
+			"Languages.Contain": arr(language("German"), language("Original"))}},
+		{"should_parse_title_and_tags", "TestCase#1", "LanguageParser.ParseSubtitleLanguageInformation", nil},
+	} {
+		cs := caseBy(t, got, tc.method, tc.entry)
+		want := tc.want
+		scope := corpus.ScopeTitle
+		if want == nil {
+			// A method of a title fixture that asserts no series title entry point is retained
+			// out of scope with its source arguments and no recorded input.
+			scope, want = corpus.ScopeOutOfScope, map[string]corpus.Value{corpus.InputKey: arr()}
+		}
+		if cs.Scope != scope || cs.ScopeOwner != tc.owner || !cs.UpstreamEnabled {
+			t.Errorf("%s %s: scope %s owner %s enabled %v, want an enabled %s case of %s", cs.Method, cs.Entry, cs.Scope, cs.ScopeOwner, cs.UpstreamEnabled, scope, tc.owner)
+		}
+		if len(cs.Expected) != len(want) {
+			t.Errorf("%s %s: expected keys %v, want %d keys", cs.Method, cs.Entry, corpus.SortedKeys(cs.Expected), len(want))
+		}
+		for key, v := range want {
+			wantValue(t, cs.Expected, key, v)
 		}
 	}
+
+	// The quality fixtures of the series side are unchanged by the title fixtures.
+	quality := 0
+	for _, cs := range got.Cases {
+		if cs.Scope == corpus.ScopeQuality {
+			quality++
+		}
+	}
+	if want := extractSyntheticQualityCount(t); quality != want {
+		t.Errorf("%d quality cases, want %d", quality, want)
+	}
+	// The Language members come from a source the lexer cannot read: the interpolated
+	// pattern is skipped, a commented member and another type's member are not members.
+	if members := (&model{enums: map[string]map[string]int64{}}); members.scanLanguages("x", modelSeriesLanguages) != nil || len(members.enums["Language"]) != 6 {
+		t.Errorf("Language members = %v, want the six of the source", members.enums["Language"])
+	}
+
+	again := seriesTitleCorpus(t)
+	a, _ := corpus.Marshal(got)
+	b, _ := corpus.Marshal(again)
+	if !bytes.Equal(a, b) {
+		t.Error("repeated series title extraction must be byte-identical")
+	}
+}
+
+// extractSyntheticQualityCount is the number of quality cases of the synthetic
+// quality fixtures, counted from the movie side that extracts the same sources.
+func extractSyntheticQualityCount(t *testing.T) int {
+	t.Helper()
+	n := 0
+	for _, cs := range extractSynthetic(t, appSpecs()[1]).Cases {
+		if cs.Scope == corpus.ScopeQuality {
+			n++
+		}
+	}
+	return n
 }
 
 // titleMethod is a one-method title fixture class: attr is the attribute line of
@@ -1796,4 +2535,127 @@ func TestExtractRunRejectingATitleFixturePublishesNothingAndKeepsPriorOutput(t *
 			t.Errorf("%s = %q (%v), want the prior output kept", name, got, err)
 		}
 	}
+}
+
+// groupFixture names a release group in a plain TestCase row (input and expected)
+// and in a symbolic daily name; %[1]s and %[2]s are the two tokens of the name gate.
+const groupFixture = `using FluentAssertions;
+using NUnit.Framework;
+
+namespace F
+{
+    [TestFixture]
+    public class ReleaseGroupParserFixture
+    {
+        [TestCase("Series.Title.S01E01.720p.HDTV.x264-%[1]s", "%[2]s")]
+        [TestCase("Series.Title.S01E01.720p.HDTV.x264-GRP", "GRP")]
+        public void should_parse_release_group(string title, string expected)
+        {
+            Parser.ReleaseGroupParser.ParseReleaseGroup(title).Should().Be(expected);
+        }
+
+        [TestCase(7)]
+        public void should_parse_daily_release_group(int days)
+        {
+            var airDate = DateTime.Today.AddDays(days);
+            var title = string.Format("A.Talk.Show.{0:yyyy.MM.dd}.1080p.WEB-DL.H264-%[1]s", airDate);
+            Parser.ReleaseGroupParser.ParseReleaseGroup(title).Should().Be("%[2]s");
+        }
+    }
+}
+`
+
+// extractWith extracts spec over the synthetic tree with the file rel replaced by src.
+func extractWith(t *testing.T, spec appSpec, rel, src string) *corpus.Corpus {
+	t.Helper()
+	root := writeTree(t, spec, fixtureQuality)
+	writeSource(t, root, rel, src)
+	c, _, err := extractApp(spec, root, testCommit)
+	if err != nil {
+		t.Fatalf("extractApp(%s): %v", spec.name, err)
+	}
+	return c
+}
+
+// The series corpus never records the two upstream product names as a release
+// group: every case-insensitive match of the name gate's pattern becomes
+// "Neutral" in each copied input, expected string and date template, before the
+// identity is hashed. The token is rebuilt here from the gate's base64 pattern.
+func TestExtractNeutralisesTheSeriesReleaseGroupToken(t *testing.T) {
+	pattern, err := base64.StdEncoding.DecodeString("c29uYXJyfHJhZGFycg==")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, second, ok := strings.Cut(string(pattern), "|")
+	if !ok {
+		t.Fatal("the gate pattern has no alternative")
+	}
+	upper, mixed := strings.ToUpper(first), strings.ToUpper(second[:1])+second[1:]
+	const rel = "tests/ReleaseGroupParserFixture.cs"
+	spec := appSpecs()[0]
+
+	got := extractWith(t, spec, rel, fmt.Sprintf(groupFixture, upper, mixed))
+	row := caseBy(t, got, "should_parse_release_group", "TestCase#1")
+	wantValue(t, row.Expected, corpus.InputKey, arr(str("Series.Title.S01E01.720p.HDTV.x264-Neutral")))
+	wantValue(t, row.Expected, "$result", str("Neutral"))
+	if len(row.Args) != 2 || !corpus.Equal(row.Args[0], str("Series.Title.S01E01.720p.HDTV.x264-Neutral")) || !corpus.Equal(row.Args[1], str("Neutral")) {
+		t.Errorf("args = %+v, want the substituted input and expected", row.Args)
+	}
+	daily := caseBy(t, got, "should_parse_daily_release_group", "TestCase#1")
+	wantValue(t, daily.Expected, corpus.InputKey, arr(corpus.Value{Kind: corpus.KindDate, Offset: 7, Template: "A.Talk.Show.{0:yyyy.MM.dd}.1080p.WEB-DL.H264-Neutral"}))
+	wantValue(t, daily.Expected, "$result", str("Neutral"))
+
+	// An input without the token is unchanged.
+	plain := caseBy(t, got, "should_parse_release_group", "TestCase#2")
+	wantValue(t, plain.Expected, corpus.InputKey, arr(str("Series.Title.S01E01.720p.HDTV.x264-GRP")))
+	wantValue(t, plain.Expected, "$result", str("GRP"))
+
+	// The substitution comes before the identity: a source that says "Neutral" in
+	// the first place extracts to the same corpus, identities included.
+	literal := extractWith(t, spec, rel, fmt.Sprintf(groupFixture, "Neutral", "Neutral"))
+	a, errA := corpus.Marshal(got)
+	b, errB := corpus.Marshal(literal)
+	if errA != nil || errB != nil || !bytes.Equal(a, b) {
+		t.Errorf("a substituted source and a literal one differ: %v %v", errA, errB)
+	}
+
+	// The movie corpus keeps the names it was extracted with.
+	movie := extractWith(t, movieSpec(), rel, fmt.Sprintf(groupFixture, upper, mixed))
+	kept := caseBy(t, movie, "should_parse_release_group", "TestCase#1")
+	wantValue(t, kept.Expected, corpus.InputKey, arr(str("Series.Title.S01E01.720p.HDTV.x264-"+upper)))
+	wantValue(t, kept.Expected, "$result", str(mixed))
+}
+
+// string.ToLower in a fixture expectation is evaluated, so a loop of normalized
+// titles records each word's lower-case form.
+func TestExtractEvaluatesToLowerInSeriesTitleExpectations(t *testing.T) {
+	const src = `using FluentAssertions;
+using NUnit.Framework;
+
+namespace F
+{
+    [TestFixture]
+    public class NormalizeSeriesTitleFixture
+    {
+        [TestCase("The")]
+        public void should_not_remove_common_words_in_the_middle_of_word(string word)
+        {
+            var dirtyFormat = new[] { "word.{0}word", "word-{0}word" };
+
+            foreach (var s in dirtyFormat)
+            {
+                var dirty = string.Format(s, word);
+                dirty.CleanSeriesTitle().Should().Be("word" + word.ToLower() + "word");
+            }
+        }
+    }
+}
+`
+	got := extractWith(t, appSpecs()[0], "tests/NormalizeSeriesTitleFixture.cs", src)
+	cs := caseBy(t, got, "should_not_remove_common_words_in_the_middle_of_word", "TestCase#1")
+	if cs.Scope != corpus.ScopeTitle || cs.ScopeOwner != "Parser.CleanSeriesTitle" {
+		t.Fatalf("scope = %s/%s, want title/Parser.CleanSeriesTitle", cs.Scope, cs.ScopeOwner)
+	}
+	wantValue(t, cs.Expected, corpus.InputKey, arr(str("word.Theword"), str("word-Theword")))
+	wantValue(t, cs.Expected, "$result", str("wordtheword"))
 }

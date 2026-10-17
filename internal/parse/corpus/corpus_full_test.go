@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testdataDir = "../../../testdata/parser"
@@ -19,7 +20,7 @@ const testdataDir = "../../../testdata/parser"
 // (independently counted from the source tests: TestCase attributes plus
 // TestCaseSource rows plus plain tests), its per-scope counts and the
 // per-owner counts of every scope (quality: QualityParser.ParseQuality; title:
-// the movie title parser and the release group and language parsers it runs;
+// the series and movie title parsers and the release group and language parsers they run;
 // out_of_scope: the other tests of the title fixtures, retained with their
 // arguments). A re-extraction at another commit, or any lost or added case,
 // must update this table together with the corpora.
@@ -30,14 +31,44 @@ var lockedInventory = map[string]struct {
 	scopes map[string]int // scope -> cases
 	owners map[string]int // scope|owner -> cases
 }{
-	"series": {"57816c149d02f95543973fefb4780c4495f8121c", 356, map[string]int{
-		"tests/QualityParserFixture.cs":       320,
-		"tests/ExtendedQualityParserRegex.cs": 30,
-		"tests/AnimeVersionFixture.cs":        6,
+	"series": {"57816c149d02f95543973fefb4780c4495f8121c", 1597, map[string]int{
+		"tests/QualityParserFixture.cs":               320,
+		"tests/ExtendedQualityParserRegex.cs":         30,
+		"tests/AnimeVersionFixture.cs":                6,
+		"tests/ParserFixture.cs":                      48,
+		"tests/SingleEpisodeParserFixture.cs":         185,
+		"tests/MultiEpisodeParserFixture.cs":          77,
+		"tests/MiniSeriesEpisodeParserFixture.cs":     11,
+		"tests/SeasonParserFixture.cs":                72,
+		"tests/SeasonTitleParserFixture.cs":           21,
+		"tests/AbsoluteEpisodeNumberParserFixture.cs": 167,
+		"tests/AnimeMetadataParserFixture.cs":         36,
+		"tests/DailyEpisodeParserFixture.cs":          57,
+		"tests/CrapParserFixture.cs":                  31,
+		"tests/HashedReleaseFixture.cs":               20,
+		"tests/ReleaseGroupParserFixture.cs":          152,
+		"tests/SubGroupParserFixture.cs":              1,
+		"tests/UnicodeReleaseParserFixture.cs":        56,
+		"tests/UrlFixture.cs":                         31,
+		"tests/SeriesTitleInfoFixture.cs":             5,
+		"tests/IsPossibleSpecialEpisodeFixture.cs":    7,
+		"tests/LanguageParserFixture.cs":              221,
+		"tests/NormalizeSeriesTitleFixture.cs":        43,
 	}, map[string]int{
-		ScopeQuality: 356,
+		ScopeQuality: 356, ScopeTitle: 1166, ScopeOutOfScope: 75,
 	}, map[string]int{
-		ScopeQuality + "|QualityParser.ParseQuality": 356,
+		ScopeQuality + "|QualityParser.ParseQuality":                         356,
+		ScopeTitle + "|Parser.ParseTitle":                                    754,
+		ScopeTitle + "|Parser.ParseSeriesName":                               33,
+		ScopeTitle + "|Parser.CleanSeriesTitle":                              44,
+		ScopeTitle + "|ReleaseGroupParser.ParseReleaseGroup":                 166,
+		ScopeTitle + "|LanguageParser.ParseLanguages":                        169,
+		ScopeOutOfScope + "|Parser.ParseTitle":                               3,
+		ScopeOutOfScope + "|Parser.ParsePath":                                22,
+		ScopeOutOfScope + "|Parser.ParseSeasonTitle":                         15,
+		ScopeOutOfScope + "|ParsedEpisodeInfo.IsPossibleSpecialEpisode":      2,
+		ScopeOutOfScope + "|LanguageParser.ParseSubtitleLanguage":            12,
+		ScopeOutOfScope + "|LanguageParser.ParseSubtitleLanguageInformation": 21,
 	}},
 	"movie": {"df2faa64c75e6081556d11232dc46523e7264ea1", 892, map[string]int{
 		"tests/QualityParserFixture.cs":       287,
@@ -118,7 +149,7 @@ func TestCorpusFull(t *testing.T) {
 			if cs.ScopeOwner == "" || (cs.Scope == ScopeQuality) != qualityFixtures[cs.File] {
 				t.Errorf("%s: case %s scope/file: %+v", app, cs.ID, cs)
 			}
-			names, err := cs.Inputs(TimeContext{Location: nil})
+			_, err := cs.Inputs(TimeContext{Location: nil})
 			if cs.Scope == ScopeOutOfScope {
 				// Retained with its source arguments and no recorded input or assertion.
 				if err == nil || len(cs.Expected) != 1 || len(cs.Args) == 0 && cs.Entry != "Test" {
@@ -126,7 +157,9 @@ func TestCorpusFull(t *testing.T) {
 				}
 				continue
 			}
-			// Release names carry no symbolic date, so no location is required.
+			// Release names are plain text but for the symbolic dates of the series daily
+			// names, which only a calendar can materialize.
+			names, err := cs.Inputs(TimeContext{Now: time.Unix(0, 0).UTC(), Location: time.UTC})
 			if err != nil || len(names) == 0 || len(cs.Expected) < 2 {
 				t.Errorf("%s: case %s inputs/expectation: %v %+v", app, cs.ID, err, cs)
 			}

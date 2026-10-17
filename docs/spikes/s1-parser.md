@@ -1,19 +1,20 @@
-# S1 parser spike: attributed corpora, the native quality parser and the movie title parser
+# S1 parser spike: attributed corpora, the native quality parser and the movie and series title parsers
 
-Status: quality parsing for the series and movie sides, movie title parsing (`ParseTitle` with `KindMovie`, with the language and
-release group parsing it runs) and custom-format compilation, evaluation and batch evaluation are implemented. Quality and movie
-title parsing are checked against the complete extracted source test corpora. Series title parsing and the production latency
-benchmark are later work and are not present in `internal/parse` yet (`ParseTitle` with `KindSeries` is an explicit
-`kind_unsupported` error). Nothing here is a performance claim and no ARM latency claim is made.
+Status: quality parsing for the series and movie sides, title parsing for both kinds (`ParseTitle` with `KindMovie` or `KindSeries`,
+with the language and release group parsing each runs) and custom-format compilation, evaluation and batch evaluation are
+implemented. Quality and title parsing are checked against the complete extracted source test corpora, including the series
+episode title cases (daily, absolute, anime, multi-episode, season pack, special, Unicode, title-only) in
+`internal/parse/title_series.go`, `language_series.go` and `releasegroup_series.go`. The production latency benchmark is later
+work. Nothing here is a performance claim and no ARM latency claim is made.
 
 ## What exists
 
 | Part | Path | Role |
 | --- | --- | --- |
-| Native parser | `internal/parse/parser.go`, `limits.go`, `regex.go`, `vocab.go`, `quality_series.go`, `quality_movie.go`, `title.go`, `title_movie.go`, `language_movie.go`, `releasegroup_movie.go` | `NewParser`, `ParseQuality`, `ParseTitle`, bounded regexp2 matching, explicit code maps, the two ported quality parsers and the ported movie title, language and release group parsers |
+| Native parser | `internal/parse/parser.go`, `limits.go`, `regex.go`, `vocab.go`, `quality_series.go`, `quality_movie.go`, `title.go`, `title_movie.go`, `title_series.go`, `language_movie.go`, `language_series.go`, `releasegroup_movie.go`, `releasegroup_series.go` | `NewParser`, `ParseQuality`, `ParseTitle`, bounded regexp2 matching, explicit code maps, the two ported quality parsers and the ported movie and series title, language and release group parsers |
 | Format evaluator | `internal/parse/formats.go` | `CompileFormats`, `Evaluate`, `EvaluateBatch`, typed `FormatResult`/`ReleaseResult`; the compiled payload never leaves the `Parser` |
 | Corpus contract | `internal/parse/corpus/corpus.go` | Header/Case/Value schema, bounded JSONL `Read`/`Marshal`, count reconciliation, dispositions, `TimeContext.Materialize` |
-| Extractor | `internal/parse/corpus/extract/main.go` | Reads the reference C# test text (never executes it) and writes the two corpora: quality cases on both sides, title cases on the movie side |
+| Extractor | `internal/parse/corpus/extract/main.go` | Reads the reference C# test text (never executes it) and writes the two corpora: quality and title cases on both sides |
 | Corpora | `testdata/parser/series.jsonl`, `movie.jsonl`, `dispositions.json` | Attributed, counted, committed inputs and the (currently empty) owner dispositions |
 | Emulation | `scripts/parse-emulated.sh` | Cross-compiled tests under `qemu-aarch64` and `qemu-arm` |
 | Runner | `scripts/dev-run.sh --ref`, `--write testdata/parser` | Pinned Git-object reference text delivered by copy into the created container; fixed corpus write table with a raw-to-sanitized identity check |
@@ -38,7 +39,9 @@ n, err := p.ParseTitle(ctx, "Movie.Name.2015.German.DL.1080p.BluRay.x264-GRP", p
 // n.Movie.ReleaseGroup == "GRP", n.Movie.Languages == []string{"german", "original"}, n.Movie.Quality.Code == "bluray-1080p"
 ```
 
-`KindMovie` runs the movie port and `KindSeries` the series port of `ParseQuality`; `ParseTitle` has only the movie branch. A
+`KindMovie` runs the movie port and `KindSeries` the series port of both `ParseQuality` and `ParseTitle`; a series name parses to
+`ParsedTitle{Kind: KindSeries, Episode: *EpisodeInfo}` (for example `Series.Title.S03E06.1080p.BluRay.x264-GRP` has
+`Episode.SeriesTitle == "Series Title"`, `SeasonNumbers == []int{3}` and `EpisodeNumbers == []int{6}`). A
 `*Parser` is immutable and safe for concurrent use.
 
 ### Limits and errors
@@ -49,12 +52,12 @@ Validation runs before any pattern is matched; a rejected input never reaches th
 | --- | --- | --- |
 | name longer than 4096 UTF-8 bytes (4096 admitted) | `release_name_too_long` | `limit_bytes`, `observed_bytes` |
 | name is not valid UTF-8 | `release_name_invalid_utf8` | `offset` |
-| kind is neither `KindMovie` nor `KindSeries` (`ParseQuality`), or is not `KindMovie` (`ParseTitle`; the series title parser lands later) | `kind_unsupported` | `kind` |
+| kind is neither `KindMovie` nor `KindSeries` (`ParseQuality`, `ParseTitle`) | `kind_unsupported` | `kind` |
 | one 250 ms elapsed-work budget exhausted (also after a late successful match, and for a blank or unmatched name: the budget and context are checked once more before any usable value is returned) | `release_work_budget_exhausted` | `limit_ms` |
 | regexp2 match timeout (fixed 50 ms) | `match_timeout` | `limit_ms` |
 | regexp2 backtracking stack limit (library default) | `regex_stack_limit` | none |
 | context cancelled / deadline exceeded | `evaluation_cancelled` / `decision_deadline_exceeded` | none |
-| a version digit the source's `Convert.ToInt32` would throw on; a title the source's `ParseMovieTitle` returns null for | `title_unrecognized` | none |
+| a version digit the source's `Convert.ToInt32` would throw on; a title the source's `ParseMovieTitle` or series `ParseTitle` returns null for (a daily name whose date is not a calendar date, or lies beyond the 14 day air date limit, included) | `title_unrecognized` | none |
 | a built-in pattern fails to compile (constructor) | `regex_compile_failed` | `pattern_index` |
 
 ```go
@@ -229,7 +232,21 @@ by an already asserted count, indexers, `First()`, `.Id` on a language member, `
 arrays. The `Language` declaration is outside the delivered areas (`languages/` is study-only), so the members an assertion may
 name are those `parser/LanguageParser.cs` itself names; the ported sources (`Parser.cs`, `ReleaseGroupParser.cs`,
 `ParserCommon.cs`, `RegexReplace.cs`, `Model/ParsedMovieInfo.cs`) are recorded as attributed source paths with their hashes and
-are never interpreted. The series side extracts no title case until its title port lands, so `series.jsonl` is unchanged.
+are never interpreted.
+
+Title scope (series side). The series extractor reads eighteen further title fixtures (`ParserFixture`,
+`SingleEpisodeParserFixture`, `MultiEpisodeParserFixture`, `MiniSeriesEpisodeParserFixture`, `SeasonParserFixture`,
+`SeasonTitleParserFixture`, `AbsoluteEpisodeNumberParserFixture`, `AnimeMetadataParserFixture`, `DailyEpisodeParserFixture`,
+`CrapParserFixture`, `HashedReleaseFixture`, `ReleaseGroupParserFixture`, `SubGroupParserFixture`,
+`UnicodeReleaseParserFixture`, `UrlFixture`, `SeriesTitleInfoFixture`, `IsPossibleSpecialEpisodeFixture` and
+`LanguageParserFixture`) and the normalization fixture `NormalizeSeriesTitleFixture`, whose `CleanSeriesTitle` cases (accent
+folding included: `Ríkið` cleans to `rikid`) are title cases of the helper. Methods of these fixtures that assert `ParseTitle`,
+`ParseSeriesName`, `CleanSeriesTitle`, `ParseReleaseGroup` or `ParseLanguages` are scope `title`; the others are retained out of
+scope. The reference tests name a release group after the two upstream products. The extractor replaces each case-insensitive
+match of that name, in every recorded series input, argument, expected string and date template and before an identity is hashed,
+by the fixed group `Neutral` (`neutralGroup` in `main.go`; the pattern is held base64 encoded so the repository carries neither
+name). The movie extraction is not substituted. `CleanSeriesTitle` output is lower case, so a substituted lower-case expectation is
+compared with `Neutral` lower-cased.
 
 An unsupported source form (loops other than `foreach` and a counted `for`, other `using` statements, unknown class or method
 attributes, unsupported assertions, interpolated strings, properties, a lone UTF-16 surrogate, …) fails extraction with
@@ -296,7 +313,8 @@ committed corpora are the retained extraction (their per-file hashes are recorde
 success is claimed. The title section of `movie.jsonl` was produced by running this extractor over a Git-object extraction of
 the movie reference's `parser/`, `tests/` and `qualities/` areas at the pinned commit (the same three areas `--ref` delivers, in
 a scratch container with no network and no mount of any checkout), not by `--ref`; the quality records are byte-identical to
-the earlier extraction, repeated extraction is byte-identical, and `series.jsonl` was not regenerated. A Go consumer run counts for the same immutable runtime payload as an admission run only by the payload
+the earlier extraction, repeated extraction is byte-identical, and `series.jsonl` was regenerated the same way over the Git-object
+extraction of the series reference's three areas at its pinned commit (run on the host over a scratch copy, not by `--ref`). A Go consumer run counts for the same immutable runtime payload as an admission run only by the payload
 comparison in `docs/spikes/s5-version-admission.md` (ordered layers, `Config` SHA-256, platform, `inputs=<sha>`), never by the image ID.
 
 `TestCorpusFull` pins the exact per-file inventories and source commits; changing a reference commit means re-extracting and

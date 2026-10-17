@@ -416,6 +416,9 @@ const (
 	lgGeorgian
 	lgAny
 	lgOriginal
+	lgAzerbaijani
+	lgUzbek
+	lgIrish
 	lgCount
 )
 
@@ -488,12 +491,19 @@ func languageDefs() [lgCount]languageDef {
 		lgGeorgian:      {"Georgian", "georgian"},
 		lgAny:           {"Any", "any"},
 		lgOriginal:      {"Original", "original"},
+		lgAzerbaijani:   {"Azerbaijani", "azerbaijani"},
+		lgUzbek:         {"Uzbek", "uzbek"},
+		lgIrish:         {"Irish", "irish"},
 	}
 }
 
 // languageCode maps a source Language member (as it appears in the extracted
-// corpus) to its explicit Boxset code.
+// corpus) to its explicit Boxset code. The series source names the Brazilian
+// Portuguese member PortugueseBrazil where the movie source names it PortugueseBR.
 func languageCode(member string) (string, bool) {
+	if member == "PortugueseBrazil" {
+		member = "PortugueseBR"
+	}
 	for _, d := range languageDefs() {
 		if d.member == member {
 			return d.code, true

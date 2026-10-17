@@ -403,6 +403,10 @@ func TestSharedParserIsConcurrencySafe(t *testing.T) {
 		subsets = append(subsets, subset{app.name, app.kind, picked})
 	}
 	titles := titleSubset(t, byID)
+	seriesTitles := seriesTitleSubset(t, byID)
+	runNow, runLoc := seriesRunClock(t)
+	seriesParser := newSeriesTestParser(t, runNow, runLoc)
+	seriesClock := corpus.TimeContext{Now: runNow, Location: runLoc}
 
 	var wg sync.WaitGroup
 	errs := make(chan string, 64)
@@ -423,6 +427,14 @@ func TestSharedParserIsConcurrencySafe(t *testing.T) {
 			r := runTitleCorpus(p, titles, nil)
 			if len(r.problems) != 0 || r.failed != 0 || r.passed != len(titles.Cases) {
 				errs <- fmt.Sprintf("movie titles: passed %d of %d, failed %d: %v", r.passed, len(titles.Cases), r.failed, r.problems)
+			}
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := runSeriesCorpus(seriesParser, seriesTitles, nil, seriesClock)
+			if len(r.problems) != 0 || r.failed != 0 || r.passed != len(seriesTitles.Cases) {
+				errs <- fmt.Sprintf("series titles: passed %d of %d, failed %d: %v", r.passed, len(seriesTitles.Cases), r.failed, r.problems)
 			}
 		}()
 	}
@@ -997,6 +1009,7 @@ func TestLanguageVocabularyMatchesIndependentMemberTable(t *testing.T) {
 		"Telugu": "telugu", "Macedonian": "macedonian", "Slovenian": "slovenian", "Malayalam": "malayalam", "Kannada": "kannada",
 		"Albanian": "albanian", "Afrikaans": "afrikaans", "Marathi": "marathi", "Tagalog": "tagalog", "Urdu": "urdu",
 		"Romansh": "romansh", "Mongolian": "mongolian", "Georgian": "georgian", "Any": "any", "Original": "original",
+		"Azerbaijani": "azerbaijani", "Uzbek": "uzbek", "Irish": "irish",
 	}
 	defs := languageDefs()
 	if len(defs) != len(table) {
@@ -1019,6 +1032,10 @@ func TestLanguageVocabularyMatchesIndependentMemberTable(t *testing.T) {
 		if code, ok := languageCode(member); !ok || code != want {
 			t.Errorf("languageCode(%s) = %q, %v; want %q", member, code, ok, want)
 		}
+	}
+	// The series source names the Brazilian Portuguese member PortugueseBrazil.
+	if code, ok := languageCode("PortugueseBrazil"); !ok || code != "portuguese-br" {
+		t.Errorf("languageCode(PortugueseBrazil) = %q, %v; want portuguese-br", code, ok)
 	}
 	if code, ok := languageCode("Portuguese (Brazil)"); ok {
 		t.Errorf("the source display name has no mapping, got %q", code)
@@ -1054,10 +1071,12 @@ var absentValue = corpus.Value{Kind: corpus.KindEnum, Type: "$absent", Str: "no 
 
 // titleResult is what one title entry point produced for one input.
 type titleResult struct {
-	movie     *MovieInfo // ParseMovieTitle: nil when the source returns null
-	group     string     // ParseReleaseGroup: empty where the source returns null
-	languages []string   // ParseLanguages
-	clean     string     // CleanMovieTitle
+	movie     *MovieInfo   // ParseMovieTitle: nil when the source returns null
+	episode   *EpisodeInfo // series ParseTitle: nil when the source returns null
+	group     string       // ParseReleaseGroup: empty where the source returns null
+	languages []string     // ParseLanguages
+	clean     string       // CleanMovieTitle, CleanSeriesTitle
+	name      string       // ParseSeriesName
 }
 
 // observeTitle runs the entry point a title case names on one input. A name
@@ -1270,13 +1289,15 @@ var cleanMovieTitleRe = func() *regexp2.Regexp {
 var germanUmlauts = strings.NewReplacer("ä", "ae", "ö", "oe", "ü", "ue", "Ä", "Ae", "Ö", "Oe", "Ü", "Ue", "ß", "ss")
 
 // accentFold maps each lower-case letter of Latin-1 Supplement and Latin
-// Extended-A that has a canonical decomposition to its base letter. Letters
-// without one (ø, æ, œ, ł, đ, ħ, ŋ, ŧ, ı, ĳ, ĸ, ŀ, ŉ, ſ) are deliberately absent:
-// normalization form D leaves them as they are.
+// Extended-A that has a canonical decomposition to its base letter, and ð to d
+// (it has no decomposition, but the source asserts that "Ríkið" cleans to
+// "rikid"). The other letters without a decomposition (ø, æ, œ, ł, đ, ħ, ŋ, ŧ,
+// ı, ĳ, ĸ, ŀ, ŉ, ſ) are deliberately absent: normalization form D leaves them
+// as they are.
 var accentFold = func() *strings.Replacer {
 	var pairs []string
 	for base, accented := range map[string]string{
-		"a": "àáâãåāăą", "c": "çćĉċč", "d": "ď", "e": "èéêëēĕėęě", "g": "ĝğġģ", "h": "ĥ", "i": "ìíîïĩīĭį",
+		"a": "àáâãåāăą", "c": "çćĉċč", "d": "ďð", "e": "èéêëēĕėęě", "g": "ĝğġģ", "h": "ĥ", "i": "ìíîïĩīĭį",
 		"j": "ĵ", "k": "ķ", "l": "ĺļľ", "n": "ñńņň", "o": "òóôõōŏő", "r": "ŕŗř", "s": "śŝşš", "t": "ţť",
 		"u": "ùúûũūŭůűų", "w": "ŵ", "y": "ýÿŷ", "z": "źżž",
 	} {
@@ -1338,19 +1359,31 @@ type titleRun struct {
 	outOfScope                  int
 	privateDir                  int // passed or disposed cases proved on the private isDir adapter, not public ParseTitle
 	problems                    []string
+	observe                     func(p *Parser, owner string, dir bool, name string) (titleResult, error)
+	resolve                     func(owner, key string, want corpus.Value, res titleResult, tc corpus.TimeContext) (corpus.Value, corpus.Value, error)
 }
 
 func (r *titleRun) problem(format string, args ...any) {
 	r.problems = append(r.problems, fmt.Sprintf(format, args...))
 }
 
-// runTitleCorpus runs every enabled title case of c through p. A case passes
-// only when every source assertion holds for every input; a mismatch needs a
-// disposition (byID) binding every distinct mismatching observation.
+// runTitleCorpus runs every enabled movie title case of c through p. A case
+// passes only when every source assertion holds for every input; a mismatch needs
+// a disposition (byID) binding every distinct mismatching observation.
 func runTitleCorpus(p *Parser, c *corpus.Corpus, byID map[string]corpus.Disposition) titleRun {
-	var r titleRun
-	// Title names carry no symbolic date; the context is only the shared contract.
+	// Movie title names carry no symbolic date; the context is only the shared contract.
 	tc := corpus.TimeContext{Now: time.Now(), Location: time.Local}
+	return runTitleScope(titleRun{observe: observeTitle, resolve: resolveMovieTitle}, p, c, byID, tc)
+}
+
+// runSeriesCorpus is runTitleCorpus for the series corpus. tc is the clock of the
+// run: the symbolic dates of the names are materialized with it, so p must read
+// the same instant and calendar.
+func runSeriesCorpus(p *Parser, c *corpus.Corpus, byID map[string]corpus.Disposition, tc corpus.TimeContext) titleRun {
+	return runTitleScope(titleRun{observe: observeSeriesTitle, resolve: resolveSeriesTitle}, p, c, byID, tc)
+}
+
+func runTitleScope(r titleRun, p *Parser, c *corpus.Corpus, byID map[string]corpus.Disposition, tc corpus.TimeContext) titleRun {
 	for _, cs := range c.Cases {
 		switch {
 		case cs.Scope == corpus.ScopeOutOfScope:
@@ -1386,7 +1419,7 @@ func (r *titleRun) runCase(p *Parser, cs corpus.Case, tc corpus.TimeContext, byI
 	bad := false
 	for _, name := range names {
 		r.inputs++
-		res, err := observeTitle(p, cs.ScopeOwner, dir, name)
+		res, err := r.observe(p, cs.ScopeOwner, dir, name)
 		if err != nil {
 			r.problem("%s (%s:%d) %q: %v", cs.ID, cs.File, cs.Line, name, err)
 			bad = true
@@ -1396,7 +1429,7 @@ func (r *titleRun) runCase(p *Parser, cs corpus.Case, tc corpus.TimeContext, byI
 			if key == corpus.InputKey || key == titleDirKey {
 				continue
 			}
-			wantNative, observed, err := resolveTitle(cs.ScopeOwner, key, cs.Expected[key], res)
+			wantNative, observed, err := r.resolve(cs.ScopeOwner, key, cs.Expected[key], res, tc)
 			if err != nil {
 				r.problem("%s (%s:%d): %v", cs.ID, cs.File, cs.Line, err)
 				bad = true
@@ -1463,4 +1496,547 @@ func (r titleRun) reconcile(counts map[string]int) []string {
 		out = append(out, fmt.Sprintf("selected scope: failed=%d passed=%d", r.failed, r.passed))
 	}
 	return out
+}
+
+// resolveMovieTitle is resolveTitle as a titleRun resolver: the movie corpus has
+// no symbolic date in a title assertion.
+func resolveMovieTitle(owner, key string, want corpus.Value, res titleResult, _ corpus.TimeContext) (corpus.Value, corpus.Value, error) {
+	return resolveTitle(owner, key, want, res)
+}
+
+// ---- series title corpus consumer ---------------------------------------------------
+
+// The title-scope entry points of the committed series corpus. The release group
+// and language parsers share ownerReleaseGroup and ownerLanguages with the movie
+// corpus.
+const (
+	ownerSeriesTitle = "Parser.ParseTitle"
+	ownerSeriesName  = "Parser.ParseSeriesName"
+	ownerCleanSeries = "Parser.CleanSeriesTitle"
+)
+
+// newSeriesTestParser is a Parser whose clock reads the fixed instant now and
+// whose local calendar is loc: the instant and calendar of a series corpus run,
+// so the symbolic dates of its names and the parser's air date limit agree. A
+// fixed clock never exhausts the elapsed-work budget; the budget has its own
+// tests.
+func newSeriesTestParser(t *testing.T, now time.Time, loc *time.Location) *Parser {
+	t.Helper()
+	p, err := NewParser(Options{Now: func() time.Time { return now }, Location: loc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func intValue(n int) corpus.Value   { return corpus.Value{Kind: corpus.KindInt, Int: int64(n)} }
+func boolValue(b bool) corpus.Value { return corpus.Value{Kind: corpus.KindBool, Bool: b} }
+
+// cleanSeriesRe is the source's NormalizeRegex of CleanSeriesTitle: the common
+// words (a, an, the, and, or, of) that are neither first nor last, and every
+// non-word character and underscore; percentRe is its percent rule.
+var cleanSeriesRe, percentRe = func() (*regexp2.Regexp, *regexp2.Regexp) {
+	clean, err := regexp2.Compile(`((?:\b|_)(?<!^)([aà](?!$)|an|the|and|or|of)(?!$)(?:\b|_))|\W|_`, ic)
+	if err != nil {
+		panic(err)
+	}
+	percent, err := regexp2.Compile(`(?<=\b\d+)%`, regexp2.None)
+	if err != nil {
+		panic(err)
+	}
+	clean.MatchTimeout, percent.MatchTimeout = matchTimeout, matchTimeout
+	return clean, percent
+}()
+
+// cleanSeriesTitle is the source's CleanSeriesTitle: a blank or all-digit title
+// is returned as it is, otherwise "%" after digits reads "percent", the
+// normalized title is lower-cased and its accents removed.
+func cleanSeriesTitle(title string) (string, error) {
+	if isBlank(title) {
+		return title, nil
+	}
+	if _, err := strconv.ParseInt(strings.Trim(title, " \t\n\v\f\r"), 10, 64); err == nil {
+		return title, nil
+	}
+	title, err := percentRe.Replace(title, "percent", -1, -1)
+	if err != nil {
+		return "", err
+	}
+	out, err := cleanSeriesRe.Replace(title, "", -1, -1)
+	if err != nil {
+		return "", err
+	}
+	return removeAccent(strings.ToLower(out))
+}
+
+// observeSeriesTitle runs the entry point a series title case names on one
+// input. A name ParseTitle rejects is the source's null (a nil episode, no
+// error); any other failure is an error.
+func observeSeriesTitle(p *Parser, owner string, _ bool, name string) (titleResult, error) {
+	ctx := context.Background()
+	switch owner {
+	case ownerSeriesTitle, ownerSeriesName:
+		pt, err := p.ParseTitle(ctx, name, KindSeries)
+		var re *ReasonError
+		switch {
+		case errors.As(err, &re) && re.Reason.Code == codeTitleUnrecognized:
+			// The source's null: there is no episode.
+		case err != nil:
+			return titleResult{}, err
+		case pt.Kind != KindSeries || pt.Episode == nil || pt.Movie != nil:
+			return titleResult{}, fmt.Errorf("ParseTitle succeeded without exactly one episode: %+v", pt)
+		}
+		if owner == ownerSeriesTitle {
+			return titleResult{episode: pt.Episode}, nil
+		}
+		// ParseSeriesName: the parsed series title, or the cleaned name where the
+		// title does not parse.
+		if pt.Episode != nil {
+			return titleResult{name: pt.Episode.SeriesTitle}, nil
+		}
+		cleaned, err := cleanSeriesTitle(name)
+		return titleResult{name: cleaned}, err
+	case ownerCleanSeries:
+		if err := validateName(name); err != nil {
+			return titleResult{}, err
+		}
+		clean, err := cleanSeriesTitle(name)
+		return titleResult{clean: clean}, err
+	case ownerReleaseGroup, ownerLanguages:
+		if err := validateName(name); err != nil {
+			return titleResult{}, err
+		}
+		b := newBudget(ctx, p.now)
+		if owner == ownerReleaseGroup {
+			g, err := p.seriesTitle.group.parse(b, p.seriesTitle, name)
+			return titleResult{group: g}, err
+		}
+		l, err := p.seriesTitle.lang.parse(b, name)
+		return titleResult{languages: l}, err
+	}
+	return titleResult{}, fmt.Errorf("unsupported series title entry point %q", owner)
+}
+
+// canonicalDecimal is the exact value of a decimal text: no leading zeros of the
+// integer part and no trailing zeros of the fraction, so 5.50 and 5.5 are one
+// number as they are to the source's decimal comparison.
+func canonicalDecimal(s string) string {
+	whole, frac, _ := strings.Cut(s, ".")
+	if whole = strings.TrimLeft(whole, "0"); whole == "" {
+		whole = "0"
+	}
+	if frac = strings.TrimRight(frac, "0"); frac != "" {
+		return whole + "." + frac
+	}
+	return whole
+}
+
+// seriesList compares a list property: want must be an array of items of one
+// kind, each mapped by native to the observed side's comparable form; an
+// equivalent list is compared without order.
+func seriesList(key string, want corpus.Value, got []corpus.Value, native func(corpus.Value) (corpus.Value, error), ordered bool) (corpus.Value, corpus.Value, error) {
+	if want.Kind != corpus.KindArray {
+		return corpus.Value{}, corpus.Value{}, fmt.Errorf("%s: expected an array, got %+v", key, want)
+	}
+	wanted := make([]corpus.Value, 0, len(want.Items))
+	for _, item := range want.Items {
+		v, err := native(item)
+		if err != nil {
+			return corpus.Value{}, corpus.Value{}, fmt.Errorf("%s: %w", key, err)
+		}
+		wanted = append(wanted, v)
+	}
+	if !ordered {
+		less := func(a, b corpus.Value) int {
+			return strings.Compare(fmt.Sprint(a.Int, a.Str), fmt.Sprint(b.Int, b.Str))
+		}
+		slices.SortFunc(wanted, less)
+		got = slices.Clone(got)
+		slices.SortFunc(got, less)
+	}
+	return corpus.Value{Kind: corpus.KindArray, Items: wanted}, corpus.Value{Kind: corpus.KindArray, Items: got}, nil
+}
+
+// languageCodeOf maps a Language enum value of an assertion to its Boxset code.
+func languageCodeOf(v corpus.Value) (corpus.Value, error) {
+	if v.Kind != corpus.KindEnum || v.Type != "Language" {
+		return corpus.Value{}, fmt.Errorf("expected a Language enum, got %+v", v)
+	}
+	code, ok := languageCode(v.Str)
+	if !ok {
+		return corpus.Value{}, fmt.Errorf("Language.%s has no explicit code mapping", v.Str)
+	}
+	return str(code), nil
+}
+
+// languageValues are the codes of a language list as comparable values.
+func languageValues(list []string) []corpus.Value {
+	out := make([]corpus.Value, len(list))
+	for i, code := range list {
+		out[i] = str(code)
+	}
+	return out
+}
+
+// languageContain resolves a Contain assertion: every wanted language must be in
+// the observed list.
+func languageContain(key string, want corpus.Value, list []string) (corpus.Value, corpus.Value, error) {
+	wanted, got, err := seriesList(key, want, languageValues(list), languageCodeOf, true)
+	if err != nil {
+		return corpus.Value{}, corpus.Value{}, err
+	}
+	contained := true
+	for _, w := range wanted.Items {
+		contained = contained && slices.ContainsFunc(got.Items, func(g corpus.Value) bool { return corpus.Equal(w, g) })
+	}
+	if contained {
+		got = wanted
+	}
+	return wanted, got, nil
+}
+
+// resolveSeriesTitle maps one source-asserted property of a series title entry
+// point to the native comparison: the source expectation as a Boxset value
+// (language members through the explicit code map, a symbolic date through tc,
+// the source's null string as the empty text) and the observed native value. An
+// unknown property, entry point, enum type or member is a hard error, never a
+// skipped assertion.
+func resolveSeriesTitle(owner, key string, want corpus.Value, res titleResult, tc corpus.TimeContext) (corpus.Value, corpus.Value, error) {
+	switch owner {
+	case ownerReleaseGroup, ownerCleanSeries:
+		if key == titleResultKey {
+			got := res.group
+			if owner == ownerCleanSeries {
+				got = res.clean
+				// The extractor replaced the release group token of a lower-case expected
+				// title by the cased substituted group; the normalized title is lower case.
+				if want.Kind == corpus.KindString {
+					want.Str = strings.ReplaceAll(want.Str, substitutedGroup, strings.ToLower(substitutedGroup))
+				}
+			}
+			return seriesText(key, want, got)
+		}
+	case ownerSeriesName:
+		if key == "SeriesName.CleanSeriesTitle" {
+			// Both the parsed series title and the expected title are normalized, as the source asserts.
+			if want.Kind != corpus.KindString {
+				return corpus.Value{}, corpus.Value{}, fmt.Errorf("%s: expected a string, got %+v", key, want)
+			}
+			w, err := cleanSeriesTitle(want.Str)
+			if err != nil {
+				return corpus.Value{}, corpus.Value{}, err
+			}
+			o, err := cleanSeriesTitle(res.name)
+			if err != nil {
+				return corpus.Value{}, corpus.Value{}, err
+			}
+			return str(w), str(o), nil
+		}
+	case ownerLanguages:
+		switch key {
+		case titleResultKey + ".Contain":
+			return languageContain(key, want, res.languages)
+		case titleResultKey + ".EquivalentTo":
+			return seriesList(key, want, languageValues(res.languages), languageCodeOf, false)
+		}
+	case ownerSeriesTitle:
+		return resolveEpisode(key, want, res.episode, tc)
+	}
+	return corpus.Value{}, corpus.Value{}, fmt.Errorf("unsupported asserted property %q of %s", key, owner)
+}
+
+// substitutedGroup is the release group the series corpus extraction records
+// wherever the reference tests name the upstream products.
+const substitutedGroup = "Neutral"
+
+// seriesText compares a text property: the source's null string is the empty text.
+func seriesText(key string, want corpus.Value, got string) (corpus.Value, corpus.Value, error) {
+	switch want.Kind {
+	case corpus.KindString:
+		return want, str(got), nil
+	case corpus.KindNull:
+		return str(""), str(got), nil
+	}
+	return corpus.Value{}, corpus.Value{}, fmt.Errorf("%s: expected a string or null, got %+v", key, want)
+}
+
+// resolveEpisode resolves one property assertion on the result of the series
+// ParseTitle. A missing episode (the source's null) fails every property
+// assertion, whatever it expects: only the explicit null result, the not-null
+// assertion and the no-throw requirement are about the result itself.
+func resolveEpisode(key string, want corpus.Value, ep *EpisodeInfo, tc corpus.TimeContext) (corpus.Value, corpus.Value, error) {
+	bad := func(what string) (corpus.Value, corpus.Value, error) {
+		return corpus.Value{}, corpus.Value{}, fmt.Errorf("%s: expected %s, got %+v", key, what, want)
+	}
+	switch key {
+	case titleResultKey:
+		if want.Kind != corpus.KindNull {
+			return bad("a null result")
+		}
+		observed := str("null")
+		if ep != nil {
+			observed = str("an episode")
+		}
+		return str("null"), observed, nil
+	case titleResultKey + ".NotNull":
+		if want.Kind != corpus.KindBool || !want.Bool {
+			return bad("true")
+		}
+		return want, boolValue(ep != nil), nil
+	case titleResultKey + ".NoThrow":
+		// The call completed without an error, or the case would have failed already.
+		return want, want, nil
+	}
+	if ep == nil {
+		// The source dereferences a null result: the assertion fails, whatever it expects.
+		return want, absentValue, nil
+	}
+
+	text := func(got string) (corpus.Value, corpus.Value, error) { return seriesText(key, want, got) }
+	number := func(got int) (corpus.Value, corpus.Value, error) {
+		if want.Kind != corpus.KindInt {
+			return bad("an int")
+		}
+		return want, intValue(got), nil
+	}
+	boolean := func(got bool) (corpus.Value, corpus.Value, error) {
+		if want.Kind != corpus.KindBool {
+			return bad("a bool")
+		}
+		return want, boolValue(got), nil
+	}
+	// optional is a nullable int: the source's null equals a null expectation only.
+	optional := func(got int, ok bool) (corpus.Value, corpus.Value, error) {
+		switch {
+		case want.Kind == corpus.KindNull && !ok:
+			return want, want, nil
+		case want.Kind == corpus.KindNull:
+			return want, intValue(got), nil
+		case want.Kind != corpus.KindInt:
+			return bad("an int or null")
+		case !ok:
+			return want, absentValue, nil
+		}
+		return want, intValue(got), nil
+	}
+	ints := func(list []int, ordered bool) (corpus.Value, corpus.Value, error) {
+		got := make([]corpus.Value, len(list))
+		for i, n := range list {
+			got[i] = intValue(n)
+		}
+		return seriesList(key, want, got, func(v corpus.Value) (corpus.Value, error) {
+			if v.Kind != corpus.KindInt {
+				return v, fmt.Errorf("expected an int, got %+v", v)
+			}
+			return v, nil
+		}, ordered)
+	}
+	strs := func(list []string) (corpus.Value, corpus.Value, error) {
+		got := make([]corpus.Value, len(list))
+		for i, s := range list {
+			got[i] = str(s)
+		}
+		return seriesList(key, want, got, func(v corpus.Value) (corpus.Value, error) {
+			if v.Kind != corpus.KindString {
+				return v, fmt.Errorf("expected a string, got %+v", v)
+			}
+			return v, nil
+		}, false)
+	}
+	decimals := func(list []string) []corpus.Value {
+		got := make([]corpus.Value, len(list))
+		for i, s := range list {
+			got[i] = corpus.Value{Kind: corpus.KindDecimal, Str: canonicalDecimal(s)}
+		}
+		return got
+	}
+	decimalOf := func(v corpus.Value) (corpus.Value, error) {
+		if v.Kind != corpus.KindDecimal {
+			return v, fmt.Errorf("expected a decimal, got %+v", v)
+		}
+		return corpus.Value{Kind: corpus.KindDecimal, Str: canonicalDecimal(v.Str)}, nil
+	}
+	// first and single read an element the way the source's First, Single and
+	// SingleOrDefault do: where it throws, the assertion fails.
+	first := func(list []int) (corpus.Value, corpus.Value, error) {
+		if len(list) == 0 {
+			return number(0)
+		}
+		return number(list[0])
+	}
+	count := func(n int) (corpus.Value, corpus.Value, error) { return number(n) }
+
+	info := ep.SeriesTitleInfo
+	switch key {
+	case "SeriesTitle":
+		return text(ep.SeriesTitle)
+	case "ReleaseGroup":
+		return text(ep.ReleaseGroup)
+	case "ReleaseHash":
+		return text(ep.ReleaseHash)
+	case "ReleaseTitle":
+		return text(ep.ReleaseTitle)
+	case "SeriesTitleInfo.Title":
+		return text(info.Title)
+	case "SeriesTitleInfo.TitleWithoutYear":
+		return text(info.TitleWithoutYear)
+	case "SeriesTitleInfo.Title==SeriesTitleInfo.TitleWithoutYear":
+		return boolean(info.Title == info.TitleWithoutYear)
+	case "SeriesTitleInfo.Year":
+		return number(info.Year)
+	case "SeriesTitleInfo.AllTitles.EquivalentTo":
+		return strs(info.AllTitles)
+	case "AirDate":
+		if want.Kind == corpus.KindDate {
+			s, err := tc.Materialize(want)
+			if err != nil {
+				return corpus.Value{}, corpus.Value{}, err
+			}
+			return str(s), str(ep.AirDate), nil
+		}
+		return text(ep.AirDate)
+	case "AirDate.NotNull":
+		return boolean(ep.AirDate != "")
+	case "DailyPart":
+		if ep.DailyPart == nil {
+			return optional(0, false)
+		}
+		return optional(*ep.DailyPart, true)
+	case "SeasonNumber":
+		n, ok := ep.SeasonNumber()
+		return optional(n, ok)
+	case "SeasonNumbers.Equal":
+		return ints(ep.SeasonNumbers, true)
+	case "SeasonPart":
+		return number(ep.SeasonPart)
+	case "EpisodeNumbers.Count":
+		return count(len(ep.EpisodeNumbers))
+	case "EpisodeNumbers.First()":
+		if len(ep.EpisodeNumbers) == 0 {
+			return want, absentValue, nil
+		}
+		return first(ep.EpisodeNumbers)
+	case "EpisodeNumbers.SingleOrDefault()":
+		if len(ep.EpisodeNumbers) > 1 {
+			return want, absentValue, nil
+		}
+		return first(ep.EpisodeNumbers)
+	case "EpisodeNumbers.EquivalentTo":
+		return ints(ep.EpisodeNumbers, false)
+	case "AbsoluteEpisodeNumbers.Count":
+		return count(len(ep.AbsoluteEpisodeNumbers))
+	case "AbsoluteEpisodeNumbers.Single()":
+		if len(ep.AbsoluteEpisodeNumbers) != 1 {
+			return want, absentValue, nil
+		}
+		return first(ep.AbsoluteEpisodeNumbers)
+	case "AbsoluteEpisodeNumbers.EquivalentTo":
+		return ints(ep.AbsoluteEpisodeNumbers, false)
+	case "AbsoluteEpisodeNumbers.NotEmpty":
+		return boolean(len(ep.AbsoluteEpisodeNumbers) > 0)
+	case "SpecialAbsoluteEpisodeNumbers.Count":
+		return count(len(ep.SpecialAbsoluteEpisodeNumbers))
+	case "SpecialAbsoluteEpisodeNumbers.NotEmpty":
+		return boolean(len(ep.SpecialAbsoluteEpisodeNumbers) > 0)
+	case "SpecialAbsoluteEpisodeNumbers.First()":
+		if len(ep.SpecialAbsoluteEpisodeNumbers) == 0 {
+			return want, absentValue, nil
+		}
+		w, err := decimalOf(want)
+		if err != nil {
+			return corpus.Value{}, corpus.Value{}, fmt.Errorf("%s: %w", key, err)
+		}
+		return w, decimals(ep.SpecialAbsoluteEpisodeNumbers)[0], nil
+	case "SpecialAbsoluteEpisodeNumbers.EquivalentTo":
+		return seriesList(key, want, decimals(ep.SpecialAbsoluteEpisodeNumbers), decimalOf, false)
+	case "Languages.Count":
+		return count(len(ep.Languages))
+	case "Languages.Contain":
+		return languageContain(key, want, ep.Languages)
+	case "FullSeason":
+		return boolean(ep.FullSeason)
+	case "IsMultiSeason":
+		return boolean(ep.IsMultiSeason())
+	case "IsPartialSeason":
+		return boolean(ep.IsPartialSeason)
+	case "IsPossibleSpecialEpisode":
+		return boolean(ep.IsPossibleSpecialEpisode())
+	case "IsSeasonExtra":
+		return boolean(ep.IsSeasonExtra)
+	case "IsSeasonTitle":
+		return boolean(ep.IsSeasonTitle)
+	case "IsSplitEpisode":
+		return boolean(ep.IsSplitEpisode)
+	case "Special":
+		return boolean(ep.Special)
+	case "Quality.Quality.NotBe":
+		if want.Kind != corpus.KindEnum || want.Type != "Quality" {
+			return bad("a Quality enum")
+		}
+		def, ok := seriesQualityDef(want.Str)
+		if !ok {
+			return corpus.Value{}, corpus.Value{}, fmt.Errorf("%s: Quality.%s has no explicit code mapping", key, want.Str)
+		}
+		return boolValue(true), boolValue(ep.Quality.Code != def.code), nil
+	case "Quality.SourceDetectionSource", "Quality.ResolutionDetectionSource":
+		if want.Kind != corpus.KindEnum || want.Type != "QualityDetectionSource" {
+			return bad("a QualityDetectionSource enum")
+		}
+		code, ok := detectionCode(want.Str)
+		if !ok {
+			return corpus.Value{}, corpus.Value{}, fmt.Errorf("%s: QualityDetectionSource.%s has no explicit code mapping", key, want.Str)
+		}
+		if key == "Quality.SourceDetectionSource" {
+			return str(code), str(ep.Quality.SourceDetection), nil
+		}
+		return str(code), str(ep.Quality.ResolutionDetection), nil
+	}
+	return corpus.Value{}, corpus.Value{}, fmt.Errorf("unsupported asserted property %q of %s", key, ownerSeriesTitle)
+}
+
+// seriesRunClock is the instant and calendar of the committed series corpus run:
+// the parser's air date limit and the materialized symbolic dates read the same
+// local date, so a +14 name and a +15 name are decided by the parser, not by the
+// moment the test runs.
+func seriesRunClock(t *testing.T) (time.Time, *time.Location) {
+	t.Helper()
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("America/New_York: %v", err)
+	}
+	return time.Date(2026, 10, 25, 0, 30, 0, 0, loc), loc
+}
+
+// seriesTitleSubset is the bounded subset of the committed series title cases the
+// concurrency test runs: every 11th case of the whole file, plus the first case
+// of any entry point that stride misses, so all five title entry points are
+// reached.
+func seriesTitleSubset(t *testing.T, byID map[string]corpus.Disposition) *corpus.Corpus {
+	t.Helper()
+	full, _ := readCorpusFile(t, "series")
+	picked := &corpus.Corpus{Header: full.Header}
+	owners := map[string]bool{}
+	var missed []corpus.Case
+	for i, cs := range full.Cases {
+		if _, disposed := byID[cs.ID]; cs.Scope != corpus.ScopeTitle || !cs.UpstreamEnabled || disposed {
+			continue
+		}
+		switch {
+		case i%concurrentStride == 0:
+			picked.Cases = append(picked.Cases, cs)
+			owners[cs.ScopeOwner] = true
+		case !owners[cs.ScopeOwner]:
+			missed = append(missed, cs)
+		}
+	}
+	for _, cs := range missed {
+		if !owners[cs.ScopeOwner] {
+			picked.Cases = append(picked.Cases, cs)
+			owners[cs.ScopeOwner] = true
+		}
+	}
+	if len(picked.Cases) == 0 || len(owners) != 5 {
+		t.Fatalf("the bounded series title subset has %d cases over entry points %v", len(picked.Cases), owners)
+	}
+	return picked
 }

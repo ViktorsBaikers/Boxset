@@ -259,7 +259,6 @@ func TestMovieBoundsFailClosed(t *testing.T) {
 	}{
 		{"4097 bytes", padTo(movieName, 4097), KindMovie, codeReleaseNameTooLong, map[string]int64{"limit_bytes": 4096, "observed_bytes": 4097}},
 		{"invalid UTF-8", "Movie.2015.720p\xff-GRP", KindMovie, codeReleaseNameInvalidUTF8, map[string]int64{"offset": 15}},
-		{"series has no title parser yet", movieName, KindSeries, codeKindUnsupported, map[string]int64{"kind": int64(KindSeries)}},
 		{"unknown kind", movieName, Kind(9), codeKindUnsupported, map[string]int64{"kind": 9}},
 		{"nothing to parse", "----", KindMovie, codeTitleUnrecognized, map[string]int64{}},
 		{"hashed release", "0e895c37245186812cb08aab1529cf8ee389dd05.mkv", KindMovie, codeTitleUnrecognized, map[string]int64{}},
@@ -428,6 +427,203 @@ func TestHostileMovieTitleRejectsGeneratedHashNames(t *testing.T) {
 	check := func(name string) {
 		t.Helper()
 		if got, err := p.ParseTitle(ctx, name, KindMovie); err == nil || got.Movie != nil {
+			t.Fatalf("%q parsed as %+v", name, got)
+		}
+	}
+	hash := "CRAPPY TEST SEED"
+	for range 100 {
+		sum := md5.Sum([]byte(hash))
+		hash = strings.ToUpper(hex.EncodeToString(sum[:]))
+		check(hash)
+	}
+	const charset = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	rng := rand.New(rand.NewPCG(1, 2))
+	for _, length := range []int{32, 40} {
+		for range 500 {
+			var sb strings.Builder
+			for range length {
+				sb.WriteByte(charset[rng.IntN(len(charset))])
+			}
+			check(sb.String())
+		}
+	}
+}
+
+// ---- series title boundaries ------------------------------------------------------------
+
+// seriesName is a legitimate release name that parses to a known episode, with a
+// language, a quality and a release group for every subparser to run on.
+const seriesName = "Series.Title.S03E06.German.DL.1080p.BluRay.x264-GRP"
+
+func TestSeriesBoundsFailClosed(t *testing.T) {
+	p := newTestParser(t, nil)
+	ctx := context.Background()
+
+	// The 4096-byte control that must still parse is TestEpisodeBoundsLegitimate4096ByteNameParses; it
+	// runs on the real clock and so is excluded under -race with the complete corpus run.
+	for _, tc := range []struct {
+		name   string
+		input  string
+		kind   Kind
+		code   string
+		params map[string]int64
+	}{
+		{"4097 bytes", padTo(seriesName, 4097), KindSeries, codeReleaseNameTooLong, map[string]int64{"limit_bytes": 4096, "observed_bytes": 4097}},
+		{"invalid UTF-8", "Series.S01E01.720p\xff-GRP", KindSeries, codeReleaseNameInvalidUTF8, map[string]int64{"offset": 18}},
+		{"unknown kind", seriesName, Kind(9), codeKindUnsupported, map[string]int64{"kind": 9}},
+		{"nothing to parse", "----", KindSeries, codeTitleUnrecognized, map[string]int64{}},
+		{"hashed release", "0e895c37245186812cb08aab1529cf8ee389dd05.mkv", KindSeries, codeTitleUnrecognized, map[string]int64{}},
+		{"season folder", "Season 3", KindSeries, codeTitleUnrecognized, map[string]int64{}},
+		{"password and yenc", `password - "bdc435cb-93c4-4902-97ea-ca00568c3887.337" yEnc`, KindSeries, codeTitleUnrecognized, map[string]int64{}},
+		{"ambiguous air date", "Series.Title.12.02.2025.1080i.HDTV.MPA2.0.H.264", KindSeries, codeTitleUnrecognized, map[string]int64{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := p.ParseTitle(ctx, tc.input, tc.kind)
+			wantReason(t, err, tc.code, tc.params)
+			if got.Episode != nil || got.Movie != nil || got.Kind != 0 {
+				t.Errorf("a refused name must carry no usable value: %+v", got)
+			}
+		})
+	}
+	pt, err := p.ParseTitle(ctx, seriesName, KindSeries)
+	if err != nil || pt.Kind != KindSeries || pt.Episode == nil || pt.Movie != nil {
+		t.Errorf("the control must parse to exactly one episode: %+v, %v", pt, err)
+	}
+}
+
+// A hostile match in any parser the series ParseTitle runs (the title patterns,
+// the substitutions and cleanups, the quality, language and release group
+// parsers, the title info patterns) is a match_timeout reason, never a result.
+func TestHostileSeriesTitleMatchInAnySubparserFailsClosed(t *testing.T) {
+	evil := func(t *testing.T) *regexp2.Regexp {
+		t.Helper()
+		re, err := regexp2.Compile(`(a+)+$`, ic)
+		if err != nil {
+			t.Fatal(err)
+		}
+		re.MatchTimeout = matchTimeout
+		return re
+	}
+	// The hostile run is in the name, or in the series title for the patterns that read it.
+	inName := "Series.Title.S03E06.720p." + strings.Repeat("a", 64) + "!.x264-GRP"
+	inTitle := "Show." + strings.Repeat("a", 64) + "!.S03E06.720p.x264-GRP"
+	for _, tc := range []struct {
+		stage  string
+		input  string
+		inject func(p *Parser, re *regexp2.Regexp)
+	}{
+		{"title pattern", inName, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.titles[0] = re }},
+		{"pre-substitution", inName, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.preSubstitutions[0].re = re }},
+		{"hashed release rejection", inName, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.rejectHashed[0] = re }},
+		{"season folder", inName, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.seasonFolder = re }},
+		{"reversed title", inName, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.reversed = re }},
+		{"file extension", inName, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.fileExtension = re }},
+		{"simple title", inName, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.simpleTitle = re }},
+		{"website prefix", inName, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.common.websitePrefix = re }},
+		{"quality brackets", inName, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.cleanBrackets = re }},
+		{"six digit air date", inName, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.sixDigitAirDate = re }},
+		{"request info", inTitle, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.requestInfo = re }},
+		{"year in title", inTitle, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.yearInTitle = re }},
+		{"title components", inTitle, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.titleComponents = re }},
+		{"quality", inName, func(p *Parser, re *regexp2.Regexp) { p.series.source = re }},
+		{"language clean", inName, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.lang.clean = re }},
+		{"language", inName, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.lang.insensitive = re }},
+		{"language case-sensitive", inName, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.lang.caseSensitive = re }},
+		{"release group", inName, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.group.group = re }},
+		{"release group anime", inName, func(p *Parser, re *regexp2.Regexp) { p.seriesTitle.group.anime = re }},
+	} {
+		t.Run(tc.stage, func(t *testing.T) {
+			p := newTestParser(t, nil)
+			// The control: the same name parses with the real tables.
+			if _, err := p.ParseTitle(context.Background(), tc.input, KindSeries); err != nil {
+				t.Fatalf("control: %v", err)
+			}
+			tc.inject(p, evil(t))
+			got, err := p.ParseTitle(context.Background(), tc.input, KindSeries)
+			wantReason(t, err, codeMatchTimeout, map[string]int64{"limit_ms": 50})
+			if got.Episode != nil || got.Kind != 0 {
+				t.Errorf("a timeout must carry no usable value: %+v", got)
+			}
+		})
+	}
+}
+
+// One release budget covers every suboperation of the series ParseTitle, exactly
+// as for the movie parser: a full ParseTitle is run once to count its clock
+// reads, then once more for every read k from the first check through
+// completion, with the budget found exhausted at read k and no other. Every
+// such parse must stop with the budget reason, no value, and exactly k reads (no
+// work after the exhaustion, no late success returned). A stage that started a
+// budget of its own reads the clock to create it: at that read the blip makes
+// the new deadline a whole budget later, so nothing expires and the parse
+// finishes instead of failing. Read 1 creates the one legitimate budget.
+func TestBudgetSeriesTitleIsSharedByEverySubparser(t *testing.T) {
+	ctx := context.Background()
+	run := func(at int) (*blipClock, ParsedTitle, error) {
+		clk := &blipClock{base: time.Unix(1000, 0), at: at}
+		pt, err := newTestParser(t, clk.Now).ParseTitle(ctx, seriesName, KindSeries)
+		return clk, pt, err
+	}
+	probe, _, err := run(0)
+	if err != nil {
+		t.Fatalf("ParseTitle: %v", err)
+	}
+	reads := probe.Calls()
+	quality := &blipClock{base: time.Unix(1000, 0)}
+	if _, err := newTestParser(t, quality.Now).ParseQuality(ctx, seriesName, KindSeries); err != nil {
+		t.Fatalf("ParseQuality: %v", err)
+	}
+	if reads <= 2*quality.Calls() {
+		t.Fatalf("ParseTitle read the clock %d times, ParseQuality %d: the title, language and group work must add to the quality work", reads, quality.Calls())
+	}
+
+	failures := 0
+	for k := 2; k <= reads; k++ {
+		clk, got, err := run(k)
+		var re *ReasonError
+		switch {
+		case !errors.As(err, &re) || re.Reason.Code != codeWorkBudgetExhausted:
+			t.Errorf("budget exhausted at read %d of %d: err = %v, want %s (a stage with a budget of its own?)", k, reads, err, codeWorkBudgetExhausted)
+		case got.Episode != nil || got.Kind != 0:
+			t.Errorf("budget exhausted at read %d: no usable value expected, got %+v", k, got)
+		case clk.Calls() != k:
+			t.Errorf("budget exhausted at read %d: the clock was read %d times (work after the exhaustion)", k, clk.Calls())
+		default:
+			continue
+		}
+		if failures++; failures == 5 {
+			t.Fatal("more than 5 reads fail; stopping")
+		}
+	}
+}
+
+func TestBudgetSeriesTitleContextCancellationAndDeadlineFailClosed(t *testing.T) {
+	p := newTestParser(t, nil)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	got, err := p.ParseTitle(cancelled, seriesName, KindSeries)
+	wantReason(t, err, codeCancelled, map[string]int64{})
+	if got.Episode != nil {
+		t.Errorf("a cancelled parse must carry no usable value: %+v", got)
+	}
+	expired, stop := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer stop()
+	got, err = p.ParseTitle(expired, seriesName, KindSeries)
+	wantReason(t, err, codeDeadlineExceeded, map[string]int64{})
+	if got.Episode != nil {
+		t.Errorf("an expired parse must carry no usable value: %+v", got)
+	}
+}
+
+// The source's generated-name tests (an MD5 chain and random alphanumeric hashes)
+// have no recordable input in the corpus, so they are run here: no such name is a
+// series title.
+func TestHostileSeriesTitleRejectsGeneratedHashNames(t *testing.T) {
+	p := newTestParser(t, nil)
+	ctx := context.Background()
+	check := func(name string) {
+		t.Helper()
+		if got, err := p.ParseTitle(ctx, name, KindSeries); err == nil || got.Episode != nil {
 			t.Fatalf("%q parsed as %+v", name, got)
 		}
 	}
