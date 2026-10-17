@@ -95,6 +95,7 @@ The tables are machine-read. One row per introduced direct package/tool/image; c
 | ADM-120 | npm | npm-dependency | vitest | 5.0.3 | sha512-xMw97S3rjdtj5dkVat7jCsqWBpvchs3RlpQctUqwJD0KkERk40vz2fJ77lDwW/Vzh/pk18eItYAzkodhSes3jQ== | https://www.npmjs.com/package/vitest/v/5.0.3 | Vitest (npm ariperkkio, antfu, hiogawa) | MIT | release sha512-xMw97S3rjdtj5dkVat7jCsqWBpvchs3RlpQctUqwJD0KkERk40vz2fJ77lDwW/Vzh/pk18eItYAzkodhSes3jQ== 2026-09-30 https://www.npmjs.com/package/vitest/v/5.0.3 work=vitest/5.0.3 | any (JavaScript) | executed EVID-002 2026-10-16 |
 | ADM-121 | npm | npm-dependency | vitest-browser-svelte | 3.1.0 | sha512-+EBXSed6NArmzOC2DY4v9sI5n9TMIyfkMnewbXNQ7sR5IckQTCx7g1BbLdkH7kzm/tkgG/eEbRYlMWSbVfBtWA== | https://www.npmjs.com/package/vitest-browser-svelte/v/3.1.0 | vitest-community (npm ariperkkio, antfu, hiogawa) | MIT | release sha512-+EBXSed6NArmzOC2DY4v9sI5n9TMIyfkMnewbXNQ7sR5IckQTCx7g1BbLdkH7kzm/tkgG/eEbRYlMWSbVfBtWA== 2026-09-04 https://www.npmjs.com/package/vitest-browser-svelte/v/3.1.0 work=vitest-browser-svelte/3.1.0 | any (JavaScript) | executed EVID-002 2026-10-16 |
 | ADM-122 | npm | npm-dependency | @inlang/plugin-message-format | 4.4.0 | sha512-n4aXt6XVg5kxhKoLAhi9nMgZtCA9iS0QOaXte56VqxWHcfj9O4c4gOkyVQZH7H9D8h7OZufCrO1sZGYOypPwEA== | https://www.npmjs.com/package/@inlang/plugin-message-format/v/4.4.0 | Opral (npm samuelstroschein, inlangbot; GitHub Actions trusted publisher; repository https://github.com/opral/inlang packages/plugins/inlang-message-format) | MIT (LICENSE file, Copyright (c) 2024 Opral US Inc.; the package.json has no license field) | release sha512-n4aXt6XVg5kxhKoLAhi9nMgZtCA9iS0QOaXte56VqxWHcfj9O4c4gOkyVQZH7H9D8h7OZufCrO1sZGYOypPwEA== 2026-03-13 https://www.npmjs.com/package/@inlang/plugin-message-format/v/4.4.0 work=@inlang/plugin-message-format/4.4.0 | any (JavaScript) | executed EVID-002 2026-10-16 |
+| ADM-200 | go | go-dependency | github.com/dlclark/regexp2/v2 | v2.8.4 | h1:yfDDXTn4oxyLDC10/ieOBNDCCdIVWS9WbT6ddVXsPKI= | go-proxy https://proxy.golang.org origin=https://github.com/dlclark/regexp2 commit=e8c451ca75d22a6862c1e9b9f8f03175d20fcdda ref=refs/tags/v2.8.4 | Doug Clark (GitHub dlclark/regexp2) | MIT license-sha256=9be5d04bb4d706914d5bf943710da4afeb42048f7c529902fb57c82762a991a9 | commit e8c451ca75d22a6862c1e9b9f8f03175d20fcdda 2026-10-07 https://github.com/dlclark/regexp2/commit/e8c451ca75d22a6862c1e9b9f8f03175d20fcdda work=github.com/dlclark/regexp2/v2/v2.8.4 | pure Go, no cgo: linux/amd64 linux/arm64 linux/arm windows/amd64 windows/arm64 darwin/amd64 freebsd/amd64 freebsd/arm64 | n/a |
 
 ## Commitments (recorded, not installed)
 
@@ -104,7 +105,7 @@ The tables are machine-read. One row per introduced direct package/tool/image; c
 | CMT-PLATFORMS | three platforms for correctness (native plus QEMU) | linux/amd64 linux/arm64 linux/arm/v7 |
 | CMT-IMAGES | three images | dev lock work (lock-export only publishes lock output) |
 | CMT-P07 | explicit P-07 exception, replacement plan | vendoring openapi-fetch if it is archived; openapi-fetch is not introduced by this workspace |
-| CMT-REGEXP2 | Go dependency candidate for the parser slices | github.com/dlclark/regexp2/v2 v2.8.4 (proxy release 2026-10-07, upstream commit e8c451ca75d22a6862c1e9b9f8f03175d20fcdda); not in go.mod until its consumer lands and its licence is admitted there |
+| CMT-REGEXP2 | Go dependency of the parser slices | github.com/dlclark/regexp2/v2 v2.8.4, row ADM-200 (proxy release 2026-10-07, upstream commit e8c451ca75d22a6862c1e9b9f8f03175d20fcdda). It is in go.mod and in the `work` image's `/go/pkg/mod` cache with its first consumer. The row is admitted only by the real `--admission` run on the image the Go consumers used: `go list -m` under `GOPROXY=off`, `go mod verify`, and the module LICENSE hash and cache origin recomputed from that cache; the LICENSE hash recorded here was read from a go.sum-verified copy of the same release |
 | CMT-BUN | runtime Bun compatibility of the eight web tools | executed EVID-002 2026-10-16 (SLICE-002): the root observed Bun 1.4.3 run all eight tools to `S5-TOOLS-PASS` (component tests 2/2, Playwright 5/5, axe violations 0, four captures validated); this records that run only, not feature completion or editor diagnostics |
 | CMT-GOMOD | Go module directive | go 1.27, compiler Go 1.27.2; the linter must be built with a Go not older than this directive |
 
@@ -183,8 +184,9 @@ zoneminder                  limited  See README.Debian.security, only supported 
    Each `FACT ADM-nnn ...` line gives the exact installed version, `Section`, `${source:Package}`, `${source:Version}`,
    `copyright-sha256` and `dep5` to compare with the row; a differing source or section is a row correction, never a waiver.
 2. The root H2 pre-run and post-run checks of this block's SHA-256 against the upstream `master` head around each actual
-   admission run, and the per-run `dev-run: image=... inputs=...` line, are root-owned procedure recorded in feature
-   evidence only; no script or test in this repository stands in for them.
+   admission run, and the per-run `dev-run: image=... inputs=...` line with the immutable runtime payload recorded from it (see
+   the runner notes below: ordered `RootFS.Layers`, `Config` SHA-256, platform tuple and `inputs=<sha>`), are root-owned
+   procedure recorded in feature evidence only; no script or test in this repository stands in for them.
 
 ## Pin selection
 
@@ -228,10 +230,10 @@ for owner review; nothing is filed externally.
 
 ## Runner notes
 
-- `scripts/dev-run.sh [--write docs/spikes/issue-drafts] [--capture DIR] [--timeout SECONDS] -- COMMAND [ARG...]` is one small POSIX
-  `sh` wrapper around Docker, run from the repository root. Only those three flags exist today; `--ref` and `--bench` stop with
-  `ref_unavailable` and `bench_unavailable` until the work that introduces them lands (`--capture` with `--bench` is
-  `capture_flag_invalid`), and any other `--write` path is `write_path_invalid`. `--capture DIR` is described in the capture
+- `scripts/dev-run.sh [--ref] [--write docs/spikes/issue-drafts|testdata/parser] [--capture DIR] [--timeout SECONDS] -- COMMAND [ARG...]` is one small POSIX
+  `sh` wrapper around Docker, run from the repository root. `--bench` stops with `bench_unavailable` until the work that
+  introduces it lands (`--capture` with `--bench` is `capture_flag_invalid`), and any other `--write` path is
+  `write_path_invalid`. `--ref` is described in docs/spikes/s1-parser.md and `--capture DIR` in the capture
   note below. The timeout is 1 to 600 seconds (default 600). Host Go, Bun and Node are never
   used: every command, including this report's admission, runs in the `work` image.
 - Each run rebuilds `work` from the current allowlisted inputs with frozen locks, creates one uniquely named, labelled
@@ -250,7 +252,15 @@ for owner review; nothing is filed externally.
   `scripts/dev-run-test.sh` each have their own exclusion line and are named by the admission's exposure check).
 - The container's daemon log is disabled (`--log-driver=none`); before the start the runner requires
   `docker inspect --format '{{.HostConfig.LogConfig.Type}}'` to print `none` (otherwise `log_driver_invalid`). Its
-  `dev-run: image=<id> inputs=<sha> timeout=<n>s container=<name> log=none` line on stderr identifies the run. Output is read
+  `dev-run: image=<id> inputs=<sha> timeout=<n>s container=<name> log=none` line on stderr identifies the run (with `--ref`
+  the line ends ` ref=objects`; the created container has no mount of any kind, else `mounts_invalid`). The image ID names
+  one build only: a Go consumer run is bound to an actual admission run by the immutable runtime payload, recorded by root's
+  read-only `docker image inspect` of that run's `image=<id>` while the image exists: the complete ordered `RootFS.Layers`
+  digest chain, the SHA-256 of the parsed `Config` value alone (`json.dumps(Config, ensure_ascii=True, sort_keys=True,
+  separators=(",", ":"))` encoded as UTF-8, lowercase hexadecimal; never the whole inspect record, and raw Config JSON is never
+  printed or stored), the `Os`/`Architecture`/`Variant` platform tuple (`Variant` is the empty string when absent) and the
+  runner's `inputs=<sha>`. Any differing, unavailable, malformed or ambiguous component needs its own admission run; equal source
+  or input hashes alone never bind. Output is read
   only from the attached stream, never from `docker logs`, merged and passed through the host redactor (`deploy/dev/redact`,
   `-cap 65536`, secret values taken from the runner's own environment), so no raw child byte is retained anywhere. The
   redactor is built by the existing `host-redact` stage into a unique, ownership-checked scratch directory the runner removes.
@@ -275,6 +285,15 @@ for owner review; nothing is filed externally.
   published even when the child exits nonzero. Overflow, an unknown status or a failed export, removal or publication
   publishes nothing further and exits 125; a later rename failure can leave earlier names already published, so rerun. There
   is no rollback and no crash-durability claim, and a draft is never filed externally.
+- `--ref` (first used by the parser corpora) reads reference parser text only as Git objects of the two read-only reference
+  repositories at the runner's pinned commits, located by the owner values `BOXSET_REF_SERIES` and `BOXSET_REF_MOVIE`; no
+  checkout directory is walked, copied or mounted and the checkout's HEAD, index and working tree are never read. After each
+  pin check and before the container starts, the host redactor's private archive mode streams the listed `.cs` blobs into the
+  created container's six empty root-owned read-only `/ref/<side>/<area>` directories with `docker cp -`; the producer and
+  receiver statuses are kept apart. Failures print only `dev-run: <reason> side=<series|movie>` (`ref_unavailable`,
+  `ref_invalid`, `ref_commit_invalid`, `ref_copy_failed`); recovery is in `docs/spikes/s1-parser.md`. A `--write
+  testdata/parser` corpus is published only when the stopped container's raw file hashes exactly as the sanitized staged bytes,
+  otherwise `export_changed` and nothing is published.
 - Recovery of a failing bootstrap. Before the redactor exists the runner prints only a fixed stage reason and exits 125, never a
   raw build diagnostic: `redact_unavailable` (the `host-redact` build, export or check failed) or `temp_dir_failed` (the
   private scratch directory). Confirm that the Docker daemon is running and that the registry and snapshot network the pinned
@@ -283,10 +302,17 @@ for owner review; nothing is filed externally.
 - The small runner check `scripts/dev-run-smoke.sh` archives the explicit admitted roots (with the final nested secret and
   cache exclusions of `.dockerignore` applied before archiving, so no owner-shaped nested file is copied) into its own unique,
   ownership-checked scratch directory (so repository drafts are never touched), runs that copy's runner through real Docker
-  and prints `ok R<n>` or `not ok R<n>` for seven assertions: R1 argument errors before Docker, R2 exact argv and child status
+  and prints `ok R<n>` or `not ok R<n>` for seven assertions: R1 argument errors before Docker and the `--ref` root rejections
+  (unset, empty, relative, newline, tab, missing) and pin rejections (the unmodified runner's real pins, no Git, no repository,
+  a repository lacking the pin, a pin naming a blob, a directory nested in another repository), run from `env -i` with a
+  tool-only PATH over synthetic Git repositories built inside the scratch, R2 exact argv and child status
   and a child outliving `--timeout 1` giving 124 with no container left, R3 child identity, environment names, network and
   `log=none` under a synthetic Docker proxy configuration (disposable assertions in the scratch Dockerfile's redactor build and
-  work stage, under a fresh nonce, show the configuration reaches neither build, and stop a direct build given it), R4 a
+  work stage, under a fresh nonce, show the configuration reaches neither build, and stop a direct build given it), then the
+  `--ref` Git-object delivery on those repositories (no mount, no scratch path in the output, the exact control-commit file set
+  and pinned blob digests in read-only root-owned files whatever the later HEAD, staged, working-tree and untracked bytes are,
+  every source-rule rejection with no child, no publication and no left container, and a producer that fails after the receiver
+  `docker cp` succeeded), R4 a
   synthetic secret printed by the child is `[REDACTED]`, R5 the same secret and a secret URL written into a draft by a failing
   child are published redacted with no part file and no container left, an oversized draft, a draft whose redaction expands
   past the cap, a link and a directory holding a secret-named entry fail the export with the prior draft intact, a passive
@@ -294,11 +320,17 @@ for owner review; nothing is filed externally.
   synthetic secret in any file or name there, a selected value `file` (which occurs in docker's missing-file message) still
   publishes a lone draft from a failing child (the retained copy diagnostic must hold the redaction marker and not the value),
   lets a silent child with no drafts return 0 with the prior draft intact, and publishes a lone `s5-tools.md` with the child's
-  status when the first name is absent, and a synthetic tree with nested secret-shaped entries snapshots without them, R6
-  the existing redaction-only Go tests through the runner with `CGO_ENABLED=0`, and R7 the root alias `/src/.` running the real
+  status when the first name is absent, a synthetic tree with nested secret-shaped entries snapshots without them, and the
+  corpus export identity (a sentinel-free `series.jsonl`/`movie.jsonl` pair is published byte-identical, a `movie.jsonl` holding
+  the selected value is `export_changed` with both corpora unchanged), R6
+  the existing redaction-only Go tests and the bounded `TestRefArchive` producer tests through the runner with `CGO_ENABLED=0`
+  (the selector lists only `main_test.go` and `ref_archive_test.go` tests), and R7 the root alias `/src/.` running the real
   controls (an unexpected child variable blocks it), a small noncanonical manifest copy printing only `S5-MANIFEST-ONLY-PASS`
-  and no runtime control, and the real admission blocking an impossible executed Bun date (`recorded Bun result date ... is not a
-  valid date`) and a stale annual evidence date (the latter with a retained redacted draft).
+  and no runtime control, the real admission blocking an impossible executed Bun date (`recorded Bun result date ... is not a
+  valid date`) and a stale annual evidence date (the latter with a retained redacted draft), then the Go negatives: the go
+  row's licence SHA-256, origin commit and `h1:` pin each mutated in its own real-root run (`licence_mismatch`,
+  `source_mismatch`, `go.sum lacks ...`) and a manifest-only copy with one extra `go.mod` directive and one `require` without a
+  row (`ADMISSION-UNLISTED`), none printing `S5-ADMISSION-PASS`.
   `DEV-RUN-SMOKE-PASS checks=7` prints only when all seven pass.
 - `--capture DIR` (DIR is `.devrites/work/<slug>/screenshots-YYYYMMDDTHHMMSSZ` under an existing workspace directory and must
   not exist; a bad shape is `capture_destination_invalid`, an existing entry `capture_destination_exists`, both before Docker,
@@ -337,7 +369,7 @@ for owner review; nothing is filed externally.
 ## Deferred optional runner hardening (preserved predecessor)
 
 Deferred, optional and not part of the active flow above. The notes below describe `scripts/dev-run-hardening.sh`, a
-byte-for-byte copy of the pre-revision `scripts/dev-run.sh` (the native-controller runner, with `scripts/dev-run-test.sh` as its
+byte-for-byte copy of the pre-revision `scripts/dev-run.sh` (changed since only by the owner's neutral-name correction; the native-controller runner, with `scripts/dev-run-test.sh` as its
 driver and `redact -run`/`-clock` in `deploy/dev/redact`), not the active runner; inside these preserved notes
 `scripts/dev-run.sh` names that pre-revision script. Nothing here is required by a gate or a check, none of it has been proven,
 and its historical findings stay open.
@@ -348,13 +380,13 @@ and its historical findings stay open.
   and stderr merged) passes through the host redactor `deploy/dev/redact` and is capped at 64 KiB raw and 64 KiB emitted;
   build and start diagnostics appear only as a redacted tail.
 - `--write testdata/parser` and `--write docs/spikes/issue-drafts` are supervisor-owned protected fixed-name maps on a
-  32 MiB tmpfs (`sonarr.jsonl`/`radarr.jsonl`, `s5-admission.md`/`s5-tools.md`): the child writes the precreated files in
+  32 MiB tmpfs (`series.jsonl`/`movie.jsonl`, `s5-admission.md`/`s5-tools.md`): the child writes the precreated files in
   place, the kernel refuses the byte past 33,554,432, and nothing reaches the host until the child is quiescent
   (only terminal UID-1000 zombies may remain), the container is checked closed and staged parts are published by rename.
   Drafts are counted raw before redaction and emitted redacted separately. Publication commits only while every backup
   exists; a post-commit backup-cleanup failure is reported and never rolls back. The live cap is enforced during
   production, so the earlier post-run-only limitation no longer applies.
-- Reference mode mounts only the Sonarr and Radarr parser, qualities, languages and parser-test directories read-only, and
+- Reference mode mounts only the series and movie parser, qualities, languages and parser-test directories read-only, and
   refuses any entry that is not a regular, non-executable `.cs` file.
 - Capture mode follows architecture DEC-020 and the strict enforcement fold: a protected precreated four-file `/capture`
   tmpfs map, host-exec child, fresh-container `capture-check` validation, and root-supplied fresh workspace DIR; the

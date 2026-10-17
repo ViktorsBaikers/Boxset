@@ -1890,7 +1890,7 @@ MAPFACTS='grep " /src/testdata/parser tmpfs " /proc/self/mounts >/tmp/m || exit 
 set -- $(cat /tmp/m)
 case ",$4," in *,rw,*) ;; *) exit 22 ;; esac
 for tok in nosuid nodev noexec size=32768k nr_inodes=8 mode=755 uid=65534 gid=65534; do case ",$4," in *",$tok,"*) ;; *) exit 23 ;; esac; done
-for n in sonarr.jsonl radarr.jsonl; do
+for n in series.jsonl movie.jsonl; do
 	[ "$(stat -c "%u:%g %a %h %F %s" /src/testdata/parser/$n)" = "65534:65534 666 1 regular empty file 0" ] || exit 24
 done
 [ "$(ls -A /src/testdata/parser | wc -l)" = 2 ] || exit 25
@@ -1901,39 +1901,39 @@ done'
 rr --write testdata/parser -- sh -c "$MAPFACTS"
 expect "write map: tmpfs options, two precreated empty 0666 65534 single-link files, root-owned ancestors" "$RS" 0
 
-DENIALS='before=$(stat -c %i /src/testdata/parser/sonarr.jsonl /src/testdata/parser/radarr.jsonl)
+DENIALS='before=$(stat -c %i /src/testdata/parser/series.jsonl /src/testdata/parser/movie.jsonl)
 if touch /src/testdata/parser/probe 2>/dev/null; then exit 31; fi
 if ln -s /src/escape.bin /src/testdata/parser/x 2>/dev/null; then exit 32; fi
 if mkdir /src/testdata/parser/d 2>/dev/null; then exit 33; fi
 if mkfifo /src/testdata/parser/f 2>/dev/null; then exit 34; fi
-if rm /src/testdata/parser/sonarr.jsonl 2>/dev/null; then exit 35; fi
-if mv /src/testdata/parser/sonarr.jsonl /src/testdata/parser/t 2>/dev/null; then exit 36; fi
-if ln -sf /src/escape.bin /src/testdata/parser/sonarr.jsonl 2>/dev/null; then exit 37; fi
-if chmod 0644 /src/testdata/parser/sonarr.jsonl 2>/dev/null; then exit 38; fi
-if ln /src/testdata/parser/sonarr.jsonl /tmp/h 2>/dev/null; then exit 39; fi
+if rm /src/testdata/parser/series.jsonl 2>/dev/null; then exit 35; fi
+if mv /src/testdata/parser/series.jsonl /src/testdata/parser/t 2>/dev/null; then exit 36; fi
+if ln -sf /src/escape.bin /src/testdata/parser/series.jsonl 2>/dev/null; then exit 37; fi
+if chmod 0644 /src/testdata/parser/series.jsonl 2>/dev/null; then exit 38; fi
+if ln /src/testdata/parser/series.jsonl /tmp/h 2>/dev/null; then exit 39; fi
 if mv /src/testdata /src/t2 2>/dev/null; then exit 40; fi
 if rmdir /src/testdata/parser 2>/dev/null; then exit 41; fi
 if mv /src/docs/spikes /src/x 2>/dev/null; then exit 42; fi
-[ "$(stat -c %i /src/testdata/parser/sonarr.jsonl /src/testdata/parser/radarr.jsonl)" = "$before" ] || exit 43
+[ "$(stat -c %i /src/testdata/parser/series.jsonl /src/testdata/parser/movie.jsonl)" = "$before" ] || exit 43
 [ ! -e /src/escape.bin ] || exit 44
-printf kept >/src/testdata/parser/sonarr.jsonl || exit 45'
+printf kept >/src/testdata/parser/series.jsonl || exit 45'
 rr --write testdata/parser -- sh -c "$DENIALS"
 expect "child cannot create, link, rename, unlink, chmod or replace anything on a write-root path" "$RS" 0
-expect "the in-place write still publishes" "$(cat "$ISO/testdata/parser/sonarr.jsonl" 2>/dev/null)" kept
-expect "zero-byte radarr.jsonl publishes nothing" "$([ -e "$ISO/testdata/parser/radarr.jsonl" ] && echo present || echo absent)" absent
+expect "the in-place write still publishes" "$(cat "$ISO/testdata/parser/series.jsonl" 2>/dev/null)" kept
+expect "zero-byte movie.jsonl publishes nothing" "$([ -e "$ISO/testdata/parser/movie.jsonl" ] && echo present || echo absent)" absent
 rm -rf "$ISO/testdata"
 
-DRAFTMAP="$(printf '%s' "$MAPFACTS" | sed 's|/src/testdata/parser|/src/docs/spikes/issue-drafts|g; s|sonarr.jsonl|s5-admission.md|g; s|radarr.jsonl|s5-tools.md|g; s| /src/testdata; do| /src/docs /src/docs/spikes; do|')"
+DRAFTMAP="$(printf '%s' "$MAPFACTS" | sed 's|/src/testdata/parser|/src/docs/spikes/issue-drafts|g; s|series.jsonl|s5-admission.md|g; s|movie.jsonl|s5-tools.md|g; s| /src/testdata; do| /src/docs /src/docs/spikes; do|')"
 rr --write docs/spikes/issue-drafts -- sh -c "$DRAFTMAP"
 expect "draft map has the same protected shape with s5-admission.md and s5-tools.md" "$RS" 0
 
 # allowed writes, cold roots (require-pre-existing-root mutant RED)
 a_cold_root() { # holds when an absent approved write root is created and published
 	rm -rf "$ISO/testdata"
-	rrx "$ISO" "$1" --write testdata/parser -- sh -c 'printf cold >/src/testdata/parser/sonarr.jsonl'
-	OBS="status $RS, host content '$(cat "$ISO/testdata/parser/sonarr.jsonl" 2>/dev/null)'"
-	{ { [ "$RS" = 0 ] && [ -n "$(cat "$ISO/testdata/parser/sonarr.jsonl" 2>/dev/null)" ]; } || { [ "$RS" = 125 ] && grep -Fq 'dev-run: write_root_create_failed' "$TMP/rerr"; }; } && reached
-	[ "$RS" = 0 ] && [ "$(cat "$ISO/testdata/parser/sonarr.jsonl" 2>/dev/null)" = cold ]
+	rrx "$ISO" "$1" --write testdata/parser -- sh -c 'printf cold >/src/testdata/parser/series.jsonl'
+	OBS="status $RS, host content '$(cat "$ISO/testdata/parser/series.jsonl" 2>/dev/null)'"
+	{ { [ "$RS" = 0 ] && [ -n "$(cat "$ISO/testdata/parser/series.jsonl" 2>/dev/null)" ]; } || { [ "$RS" = 125 ] && grep -Fq 'dev-run: write_root_create_failed' "$TMP/rerr"; }; } && reached
+	[ "$RS" = 0 ] && [ "$(cat "$ISO/testdata/parser/series.jsonl" 2>/dev/null)" = cold ]
 }
 gvariant mut-require-root controller.go 'if err := c.repoRoot.Mkdir(cur, 0o755); err != nil {' 'if err := errors.New("creation disabled"); err != nil {'
 redgreen "require-pre-existing-root mutant" a_cold_root "$MUT/mut-require-root.sh" "$RUNNER"
@@ -1997,38 +1997,38 @@ rm -rf "$FISO"
 # exact limit, live +1, split +1, refuse-then-truncate, swallow-then-exit-0, sparse
 rm -rf "$ISO/testdata"
 mkdir -p "$ISO/testdata/parser"
-printf 'prior radarr\n' >"$ISO/testdata/parser/radarr.jsonl"
-priorR=$(fhash "$ISO/testdata/parser/radarr.jsonl")
+printf 'prior movie\n' >"$ISO/testdata/parser/movie.jsonl"
+priorR=$(fhash "$ISO/testdata/parser/movie.jsonl")
 zero32=$(head -c 33554432 /dev/zero | sha256sum | cut -d' ' -f1)
-rr --write testdata/parser -- sh -c 'head -c 33554432 /dev/zero >/src/testdata/parser/sonarr.jsonl'
-expect "exact 33554432-byte write publishes" "$RS:$(wc -c <"$ISO/testdata/parser/sonarr.jsonl" | tr -d ' '):$(fhash "$ISO/testdata/parser/sonarr.jsonl")" "0:33554432:$zero32"
+rr --write testdata/parser -- sh -c 'head -c 33554432 /dev/zero >/src/testdata/parser/series.jsonl'
+expect "exact 33554432-byte write publishes" "$RS:$(wc -c <"$ISO/testdata/parser/series.jsonl" | tr -d ' '):$(fhash "$ISO/testdata/parser/series.jsonl")" "0:33554432:$zero32"
 noreason "exact limit adds no write_cap_reached" write_cap_reached
-rm -f "$ISO/testdata/parser/sonarr.jsonl"
-CAPSH='head -c 33554433 /dev/zero >/src/testdata/parser/sonarr.jsonl && printf PRODUCED'
+rm -f "$ISO/testdata/parser/series.jsonl"
+CAPSH='head -c 33554433 /dev/zero >/src/testdata/parser/series.jsonl && printf PRODUCED'
 rr -s 1 --write testdata/parser -- sh -c "$CAPSH"
 expect "live +1: producer fails at the refused byte, status 1 unchanged" "$RS" 1
 if grep -Fq PRODUCED "$TMP/rout"; then fail "live +1 sentinel" "completion sentinel was produced"; else pass "live +1: PRODUCED never printed"; fi
 grep -Fqi 'space' "$TMP/rout" && pass "live +1: the producer's ENOSPC error is in the redacted output" || fail "live +1 ENOSPC" "$(head -c 300 "$TMP/rout")"
 expect "live +1: exactly the cap line and nothing else from the runner about the root" "$(grep -c 'dev-run: write_cap_reached root=testdata/parser' "$TMP/rerr")" 1
-expect "live +1: nothing published, prior radarr.jsonl unchanged" "$(fhash "$ISO/testdata/parser/radarr.jsonl"):$([ -e "$ISO/testdata/parser/sonarr.jsonl" ] && echo present || echo absent)" "$priorR:absent"
+expect "live +1: nothing published, prior movie.jsonl unchanged" "$(fhash "$ISO/testdata/parser/movie.jsonl"):$([ -e "$ISO/testdata/parser/series.jsonl" ] && echo present || echo absent)" "$priorR:absent"
 gone "$(cname)" "live +1: owned container absent after the run (status-checked)"
-rr -s 1 --write testdata/parser -- sh -c 'head -c 16777216 /dev/zero >/src/testdata/parser/sonarr.jsonl && head -c 16777217 /dev/zero >/src/testdata/parser/radarr.jsonl && printf PRODUCED'
+rr -s 1 --write testdata/parser -- sh -c 'head -c 16777216 /dev/zero >/src/testdata/parser/series.jsonl && head -c 16777217 /dev/zero >/src/testdata/parser/movie.jsonl && printf PRODUCED'
 expect "split +1 across both map files gives status 1, no sentinel, cap line" "$RS:$(grep -c PRODUCED "$TMP/rout"):$(grep -c 'write_cap_reached root=testdata/parser' "$TMP/rerr")" "1:0:1"
-expect "split +1 publishes nothing" "$(fhash "$ISO/testdata/parser/radarr.jsonl"):$([ -e "$ISO/testdata/parser/sonarr.jsonl" ] && echo present || echo absent)" "$priorR:absent"
-rr -s 1 --write testdata/parser -- sh -c 'head -c 33554433 /dev/zero >/src/testdata/parser/sonarr.jsonl && printf PRODUCED; s=$?; truncate -s 0 /src/testdata/parser/sonarr.jsonl; exit $s'
-expect "refuse-then-truncate: status 1, no sentinel, no cap line, nothing published" "$RS:$(grep -c PRODUCED "$TMP/rout"):$(grep -c write_cap_reached "$TMP/rerr"):$([ -e "$ISO/testdata/parser/sonarr.jsonl" ] && echo present || echo absent):$(fhash "$ISO/testdata/parser/radarr.jsonl")" "1:0:0:absent:$priorR"
-rr --write testdata/parser -- sh -c 'head -c 33554433 /dev/zero >/src/testdata/parser/sonarr.jsonl; exit 0'
-expect "swallow-then-exit-0 publishes exactly 33554432 bytes, never more" "$RS:$(wc -c <"$ISO/testdata/parser/sonarr.jsonl" | tr -d ' ')" "0:33554432"
-rm -f "$ISO/testdata/parser/sonarr.jsonl"
-rr -w write_audit_failed --write testdata/parser -- sh -c 'truncate -s 33554433 /src/testdata/parser/sonarr.jsonl'
-expect "a sparse 33554433-byte map file is write_audit_failed with zero host writes" "$RS:$([ -e "$ISO/testdata/parser/sonarr.jsonl" ] && echo present || echo absent)" "125:absent"
+expect "split +1 publishes nothing" "$(fhash "$ISO/testdata/parser/movie.jsonl"):$([ -e "$ISO/testdata/parser/series.jsonl" ] && echo present || echo absent)" "$priorR:absent"
+rr -s 1 --write testdata/parser -- sh -c 'head -c 33554433 /dev/zero >/src/testdata/parser/series.jsonl && printf PRODUCED; s=$?; truncate -s 0 /src/testdata/parser/series.jsonl; exit $s'
+expect "refuse-then-truncate: status 1, no sentinel, no cap line, nothing published" "$RS:$(grep -c PRODUCED "$TMP/rout"):$(grep -c write_cap_reached "$TMP/rerr"):$([ -e "$ISO/testdata/parser/series.jsonl" ] && echo present || echo absent):$(fhash "$ISO/testdata/parser/movie.jsonl")" "1:0:0:absent:$priorR"
+rr --write testdata/parser -- sh -c 'head -c 33554433 /dev/zero >/src/testdata/parser/series.jsonl; exit 0'
+expect "swallow-then-exit-0 publishes exactly 33554432 bytes, never more" "$RS:$(wc -c <"$ISO/testdata/parser/series.jsonl" | tr -d ' ')" "0:33554432"
+rm -f "$ISO/testdata/parser/series.jsonl"
+rr -w write_audit_failed --write testdata/parser -- sh -c 'truncate -s 33554433 /src/testdata/parser/series.jsonl'
+expect "a sparse 33554433-byte map file is write_audit_failed with zero host writes" "$RS:$([ -e "$ISO/testdata/parser/series.jsonl" ] && echo present || echo absent)" "125:absent"
 reason "sparse reason" write_audit_failed
-rr -w write_audit_failed --write testdata/parser -- sh -c 'truncate -s 20971520 /src/testdata/parser/sonarr.jsonl; truncate -s 20971520 /src/testdata/parser/radarr.jsonl'
-expect "two 20 MiB sparse files exceeding the cap together are write_audit_failed" "$RS:$(fhash "$ISO/testdata/parser/radarr.jsonl")" "125:$priorR"
+rr -w write_audit_failed --write testdata/parser -- sh -c 'truncate -s 20971520 /src/testdata/parser/series.jsonl; truncate -s 20971520 /src/testdata/parser/movie.jsonl'
+expect "two 20 MiB sparse files exceeding the cap together are write_audit_failed" "$RS:$(fhash "$ISO/testdata/parser/movie.jsonl")" "125:$priorR"
 
 # unprotected-map mutant: child-owned staging root, no precreation, no preflight
 a_map_bound() { # holds when container writable-layer growth stays below 1 MiB through the map
-	bg_run mapb "$1" --write testdata/parser -- sh -c 'ln -s /src/escape.bin /src/testdata/parser/sonarr.jsonl 2>/dev/null; head -c 33554433 /dev/zero >/src/testdata/parser/sonarr.jsonl 2>/dev/null; touch /tmp/ready; n=0; while [ ! -e /tmp/go ] && [ "$n" -lt 600 ]; do sleep 1; n=$((n + 1)); done'
+	bg_run mapb "$1" --write testdata/parser -- sh -c 'ln -s /src/escape.bin /src/testdata/parser/series.jsonl 2>/dev/null; head -c 33554433 /dev/zero >/src/testdata/parser/series.jsonl 2>/dev/null; touch /tmp/ready; n=0; while [ ! -e /tmp/go ] && [ "$n" -lt 600 ]; do sleep 1; n=$((n + 1)); done'
 	_c=$(bg_ctr mapb) || { OBS="no container"; SETUP=1; return 1; }
 	if ! bg_wait "$_c" /tmp/ready; then OBS="not ready"; SETUP=1; kill -KILL "$BG_PID" 2>/dev/null; return 1; fi
 	_sz=$(timeout 30 docker inspect -s -f '{{.SizeRw}}' "$_c" 2>/dev/null) || _sz=
@@ -2049,13 +2049,13 @@ live_host() { (cd "$ISO/testdata/parser" 2>/dev/null && { find . | LC_ALL=C sort
 a_live_hostwrite() { # a_live_hostwrite RUNNER: holds when nothing reaches the host write root before the producer completes
 	rm -rf "$ISO/testdata"
 	mkdir -p "$ISO/testdata/parser"
-	printf 'prior radarr\n' >"$ISO/testdata/parser/radarr.jsonl"
+	printf 'prior movie\n' >"$ISO/testdata/parser/movie.jsonl"
 	_lh0=$(live_host)
 	_lc0=$(canary_state)
-	bg_run live "$1" --write testdata/parser -- sh -c "printf transient >/src/testdata/parser/sonarr.jsonl; $CBAR; printf done >/src/testdata/parser/sonarr.jsonl"
+	bg_run live "$1" --write testdata/parser -- sh -c "printf transient >/src/testdata/parser/series.jsonl; $CBAR; printf done >/src/testdata/parser/series.jsonl"
 	_c=$(bg_ctr live) || { OBS="no container"; SETUP=1; return 1; }
 	if ! bg_wait "$_c" /tmp/ready; then OBS="not ready"; SETUP=1; kill -KILL "$BG_PID" 2>/dev/null; bg_end live; return 1; fi
-	_lw=$(cx "$_c" /usr/bin/cat /src/testdata/parser/sonarr.jsonl 2>/dev/null)
+	_lw=$(cx "$_c" /usr/bin/cat /src/testdata/parser/series.jsonl 2>/dev/null)
 	_lh1=$(live_host)
 	_lc1=$(canary_state)
 	bg_touch "$_c" /tmp/go || SETUP=1
@@ -2073,9 +2073,9 @@ rm -rf "$ISO/testdata"
 
 # drafts: nonzero child publishes its redacted draft; corpus root publishes nothing
 mkdir -p "$ISO/testdata/parser" "$ISO/docs/spikes/issue-drafts"
-printf 'old\n' >"$ISO/testdata/parser/sonarr.jsonl"
-rr -s 5 --write testdata/parser -- sh -c 'printf new >/src/testdata/parser/sonarr.jsonl; exit 5'
-expect "nonzero child: corpus root publishes nothing and keeps the status" "$RS:$(cat "$ISO/testdata/parser/sonarr.jsonl")" "5:old"
+printf 'old\n' >"$ISO/testdata/parser/series.jsonl"
+rr -s 5 --write testdata/parser -- sh -c 'printf new >/src/testdata/parser/series.jsonl; exit 5'
+expect "nonzero child: corpus root publishes nothing and keeps the status" "$RS:$(cat "$ISO/testdata/parser/series.jsonl")" "5:old"
 rr -s 7 --write docs/spikes/issue-drafts -- sh -c 'printf draft >/src/docs/spikes/issue-drafts/s5-admission.md; exit 7'
 expect "nonzero child: the draft is published and the status kept" "$RS:$(cat "$ISO/docs/spikes/issue-drafts/s5-admission.md")" "7:draft"
 rm -f "$ISO/docs/spikes/issue-drafts/s5-admission.md"
@@ -2228,23 +2228,23 @@ rm -rf "$ISO/docs/spikes/issue-drafts" "$ISO/testdata"
 
 # ===== 4. publication on the corpus root: hard links, foreign targets, rollback (T26) ===============
 mkdir -p "$ISO/testdata/parser"
-printf 'prior sonarr\n' >"$ISO/testdata/parser/sonarr.jsonl"
-printf 'prior radarr\n' >"$ISO/testdata/parser/radarr.jsonl"
+printf 'prior series\n' >"$ISO/testdata/parser/series.jsonl"
+printf 'prior movie\n' >"$ISO/testdata/parser/movie.jsonl"
 printf 'outside bytes\n' >"$CANARY/linked.bin"
-rm -f "$ISO/testdata/parser/radarr.jsonl"
-ln "$CANARY/linked.bin" "$ISO/testdata/parser/radarr.jsonl"
-BOTH='printf newS >/src/testdata/parser/sonarr.jsonl; printf newR >/src/testdata/parser/radarr.jsonl'
+rm -f "$ISO/testdata/parser/movie.jsonl"
+ln "$CANARY/linked.bin" "$ISO/testdata/parser/movie.jsonl"
+BOTH='printf newS >/src/testdata/parser/series.jsonl; printf newR >/src/testdata/parser/movie.jsonl'
 a_hardlink() { # holds when a hard-linked target is replaced by rename, never written in place
 	rm -rf "$ISO/testdata"
 	mkdir -p "$ISO/testdata/parser"
 	rm -f "$CANARY/linked.bin"
 	printf 'outside bytes\n' >"$CANARY/linked.bin"
-	ln "$CANARY/linked.bin" "$ISO/testdata/parser/radarr.jsonl"
+	ln "$CANARY/linked.bin" "$ISO/testdata/parser/movie.jsonl"
 	rrx "$ISO" "$1" --write testdata/parser -- sh -c "$BOTH"
-	_links=$(find "$ISO/testdata/parser/radarr.jsonl" -printf '%n' 2>/dev/null)
-	_rad=$(cat "$ISO/testdata/parser/radarr.jsonl" 2>/dev/null)
+	_links=$(find "$ISO/testdata/parser/movie.jsonl" -printf '%n' 2>/dev/null)
+	_rad=$(cat "$ISO/testdata/parser/movie.jsonl" 2>/dev/null)
 	_can=$(cat "$CANARY/linked.bin" 2>/dev/null)
-	OBS="status $RS, radarr '$_rad', links $_links, outside '$_can'"
+	OBS="status $RS, movie '$_rad', links $_links, outside '$_can'"
 	# the publication seam ran and its intended effect is observed from the files themselves, independently of the runner's
 	# status: the new bytes sit at the destination and either the publish succeeded or the in-place write changed the outside
 	# file. An intentionally faulty publication is not required to succeed, so its 125 is not a reason to call it unreached.
@@ -2268,17 +2268,17 @@ gvariant mut-inplace-publish controller.go "$RENAME_OLD" 'func (c *ctl) renameOn
 	return c.wroot.Remove(src)
 }'
 redgreen "bind/in-place publication mutant" a_hardlink "$MUT/mut-inplace-publish.sh" "$RUNNER"
-printf 'prior sonarr\n' >"$ISO/testdata/parser/sonarr.jsonl"
-rm -f "$ISO/testdata/parser/radarr.jsonl"
-mkdir "$ISO/testdata/parser/radarr.jsonl"
+printf 'prior series\n' >"$ISO/testdata/parser/series.jsonl"
+rm -f "$ISO/testdata/parser/movie.jsonl"
+mkdir "$ISO/testdata/parser/movie.jsonl"
 rr -w write_publish_failed --write testdata/parser -- sh -c "$BOTH"
-expect "an existing directory at radarr.jsonl: write_publish_failed, zero renames, prior files unchanged" "$RS:$(cat "$ISO/testdata/parser/sonarr.jsonl")" "125:prior sonarr"
+expect "an existing directory at movie.jsonl: write_publish_failed, zero renames, prior files unchanged" "$RS:$(cat "$ISO/testdata/parser/series.jsonl")" "125:prior series"
 reason "directory target reason" write_publish_failed
-rmdir "$ISO/testdata/parser/radarr.jsonl"
-ln -s "$CANARY/canary.txt" "$ISO/testdata/parser/radarr.jsonl"
+rmdir "$ISO/testdata/parser/movie.jsonl"
+ln -s "$CANARY/canary.txt" "$ISO/testdata/parser/movie.jsonl"
 rr -w write_publish_failed --write testdata/parser -- sh -c "$BOTH"
-expect "a symlink at radarr.jsonl: write_publish_failed and the outside canary unchanged" "$RS:$(cat "$CANARY/canary.txt")" "125:outside canary"
-rm -f "$ISO/testdata/parser/radarr.jsonl"
+expect "a symlink at movie.jsonl: write_publish_failed and the outside canary unchanged" "$RS:$(cat "$CANARY/canary.txt")" "125:outside canary"
+rm -f "$ISO/testdata/parser/movie.jsonl"
 expect "refusals left no owned part or backup" "$(find "$ISO/testdata/parser" -name '.*' ! -name . | wc -l | tr -d ' ')" 0
 
 # second rename fails after the first succeeded: three prior-state shapes. The prior device:inode,
@@ -2291,35 +2291,35 @@ a_second_rename() { # a_second_rename RUNNER (SHAPE global): holds when every sh
 	mkdir -p "$_P"
 	case $SHAPE in
 	absent) ;;
-	mixed) printf 'prior radarr\n' >"$_P/radarr.jsonl" ;;
+	mixed) printf 'prior movie\n' >"$_P/movie.jsonl" ;;
 	linked)
-		printf 'prior sonarr\n' >"$CANARY/s.bin"
-		ln "$CANARY/s.bin" "$_P/sonarr.jsonl"
-		printf 'prior radarr\n' >"$_P/radarr.jsonl"
+		printf 'prior series\n' >"$CANARY/s.bin"
+		ln "$CANARY/s.bin" "$_P/series.jsonl"
+		printf 'prior movie\n' >"$_P/movie.jsonl"
 		;;
 	esac
-	_s0=$(ident_h "$_P/sonarr.jsonl")
-	_r0=$(ident_h "$_P/radarr.jsonl")
+	_s0=$(ident_h "$_P/series.jsonl")
+	_r0=$(ident_h "$_P/movie.jsonl")
 	rrx "$ISO" "$1" --write testdata/parser -- sh -c "$BOTH"
 	[ "$RS" = 125 ] && grep -Fq 'write_publish_failed root=testdata/parser' "$TMP/rerr" && reached
-	_s=$(cat "$_P/sonarr.jsonl" 2>/dev/null)
-	_r=$(cat "$_P/radarr.jsonl" 2>/dev/null)
-	OBS="$SHAPE: status $RS sonarr '$_s' ($(ident_h "$_P/sonarr.jsonl") was $_s0) radarr '$_r' ($(ident_h "$_P/radarr.jsonl") was $_r0)"
+	_s=$(cat "$_P/series.jsonl" 2>/dev/null)
+	_r=$(cat "$_P/movie.jsonl" 2>/dev/null)
+	OBS="$SHAPE: status $RS series '$_s' ($(ident_h "$_P/series.jsonl") was $_s0) movie '$_r' ($(ident_h "$_P/movie.jsonl") was $_r0)"
 	[ "$RS" = 125 ] || return 1
 	grep -Fq 'write_publish_failed root=testdata/parser' "$TMP/rerr" || return 1
 	[ -z "$(find "$_P" -name '.*.part' -o -name '.*.prev')" ] || return 1
 	grep -Fq PASS "$TMP/rout" && return 1
 	case $SHAPE in
-	absent) [ ! -e "$_P/sonarr.jsonl" ] && [ ! -e "$_P/radarr.jsonl" ] ;;
-	mixed) [ ! -e "$_P/sonarr.jsonl" ] && [ "$_r" = "prior radarr" ] && [ "$(ident_h "$_P/radarr.jsonl")" = "$_r0" ] && [ "$(links_h "$_P/radarr.jsonl")" = 1 ] ;;
+	absent) [ ! -e "$_P/series.jsonl" ] && [ ! -e "$_P/movie.jsonl" ] ;;
+	mixed) [ ! -e "$_P/series.jsonl" ] && [ "$_r" = "prior movie" ] && [ "$(ident_h "$_P/movie.jsonl")" = "$_r0" ] && [ "$(links_h "$_P/movie.jsonl")" = 1 ] ;;
 	linked)
-		[ "$_s" = "prior sonarr" ] && [ "$(ident_h "$_P/sonarr.jsonl")" = "$_s0" ] && [ "$(links_h "$_P/sonarr.jsonl")" = 2 ] &&
-			[ "$(cat "$CANARY/s.bin")" = "prior sonarr" ] && [ "$_r" = "prior radarr" ] && [ "$(ident_h "$_P/radarr.jsonl")" = "$_r0" ] && [ "$(links_h "$_P/radarr.jsonl")" = 1 ]
+		[ "$_s" = "prior series" ] && [ "$(ident_h "$_P/series.jsonl")" = "$_s0" ] && [ "$(links_h "$_P/series.jsonl")" = 2 ] &&
+			[ "$(cat "$CANARY/s.bin")" = "prior series" ] && [ "$_r" = "prior movie" ] && [ "$(ident_h "$_P/movie.jsonl")" = "$_r0" ] && [ "$(links_h "$_P/movie.jsonl")" = 1 ]
 		;;
 	esac
 }
 RENAME_SECOND='func (c *ctl) renameOne(src, dst string) error {
-	if dst == "radarr.jsonl" {
+	if dst == "movie.jsonl" {
 		return errors.New("injected rename failure")
 	}
 	return c.wroot.Rename(src, dst)
@@ -2332,7 +2332,7 @@ for SHAPE in absent mixed; do
 	redgreen "new-inode-rollback-removed mutant, shape $SHAPE" a_second_rename "$MUT/mut-new-inode-kept.sh" "$MUT/fault-second-rename.sh"
 done
 SHAPE=linked
-holds "second rename fails with both targets existing and sonarr hard-linked: both prior inodes (sonarr link count 2), bytes and canary restored" a_second_rename "$MUT/fault-second-rename.sh"
+holds "second rename fails with both targets existing and series hard-linked: both prior inodes (series link count 2), bytes and canary restored" a_second_rename "$MUT/fault-second-rename.sh"
 
 # foreign replacement or deletion between the first rename and the failure: present and absent priors.
 # The barrier loop is bounded and records its subshell pid.
@@ -2341,8 +2341,8 @@ a_foreign() { # a_foreign PRIOR RUNNER (FACT global replace|delete)
 	rm -rf "$_P"
 	find "$BAR" -mindepth 1 -delete
 	mkdir -p "$_P"
-	[ "$PRIOR" = present ] && printf 'prior sonarr\n' >"$_P/sonarr.jsonl"
-	_s0=$(ident_h "$_P/sonarr.jsonl")
+	[ "$PRIOR" = present ] && printf 'prior series\n' >"$_P/series.jsonl"
+	_s0=$(ident_h "$_P/series.jsonl")
 	printf 'foreign bytes\n' >"$TMP/foreign"
 	bg_run foreign "$1" --write testdata/parser -- sh -c "$BOTH"
 	_i=0
@@ -2354,43 +2354,43 @@ a_foreign() { # a_foreign PRIOR RUNNER (FACT global replace|delete)
 	[ -e "$BAR/ready" ] || { OBS="barrier never reached"; SETUP=1; bg_end foreign; return 1; }
 	_fo=0
 	if [ "$FACT" = delete ]; then
-		{ rm -f "$_P/sonarr.jsonl" && [ ! -e "$_P/sonarr.jsonl" ]; } || _fo=1
+		{ rm -f "$_P/series.jsonl" && [ ! -e "$_P/series.jsonl" ]; } || _fo=1
 	else
-		{ cp "$TMP/foreign" "$_P/.foreign.new" && mv -T "$_P/.foreign.new" "$_P/sonarr.jsonl" && [ "$(cat "$_P/sonarr.jsonl")" = "foreign bytes" ]; } || _fo=1
+		{ cp "$TMP/foreign" "$_P/.foreign.new" && mv -T "$_P/.foreign.new" "$_P/series.jsonl" && [ "$(cat "$_P/series.jsonl")" = "foreign bytes" ]; } || _fo=1
 	fi
 	: >"$BAR/go"
 	bg_end foreign
 	[ "$_fo" = 0 ] || { OBS="the foreign replacement or deletion was not performed"; SETUP=1; return 1; }
 	_id=$(runid)
 	[ "$RS" = 125 ] && grep -Fq 'write_publish_failed root=testdata/parser' "$TMP/rerr" && reached
-	OBS="$FACT/$PRIOR: status $RS sonarr '$(cat "$_P/sonarr.jsonl" 2>/dev/null)' ($(ident_h "$_P/sonarr.jsonl") was $_s0)"
+	OBS="$FACT/$PRIOR: status $RS series '$(cat "$_P/series.jsonl" 2>/dev/null)' ($(ident_h "$_P/series.jsonl") was $_s0)"
 	[ "$RS" = 125 ] || return 1
 	if [ "$FACT" = delete ]; then
 		grep -Fq 'publish_rollback_conflict' "$TMP/rerr" && return 1
-		[ ! -e "$_P/.sonarr.jsonl.$_id.prev" ] || return 1
+		[ ! -e "$_P/.series.jsonl.$_id.prev" ] || return 1
 		if [ "$PRIOR" = present ]; then
-			[ "$(cat "$_P/sonarr.jsonl" 2>/dev/null)" = "prior sonarr" ] && [ "$(ident_h "$_P/sonarr.jsonl")" = "$_s0" ]
+			[ "$(cat "$_P/series.jsonl" 2>/dev/null)" = "prior series" ] && [ "$(ident_h "$_P/series.jsonl")" = "$_s0" ]
 		else
-			[ ! -e "$_P/sonarr.jsonl" ]
+			[ ! -e "$_P/series.jsonl" ]
 		fi
 		return
 	fi
-	[ "$(cat "$_P/sonarr.jsonl")" = "foreign bytes" ] || return 1
-	grep -Fq 'dev-run: publish_rollback_conflict root=testdata/parser name=sonarr.jsonl' "$TMP/rerr" || return 1
+	[ "$(cat "$_P/series.jsonl")" = "foreign bytes" ] || return 1
+	grep -Fq 'dev-run: publish_rollback_conflict root=testdata/parser name=series.jsonl' "$TMP/rerr" || return 1
 	if [ "$PRIOR" = present ]; then
-		[ "$(cat "$_P/.sonarr.jsonl.$_id.prev" 2>/dev/null)" = "prior sonarr" ]
+		[ "$(cat "$_P/.series.jsonl.$_id.prev" 2>/dev/null)" = "prior series" ]
 	else
-		[ ! -e "$_P/.sonarr.jsonl.$_id.prev" ]
+		[ ! -e "$_P/.series.jsonl.$_id.prev" ]
 	fi
 }
 FOREIGN_NEW='func (c *ctl) renameOne(src, dst string) error {
-	if dst == "radarr.jsonl" {
+	if dst == "movie.jsonl" {
 		return errors.New("injected rename failure")
 	}
 	if err := c.wroot.Rename(src, dst); err != nil {
 		return err
 	}
-	if dst == "sonarr.jsonl" {
+	if dst == "series.jsonl" {
 		'"$(gobar 180)"'
 	}
 	return nil
@@ -2399,14 +2399,14 @@ gvariant fault-foreign controller.go "$RENAME_OLD" "$FOREIGN_NEW"
 gvariant mut-unconditional-restore controller.go "$RENAME_OLD" "$FOREIGN_NEW" 'case curOK && cur == p:' 'case true:'
 FACT=replace
 for PRIOR in present absent; do
-	redgreen "unconditional-restore mutant, prior sonarr $PRIOR" a_foreign "$MUT/mut-unconditional-restore.sh" "$MUT/fault-foreign.sh"
+	redgreen "unconditional-restore mutant, prior series $PRIOR" a_foreign "$MUT/mut-unconditional-restore.sh" "$MUT/fault-foreign.sh"
 done
 # the published name deleted at the barrier with its backup present: absent-current branch restores the
 # prior inode by no-overwrite link and removes the backup
 gvariant mut-absent-current-ignored controller.go "$RENAME_OLD" "$FOREIGN_NEW" 'case !curOK && !c.isSymlink(n):' 'case false:'
 FACT=delete
 for PRIOR in present absent; do
-	redgreen "absent-current-branch-ignored mutant, prior sonarr $PRIOR" a_foreign "$MUT/mut-absent-current-ignored.sh" "$MUT/fault-foreign.sh"
+	redgreen "absent-current-branch-ignored mutant, prior series $PRIOR" a_foreign "$MUT/mut-absent-current-ignored.sh" "$MUT/fault-foreign.sh"
 done
 FACT=replace
 
@@ -2415,20 +2415,20 @@ a_post_commit() { # holds when a post-commit cleanup failure keeps both new name
 	_P=$ISO/testdata/parser
 	rm -rf "$_P"
 	mkdir -p "$_P"
-	printf 'prior sonarr\n' >"$_P/sonarr.jsonl"
-	printf 'prior radarr\n' >"$_P/radarr.jsonl"
+	printf 'prior series\n' >"$_P/series.jsonl"
+	printf 'prior movie\n' >"$_P/movie.jsonl"
 	rrx "$ISO" "$1" --write testdata/parser -- sh -c "$BOTH"
 	_id=$(runid)
-	[ "$RS" = 125 ] && grep -Fq "dev-run: publish_cleanup_failed root=testdata/parser name=.radarr.jsonl.$_id.prev" "$TMP/rerr" && reached
-	OBS="status $RS sonarr '$(cat "$_P/sonarr.jsonl" 2>/dev/null)' radarr '$(cat "$_P/radarr.jsonl" 2>/dev/null)', first backup $([ -e "$_P/.sonarr.jsonl.$_id.prev" ] && echo kept || echo gone)"
-	[ "$RS" = 125 ] && [ "$(cat "$_P/sonarr.jsonl")" = newS ] && [ "$(cat "$_P/radarr.jsonl")" = newR ] &&
-		[ ! -e "$_P/.sonarr.jsonl.$_id.prev" ] &&
-		[ "$(cat "$_P/.radarr.jsonl.$_id.prev" 2>/dev/null)" = "prior radarr" ] &&
+	[ "$RS" = 125 ] && grep -Fq "dev-run: publish_cleanup_failed root=testdata/parser name=.movie.jsonl.$_id.prev" "$TMP/rerr" && reached
+	OBS="status $RS series '$(cat "$_P/series.jsonl" 2>/dev/null)' movie '$(cat "$_P/movie.jsonl" 2>/dev/null)', first backup $([ -e "$_P/.series.jsonl.$_id.prev" ] && echo kept || echo gone)"
+	[ "$RS" = 125 ] && [ "$(cat "$_P/series.jsonl")" = newS ] && [ "$(cat "$_P/movie.jsonl")" = newR ] &&
+		[ ! -e "$_P/.series.jsonl.$_id.prev" ] &&
+		[ "$(cat "$_P/.movie.jsonl.$_id.prev" 2>/dev/null)" = "prior movie" ] &&
 		[ -z "$(find "$_P" -name '.*.part')" ] &&
-		grep -Fq "dev-run: publish_cleanup_failed root=testdata/parser name=.radarr.jsonl.$_id.prev" "$TMP/rerr"
+		grep -Fq "dev-run: publish_cleanup_failed root=testdata/parser name=.movie.jsonl.$_id.prev" "$TMP/rerr"
 }
 SECOND_UNLINK='func (c *ctl) unlinkBackup(name string) error {
-	if strings.HasPrefix(name, ".radarr.jsonl.") {
+	if strings.HasPrefix(name, ".movie.jsonl.") {
 		return errors.New("injected unlink failure")
 	}
 	return c.wroot.Remove(name)
@@ -2438,14 +2438,14 @@ gvariant mut-cleanup-as-rollback controller.go "$UNLINK_OLD" "$SECOND_UNLINK" "$
 redgreen "mutant treating post-commit cleanup failure as rollback" a_post_commit "$MUT/mut-cleanup-as-rollback.sh" "$MUT/fault-second-unlink.sh"
 
 # backups unlinked before the commit re-check lose the prior file under an identity fault
-a_commit_order() { # holds when an identity fault after the renames restores the prior sonarr.jsonl
+a_commit_order() { # holds when an identity fault after the renames restores the prior series.jsonl
 	rm -rf "$ISO/testdata/parser"
 	mkdir -p "$ISO/testdata/parser"
-	printf 'prior sonarr\n' >"$ISO/testdata/parser/sonarr.jsonl"
-	rrx "$ISO" "$1" --write testdata/parser -- sh -c 'printf newS >/src/testdata/parser/sonarr.jsonl'
+	printf 'prior series\n' >"$ISO/testdata/parser/series.jsonl"
+	rrx "$ISO" "$1" --write testdata/parser -- sh -c 'printf newS >/src/testdata/parser/series.jsonl'
 	[ "$RS" = 125 ] && grep -Fq 'dev-run: write_root_changed' "$TMP/rerr" && reached
-	OBS="status $RS sonarr '$(cat "$ISO/testdata/parser/sonarr.jsonl" 2>/dev/null)'"
-	[ "$RS" = 125 ] && [ "$(cat "$ISO/testdata/parser/sonarr.jsonl" 2>/dev/null)" = "prior sonarr" ]
+	OBS="status $RS series '$(cat "$ISO/testdata/parser/series.jsonl" 2>/dev/null)'"
+	[ "$RS" = 125 ] && [ "$(cat "$ISO/testdata/parser/series.jsonl" 2>/dev/null)" = "prior series" ]
 }
 IDFAULT_OLD='if !c.rootUnchanged() { // the identity re-check after the renames'
 IDFAULT_NEW='if true || !c.rootUnchanged() { // the identity re-check after the renames'
@@ -2461,23 +2461,23 @@ a_ident_fault() { # a_ident_fault RUNNER
 	_P=$ISO/testdata/parser
 	rm -rf "$_P"
 	mkdir -p "$_P"
-	printf 'prior sonarr\n' >"$_P/sonarr.jsonl"
-	printf 'prior radarr\n' >"$_P/radarr.jsonl"
-	_s0=$(ident_h "$_P/sonarr.jsonl")
-	_r0=$(ident_h "$_P/radarr.jsonl")
+	printf 'prior series\n' >"$_P/series.jsonl"
+	printf 'prior movie\n' >"$_P/movie.jsonl"
+	_s0=$(ident_h "$_P/series.jsonl")
+	_r0=$(ident_h "$_P/movie.jsonl")
 	rrx "$ISO" "$1" --write testdata/parser -- sh -c "$BOTH"
-	{ { [ "$RS" = 125 ] && grep -Fq 'write_publish_failed root=testdata/parser' "$TMP/rerr"; } || { [ "$RS" = 0 ] && [ "$(cat "$_P/sonarr.jsonl" 2>/dev/null)" = newS ]; }; } && reached
-	OBS="status $RS sonarr '$(cat "$_P/sonarr.jsonl" 2>/dev/null)' ($(ident_h "$_P/sonarr.jsonl") was $_s0) radarr '$(cat "$_P/radarr.jsonl" 2>/dev/null)' ($(ident_h "$_P/radarr.jsonl") was $_r0)"
+	{ { [ "$RS" = 125 ] && grep -Fq 'write_publish_failed root=testdata/parser' "$TMP/rerr"; } || { [ "$RS" = 0 ] && [ "$(cat "$_P/series.jsonl" 2>/dev/null)" = newS ]; }; } && reached
+	OBS="status $RS series '$(cat "$_P/series.jsonl" 2>/dev/null)' ($(ident_h "$_P/series.jsonl") was $_s0) movie '$(cat "$_P/movie.jsonl" 2>/dev/null)' ($(ident_h "$_P/movie.jsonl") was $_r0)"
 	[ "$RS" = 125 ] && grep -Fq 'write_publish_failed root=testdata/parser' "$TMP/rerr" &&
-		[ "$(cat "$_P/sonarr.jsonl")" = "prior sonarr" ] && [ "$(ident_h "$_P/sonarr.jsonl")" = "$_s0" ] &&
-		[ "$(cat "$_P/radarr.jsonl")" = "prior radarr" ] && [ "$(ident_h "$_P/radarr.jsonl")" = "$_r0" ] &&
+		[ "$(cat "$_P/series.jsonl")" = "prior series" ] && [ "$(ident_h "$_P/series.jsonl")" = "$_s0" ] &&
+		[ "$(cat "$_P/movie.jsonl")" = "prior movie" ] && [ "$(ident_h "$_P/movie.jsonl")" = "$_r0" ] &&
 		[ -z "$(find "$_P" -name '.*.part' -o -name '.*.prev')" ]
 }
 IDENT_OLD='func (c *ctl) partIdent(part string) (fileID, bool) {
 	return c.identOf(part)
 }'
 IDENT_NEW='func (c *ctl) partIdent(part string) (fileID, bool) {
-	if strings.HasPrefix(part, ".sonarr.jsonl.") {
+	if strings.HasPrefix(part, ".series.jsonl.") {
 		return fileID{}, false
 	}
 	return c.identOf(part)
@@ -2497,7 +2497,7 @@ a_root_transition() { # a_root_transition MODE RUNNER
 	mkdir -p "$ISO/testdata/parser"
 	printf 'c\n' >"$ISO/testdata/parser/keep"
 	_h0=$(fhash "$ISO/testdata/parser/keep")
-	bg_run swap "$2" --write testdata/parser -- sh -c "$CBAR; printf late >/src/testdata/parser/sonarr.jsonl"
+	bg_run swap "$2" --write testdata/parser -- sh -c "$CBAR; printf late >/src/testdata/parser/series.jsonl"
 	_c=$(bg_ctr swap) || { OBS="no container"; SETUP=1; return 1; }
 	bg_wait "$_c" /tmp/ready || { OBS="not ready"; SETUP=1; kill -KILL "$BG_PID" 2>/dev/null; bg_end swap; return 1; }
 	_cs0=$(canary_state)
@@ -2520,8 +2520,8 @@ a_root_transition() { # a_root_transition MODE RUNNER
 	esac
 	bg_touch "$_c" /tmp/go
 	bg_end swap
-	_new=$([ -e "$ISO/testdata/parser/sonarr.jsonl" ] && echo present || echo absent)
-	OBS="$1: status $RS, replacement sonarr $_new, moved keep '$(cat "$_mv/keep" 2>/dev/null)'"
+	_new=$([ -e "$ISO/testdata/parser/series.jsonl" ] && echo present || echo absent)
+	OBS="$1: status $RS, replacement series $_new, moved keep '$(cat "$_mv/keep" 2>/dev/null)'"
 	[ "$RS" = 125 ] && grep -Fq 'dev-run: write_root_changed' "$TMP/rerr" && reached
 	_ok=0
 	[ "$RS" = 125 ] && grep -Fq 'dev-run: write_root_changed' "$TMP/rerr" && [ "$_cs0" = "$(canary_state)" ] && [ "$_new" = absent ] &&
@@ -2530,7 +2530,7 @@ a_root_transition() { # a_root_transition MODE RUNNER
 	[ "$_ok" = 1 ]
 }
 for MODE in leaf ancestor-link ancestor-dir; do
-	holds "write root $MODE replaced while the child is held, then the child writes sonarr.jsonl: write_root_changed, canary and moved object bytes and entries unchanged, replacement unwritten" a_root_transition "$MODE" "$RUNNER"
+	holds "write root $MODE replaced while the child is held, then the child writes series.jsonl: write_root_changed, canary and moved object bytes and entries unchanged, replacement unwritten" a_root_transition "$MODE" "$RUNNER"
 done
 # Transitions during acquisition itself (validation and creation), held at a compiled barrier before the write-root OpenRoot: the
 # controller refuses a swapped leaf or ancestor with write_root_symlink before any child runs; the acquisition checks removed (mutant) reach the child.
@@ -2606,10 +2606,10 @@ EXPORTHOLD_NEW="$EXPORTHOLD_OLD
 live_tasks() { printf '%s\n' "$1" | tr ' ' '\n' | grep -v '^$' | grep -Evc '^(Z|gone)$'; } # live_tasks "S Z ...": tasks neither zombie nor gone
 # a_export_hold NAME RUNNER SCRIPT PIDFILE: runs SCRIPT through the held runner; sets AH_STATES (the task states of the
 # pid in /tmp/PIDFILE, read by a status-checked supervisor exec at the hold; with AH_WAIT set, polled until exactly
-# that state or 20 reads), AH_PUB (published sonarr.jsonl) and RS. The runner is released only after the read.
+# that state or 20 reads), AH_PUB (published series.jsonl) and RS. The runner is released only after the read.
 AH_WAIT=
 a_export_hold() {
-	rm -f "$ISO/testdata/parser/sonarr.jsonl"
+	rm -f "$ISO/testdata/parser/series.jsonl"
 	find "$BAR" -mindepth 1 -delete
 	bg_run "$1" "$2" --write testdata/parser -- sh -c "$3"
 	AH_STATES=
@@ -2639,10 +2639,10 @@ a_export_hold() {
 		true >"$BAR/go" || SETUP=1
 	fi
 	bg_end "$1"
-	AH_PUB=$(cat "$ISO/testdata/parser/sonarr.jsonl" 2>/dev/null)
+	AH_PUB=$(cat "$ISO/testdata/parser/series.jsonl" 2>/dev/null)
 }
-DETACH='printf early >/src/testdata/parser/sonarr.jsonl
-setsid sh -c "echo \$\$ >/tmp/writer.pid; while [ ! -e /tmp/go ]; do /usr/bin/sleep 0.1; done; printf LATE >>/src/testdata/parser/sonarr.jsonl; while :; do /usr/bin/sleep 1; done" >/dev/null 2>&1 &
+DETACH='printf early >/src/testdata/parser/series.jsonl
+setsid sh -c "echo \$\$ >/tmp/writer.pid; while [ ! -e /tmp/go ]; do /usr/bin/sleep 0.1; done; printf LATE >>/src/testdata/parser/series.jsonl; while :; do /usr/bin/sleep 1; done" >/dev/null 2>&1 &
 n=0; while [ ! -s /tmp/writer.pid ] && [ "$n" -lt 100 ]; do /usr/bin/sleep 0.1; n=$((n + 1)); done
 [ -s /tmp/writer.pid ] || exit 91'
 a_detached() { # holds when no writer task is live at the pre-export boundary and the published bytes are exactly the child's
@@ -2684,7 +2684,7 @@ refuses_unknown "a failed task-state query followed by a successful one is still
 
 ZOMBIE='/usr/bin/sleep 30 &
 echo $! >/tmp/sleeper.pid
-printf zombie >/src/testdata/parser/sonarr.jsonl'
+printf zombie >/src/testdata/parser/series.jsonl'
 # The zombie premise is read while the runner is held after its kill and before its verifier, so the verdict of
 # the rejecting target cannot hide the premise: the held copy changes only the quiescence seam, the mutant is the
 # same copy with the verifier rejecting every UID-1000 entry.
@@ -2724,10 +2724,10 @@ gcc -o /tmp/nd /tmp/nd.c || exit 92
 setsid /tmp/nd >/dev/null 2>&1 &
 n=0; while [ ! -s /tmp/ns.pid ] && [ "$n" -lt 100 ]; do /usr/bin/sleep 0.1; n=$((n + 1)); done
 [ -s /tmp/ns.pid ] || exit 93
-printf x >/src/testdata/parser/sonarr.jsonl
+printf x >/src/testdata/parser/series.jsonl
 '"$CBAR"
 a_nondumpable() { # holds when a live UID-1000 process that set PR_SET_DUMPABLE 0 natively is caught as live, judged from its Uid line
-	rm -f "$ISO/testdata/parser/sonarr.jsonl"
+	rm -f "$ISO/testdata/parser/series.jsonl"
 	bg_run nd "$1" --write testdata/parser -- sh -c "$NONDUMP"
 	_c=$(bg_ctr nd) || { OBS="no container"; SETUP=1; return 1; }
 	if ! bg_wait "$_c" /tmp/ready; then OBS="child never ready (compile or readiness failure is setup)"; SETUP=1; kill -KILL "$BG_PID" 2>/dev/null; bg_end nd; return 1; fi
@@ -2759,7 +2759,7 @@ a_nondumpable() { # holds when a live UID-1000 process that set PR_SET_DUMPABLE 
 		SETUP=1
 		return 1
 	fi
-	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: quiesce_failed' "$TMP/rerr"; } || { [ "$RS" = 0 ] && [ -e "$ISO/testdata/parser/sonarr.jsonl" ]; }; } && reached
+	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: quiesce_failed' "$TMP/rerr"; } || { [ "$RS" = 0 ] && [ -e "$ISO/testdata/parser/series.jsonl" ]; }; } && reached
 	[ "$RS" = 125 ] && grep -Fq 'dev-run: quiesce_failed' "$TMP/rerr"
 }
 gvariant fault-kill-removed controller.go "$KILL_OLD" "$KILL_NEW"
@@ -2770,17 +2770,17 @@ THREAD='cat >/tmp/th.c <<"CSRC"
 #include <pthread.h>
 #include <fcntl.h>
 #include <unistd.h>
-static void *w(void *a) { int fd = open("/src/testdata/parser/sonarr.jsonl", O_WRONLY | O_APPEND); for (;;) { if (fd >= 0) (void)write(fd, "t", 1); usleep(1000); } return a; }
+static void *w(void *a) { int fd = open("/src/testdata/parser/series.jsonl", O_WRONLY | O_APPEND); for (;;) { if (fd >= 0) (void)write(fd, "t", 1); usleep(1000); } return a; }
 int main(void) { pthread_t t; pthread_create(&t, 0, w, 0); pthread_exit(0); }
 CSRC
 gcc -pthread -o /tmp/th /tmp/th.c || exit 42
-printf lead >/src/testdata/parser/sonarr.jsonl
+printf lead >/src/testdata/parser/series.jsonl
 setsid /tmp/th >/dev/null 2>&1 &
 echo $! >/tmp/th.pid
 sleep 1
 '"$CBAR"
 a_thread_leader() { # holds when a live second thread under a zombie leader is observed and caught
-	rm -f "$ISO/testdata/parser/sonarr.jsonl"
+	rm -f "$ISO/testdata/parser/series.jsonl"
 	bg_run thr "$1" --write testdata/parser -- sh -c "$THREAD"
 	_c=$(bg_ctr thr) || { OBS="no container"; SETUP=1; return 1; }
 	if ! bg_wait "$_c" /tmp/ready; then OBS="child never ready (compile failure fails the case)"; SETUP=1; kill -KILL "$BG_PID" 2>/dev/null; bg_end thr; return 1; fi
@@ -2829,11 +2829,11 @@ gvariant mut-status-only-verifier controller.go "$KILL_OLD" "$KILL_NEW" 'for t i
 redgreen "verifier reading only /proc/<pid>/status accepts the zombie leader (a live second thread)" a_thread_leader "$MUT/mut-status-only-verifier.sh" "$MUT/fault-kill-removed.sh"
 
 a_verifier_fault() { # holds when a status that cannot be parsed or read rejects: quiesce_failed, no publication
-	rm -f "$ISO/testdata/parser/sonarr.jsonl"
-	rrx "$ISO" "$1" --write testdata/parser -- sh -c 'printf x >/src/testdata/parser/sonarr.jsonl'
-	OBS="status $RS, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1), published $([ -e "$ISO/testdata/parser/sonarr.jsonl" ] && echo yes || echo no)"
-	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: quiesce_failed' "$TMP/rerr"; } || { [ "$RS" = 0 ] && [ -e "$ISO/testdata/parser/sonarr.jsonl" ]; }; } && reached
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: quiesce_failed' "$TMP/rerr" && [ ! -e "$ISO/testdata/parser/sonarr.jsonl" ]
+	rm -f "$ISO/testdata/parser/series.jsonl"
+	rrx "$ISO" "$1" --write testdata/parser -- sh -c 'printf x >/src/testdata/parser/series.jsonl'
+	OBS="status $RS, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1), published $([ -e "$ISO/testdata/parser/series.jsonl" ] && echo yes || echo no)"
+	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: quiesce_failed' "$TMP/rerr"; } || { [ "$RS" = 0 ] && [ -e "$ISO/testdata/parser/series.jsonl" ]; }; } && reached
+	[ "$RS" = 125 ] && grep -Fq 'dev-run: quiesce_failed' "$TMP/rerr" && [ ! -e "$ISO/testdata/parser/series.jsonl" ]
 }
 gvariant fault-verifier-nostate controller.go 'State:*) set -- $line; state=$2 ;;' 'State:*) ;;'
 gvariant mut-verifier-accepts controller.go 'State:*) set -- $line; state=$2 ;;' 'State:*) ;;' 'if [ -z "$state" ] || [ -z "$uids" ]; then' 'if false; then'
@@ -3046,23 +3046,33 @@ gvariant mut-start-bypass controller.go '"--tmpfs", scratchTmpfs}' '"--tmpfs", s
 redgreen "start-failure diagnostics redacted (bypass mutant)" a_start_diag "$MUT/mut-start-bypass.sh" "$MUT/fault-start.sh"
 
 # ===== 7. reference mounts ================================================================================
-if [ -d "$SRC/reference/Sonarr" ] && [ -d "$SRC/reference/Radarr" ]; then
-	for app in Sonarr Radarr; do
+# The reference checkouts are located only by the owner values BOXSET_REF_SERIES and BOXSET_REF_MOVIE; the driver copies their
+# text into the isolated checkout, points both values there for these controls and restores them afterwards.
+if [ -d "${BOXSET_REF_SERIES:-}" ] && [ -d "${BOXSET_REF_MOVIE:-}" ]; then
+	REF_S0=$BOXSET_REF_SERIES
+	REF_M0=$BOXSET_REF_MOVIE
+	for side in series movie; do
+		case $side in series) _rsrc=$REF_S0 ;; *) _rsrc=$REF_M0 ;; esac
 		for rel in src/NzbDrone.Core.Test/ParserTests src/NzbDrone.Core.Test/Languages src/NzbDrone.Core/Parser src/NzbDrone.Core/Qualities src/NzbDrone.Core/Languages; do
-			mkdir -p "$ISO/reference/$app/$rel"
-			cp -R "$SRC/reference/$app/$rel/." "$ISO/reference/$app/$rel/" 2>/dev/null || true
+			mkdir -p "$ISO/ref/$side/$rel"
+			cp -R "$_rsrc/$rel/." "$ISO/ref/$side/$rel/" 2>/dev/null || true
 		done
 	done
-	rr --ref -- sh -c 'test -r /ref/sonarr/src/NzbDrone.Core/Parser && test -r /ref/radarr/src/NzbDrone.Core/Qualities && ! touch /ref/sonarr/src/NzbDrone.Core/Parser/x 2>/dev/null && test ! -e /ref/sonarr/decoy.sh'
+	BOXSET_REF_SERIES=$ISO/ref/series
+	BOXSET_REF_MOVIE=$ISO/ref/movie
+	export BOXSET_REF_SERIES BOXSET_REF_MOVIE
+	rr --ref -- sh -c 'test -r /ref/series/parser && test -r /ref/movie/qualities && ! touch /ref/series/parser/x 2>/dev/null && test ! -e /ref/series/decoy.sh'
 	expect "reference text mounts read-only and nothing else" "$RS" 0
-	decoy=$ISO/reference/Sonarr/src/NzbDrone.Core/Parser/bad.sh
+	decoy=$ISO/ref/series/src/NzbDrone.Core/Parser/bad.sh
 	printf '#!/bin/sh\n' >"$decoy"
 	chmod +x "$decoy"
 	rr -w reference_input_invalid --ref -- true
 	if [ "$RS" = 125 ] && grep -Fq 'dev-run: reference_input_invalid' "$TMP/rerr"; then pass "reference executable / non-text file is refused"; else fail "reference audit" "status $RS"; fi
 	rm -f "$decoy"
+	BOXSET_REF_SERIES=$REF_S0
+	BOXSET_REF_MOVIE=$REF_M0
 else
-	fail "reference mounts" "reference/Sonarr and reference/Radarr are absent on this host: required for the --ref controls"
+	fail "reference mounts" "BOXSET_REF_SERIES and BOXSET_REF_MOVIE do not name reference checkouts on this host: required for the --ref controls"
 fi
 rr -- sh -c 'test ! -e /ref'
 expect "no reference mount without --ref" "$RS" 0
@@ -4215,7 +4225,7 @@ a_clock_case() { # a_clock_case RUNNER (CK err-t0|invalid-admission|backward-com
 	rm -f "$CLKN" "$CLKV" "$QCALLS" "$CLKT"
 	rm -rf "$ISO/testdata"
 	mkdir -p "$ISO/testdata/parser"
-	rrlog "$ISO" "$1" --write testdata/parser -- sh -c 'printf pub >/src/testdata/parser/sonarr.jsonl'
+	rrlog "$ISO" "$1" --write testdata/parser -- sh -c 'printf pub >/src/testdata/parser/series.jsonl'
 	_cn=$(cname)
 	cstate "$_cn"
 	_cst=$CST
@@ -4224,7 +4234,7 @@ a_clock_case() { # a_clock_case RUNNER (CK err-t0|invalid-admission|backward-com
 	_qc=$({ wc -c <"$QCALLS"; } 2>/dev/null | tr -d ' ')
 	case $_qc in '' | *[!0-9]*) _qc=0 ;; esac
 	_pub=no
-	[ ! -e "$ISO/testdata/parser/sonarr.jsonl" ] || _pub=yes
+	[ ! -e "$ISO/testdata/parser/series.jsonl" ] || _pub=yes
 	OBS="$CK: status $RS, container $_cn $_cst, clock readings $_kn (targeted reading $CK_CALLS, scripted line '$CK_LINE' consumed: $(grep -Fxc "$CK_LINE" "$CLKT" 2>/dev/null)), confirmation queries $_qc, published $_pub, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tr '\n' ' ')"
 	if [ -z "$_cn" ] || [ "$_kn" -lt "$CK_CALLS" ] || ! grep -Fxq "$CK_LINE" "$CLKT" 2>/dev/null; then
 		SETUP=1
@@ -5431,7 +5441,7 @@ a_stdout_blocked() { # a_stdout_blocked RUNNER
 		exec 6<&-
 		return 1
 	fi
-	(cd "$ISO" && exec "$1" --write testdata/parser --timeout 3 -- sh -c 'printf pub >/src/testdata/parser/sonarr.jsonl; head -c 1000 /dev/zero | tr "\0" a') >"$TMP/blkout.fifo" 2>"$TMP/bo.err" &
+	(cd "$ISO" && exec "$1" --write testdata/parser --timeout 3 -- sh -c 'printf pub >/src/testdata/parser/series.jsonl; head -c 1000 /dev/zero | tr "\0" a') >"$TMP/blkout.fifo" 2>"$TMP/bo.err" &
 	_bp=$!
 	_i=0
 	while kill -0 "$_bp" 2>/dev/null && [ "$_i" -lt 90 ]; do
@@ -5451,9 +5461,9 @@ a_stdout_blocked() { # a_stdout_blocked RUNNER
 	_cn=$(cname)
 	[ -z "$_cn" ] || OWNED="$OWNED $_cn"
 	cstate "${_cn:-boxset-dev-none}"
-	OBS="status $RS, still held by the sink after 90 s: $_held, container ${_cn:-none} $CST, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1), published sonarr $([ -e "$ISO/testdata/parser/sonarr.jsonl" ] && echo yes || echo no)"
+	OBS="status $RS, still held by the sink after 90 s: $_held, container ${_cn:-none} $CST, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1), published series $([ -e "$ISO/testdata/parser/series.jsonl" ] && echo yes || echo no)"
 	grep -Eq "$RUNNER_STARTED_RE" "$TMP/rerr" && reached
-	[ "$_held" = 0 ] && [ "$RS" = 125 ] && grep -Fq 'dev-run: output_write_failed' "$TMP/rerr" && [ "$CST" = absent ] && [ ! -e "$ISO/testdata/parser/sonarr.jsonl" ]
+	[ "$_held" = 0 ] && [ "$RS" = 125 ] && grep -Fq 'dev-run: output_write_failed' "$TMP/rerr" && [ "$CST" = absent ] && [ ! -e "$ISO/testdata/parser/series.jsonl" ]
 }
 holds "blocked stdout: a producer writing into a full unread stdout ends the run as output_write_failed within the bound, the owned container is absent and nothing is published" a_stdout_blocked "$RUNNER"
 rm -rf "$ISO/testdata"
@@ -5527,7 +5537,7 @@ PUBREN_HOLD='func (c *ctl) renameOne(src, dst string) error {
 		return err
 	}
 	'"$(gpr '"rename %s\n", dst')"'
-	if dst == "sonarr.jsonl" {
+	if dst == "series.jsonl" {
 		'"$(gobar 180)"'
 	}
 	return nil
@@ -5549,7 +5559,7 @@ PUBCHK2_NEW='_ = c.cancelled.Load()
 PUBPREP_OLD='		c.partP[n] = pid
 		if c.cancelled.Load() { // after the accounted backup of this name'
 PUBPREP_NEW='		c.partP[n] = pid
-		if n == "sonarr.jsonl" {
+		if n == "series.jsonl" {
 			'"$(gobar 180)"'
 		}
 		if c.cancelled.Load() { // after the accounted backup of this name'
@@ -5580,10 +5590,10 @@ a_pub_signal() { # a_pub_signal RUNNER (PUBM partial|backup|post)
 	_P=$ISO/testdata/parser
 	rm -rf "$_P"
 	mkdir -p "$_P"
-	printf 'prior sonarr\n' >"$_P/sonarr.jsonl"
-	printf 'prior radarr\n' >"$_P/radarr.jsonl"
-	_s0=$(ident_h "$_P/sonarr.jsonl")
-	_r0=$(ident_h "$_P/radarr.jsonl")
+	printf 'prior series\n' >"$_P/series.jsonl"
+	printf 'prior movie\n' >"$_P/movie.jsonl"
+	_s0=$(ident_h "$_P/series.jsonl")
+	_r0=$(ident_h "$_P/movie.jsonl")
 	_cs0=$(canary_state)
 	find "$BAR" -mindepth 1 -delete
 	true >"$PUBRCPT" || { OBS="the rename receipt could not be created"; SETUP=1; return 1; }
@@ -5595,9 +5605,9 @@ a_pub_signal() { # a_pub_signal RUNNER (PUBM partial|backup|post)
 	fi
 	_pm=ok
 	case $PUBM in
-	partial) [ "$(cat "$PUBRCPT")" = "rename sonarr.jsonl" ] || _pm="the first rename is not the only one that took effect" ;;
-	backup) { [ -z "$(cat "$PUBRCPT")" ] && [ -n "$(find "$_P" -maxdepth 1 -name '.sonarr.jsonl.*.prev')" ]; } || _pm="the first backup was not prepared with no rename yet" ;;
-	post) { [ "$(cat "$_P/sonarr.jsonl")" = newS ] && [ "$(cat "$_P/radarr.jsonl")" = newR ]; } || _pm="both renames did not complete before the commit barrier" ;;
+	partial) [ "$(cat "$PUBRCPT")" = "rename series.jsonl" ] || _pm="the first rename is not the only one that took effect" ;;
+	backup) { [ -z "$(cat "$PUBRCPT")" ] && [ -n "$(find "$_P" -maxdepth 1 -name '.series.jsonl.*.prev')" ]; } || _pm="the first backup was not prepared with no rename yet" ;;
+	post) { [ "$(cat "$_P/series.jsonl")" = newS ] && [ "$(cat "$_P/movie.jsonl")" = newR ]; } || _pm="both renames did not complete before the commit barrier" ;;
 	esac
 	if [ "$_pm" != ok ]; then
 		cc_setup "$_pm"
@@ -5614,19 +5624,19 @@ a_pub_signal() { # a_pub_signal RUNNER (PUBM partial|backup|post)
 	_nint=$(grep -c '^dev-run: interrupted$' "$TMP/rerr")
 	_dots=$(find "$_P" -name '.*' ! -name . | wc -l | tr -d ' ')
 	_rc=$(tr '\n' ' ' <"$PUBRCPT")
-	OBS="$PUBM: status $RS, interrupted lines $_nint, sonarr '$(cat "$_P/sonarr.jsonl" 2>/dev/null)' radarr '$(cat "$_P/radarr.jsonl" 2>/dev/null)', owned dot entries $_dots, renames '$_rc'"
+	OBS="$PUBM: status $RS, interrupted lines $_nint, series '$(cat "$_P/series.jsonl" 2>/dev/null)' movie '$(cat "$_P/movie.jsonl" 2>/dev/null)', owned dot entries $_dots, renames '$_rc'"
 	{ [ "$RS" = 125 ] && [ "$_nint" = 1 ] && [ "$_cs0" = "$(canary_state)" ] && ! grep -Fq 'PASS' "$TMP/rout"; } || return 1
 	case $PUBM in
 	partial)
-		[ "$(cat "$_P/sonarr.jsonl")" = "prior sonarr" ] && [ "$(ident_h "$_P/sonarr.jsonl")" = "$_s0" ] && [ "$(cat "$_P/radarr.jsonl")" = "prior radarr" ] &&
-			[ "$(ident_h "$_P/radarr.jsonl")" = "$_r0" ] && [ "$_dots" = 0 ] && [ "$_rc" = "rename sonarr.jsonl " ]
+		[ "$(cat "$_P/series.jsonl")" = "prior series" ] && [ "$(ident_h "$_P/series.jsonl")" = "$_s0" ] && [ "$(cat "$_P/movie.jsonl")" = "prior movie" ] &&
+			[ "$(ident_h "$_P/movie.jsonl")" = "$_r0" ] && [ "$_dots" = 0 ] && [ "$_rc" = "rename series.jsonl " ]
 		;;
 	backup)
-		[ "$(cat "$_P/sonarr.jsonl")" = "prior sonarr" ] && [ "$(ident_h "$_P/sonarr.jsonl")" = "$_s0" ] && [ "$(cat "$_P/radarr.jsonl")" = "prior radarr" ] &&
-			[ "$(ident_h "$_P/radarr.jsonl")" = "$_r0" ] && [ "$_dots" = 0 ] && [ -z "$_rc" ]
+		[ "$(cat "$_P/series.jsonl")" = "prior series" ] && [ "$(ident_h "$_P/series.jsonl")" = "$_s0" ] && [ "$(cat "$_P/movie.jsonl")" = "prior movie" ] &&
+			[ "$(ident_h "$_P/movie.jsonl")" = "$_r0" ] && [ "$_dots" = 0 ] && [ -z "$_rc" ]
 		;;
 	post)
-		[ "$(cat "$_P/sonarr.jsonl")" = newS ] && [ "$(cat "$_P/radarr.jsonl")" = newR ] && [ "$_dots" = 0 ] && [ "$_rc" = "rename sonarr.jsonl rename radarr.jsonl " ]
+		[ "$(cat "$_P/series.jsonl")" = newS ] && [ "$(cat "$_P/movie.jsonl")" = newR ] && [ "$_dots" = 0 ] && [ "$_rc" = "rename series.jsonl rename movie.jsonl " ]
 		;;
 	esac
 }
@@ -5877,21 +5887,21 @@ a_prev_collision() { # a_prev_collision RUNNER (SHAPE foreign|target-link)
 	_P=$ISO/testdata/parser
 	rm -rf "$_P"
 	mkdir -p "$_P"
-	printf 'prior sonarr\n' >"$_P/sonarr.jsonl"
-	_bk=$_P/.sonarr.jsonl.0123456789abcdef.prev
+	printf 'prior series\n' >"$_P/series.jsonl"
+	_bk=$_P/.series.jsonl.0123456789abcdef.prev
 	case $SHAPE in
 	foreign) printf 'collision bytes\n' >"$_bk" ;;
-	target-link) ln "$_P/sonarr.jsonl" "$_bk" ;;
+	target-link) ln "$_P/series.jsonl" "$_bk" ;;
 	esac
-	_s0=$(ident_h "$_P/sonarr.jsonl")
+	_s0=$(ident_h "$_P/series.jsonl")
 	_b0=$(ident_h "$_bk")
 	_bb=$(cat "$_bk" 2>/dev/null)
 	[ -n "$_b0" ] || { OBS="the pre-existing backup name could not be created"; SETUP=1; return 1; }
-	rrx "$ISO" "$1" --write testdata/parser -- sh -c 'printf newS >/src/testdata/parser/sonarr.jsonl'
-	OBS="$SHAPE: status $RS, backup '$(cat "$_bk" 2>/dev/null)' (inode $(ident_h "$_bk") was $_b0), sonarr '$(cat "$_P/sonarr.jsonl" 2>/dev/null)'"
+	rrx "$ISO" "$1" --write testdata/parser -- sh -c 'printf newS >/src/testdata/parser/series.jsonl'
+	OBS="$SHAPE: status $RS, backup '$(cat "$_bk" 2>/dev/null)' (inode $(ident_h "$_bk") was $_b0), series '$(cat "$_P/series.jsonl" 2>/dev/null)'"
 	{ [ "$RS" = 125 ] && grep -Fq 'write_publish_failed root=testdata/parser' "$TMP/rerr"; } && reached
 	[ "$RS" = 125 ] && grep -Fq 'write_publish_failed root=testdata/parser' "$TMP/rerr" && [ "$(cat "$_bk" 2>/dev/null)" = "$_bb" ] && [ "$(ident_h "$_bk")" = "$_b0" ] &&
-		[ "$(cat "$_P/sonarr.jsonl")" = "prior sonarr" ] && [ "$(ident_h "$_P/sonarr.jsonl")" = "$_s0" ] && [ -z "$(find "$_P" -name '.*.part')" ]
+		[ "$(cat "$_P/series.jsonl")" = "prior series" ] && [ "$(ident_h "$_P/series.jsonl")" = "$_s0" ] && [ -z "$(find "$_P" -name '.*.part')" ]
 }
 PREVLINK_OLD='if err := c.wroot.Link(n, bak); err != nil {
 				return c.failPub("write_publish_failed")
@@ -6916,14 +6926,14 @@ fi
 
 # next-consumer freshness: changed host fixture and Go source reach the next real consumer; locks match host bytes
 mkdir -p "$ISO/testdata/parser" "$ISO/internal/refreshprobe"
-printf 'fixture one\n' >"$ISO/testdata/parser/sonarr.jsonl"
+printf 'fixture one\n' >"$ISO/testdata/parser/series.jsonl"
 printf 'package refreshprobe\n\nconst Version = 1\n' >"$ISO/internal/refreshprobe/probe.go"
-CONSUME='sha256sum /src/testdata/parser/sonarr.jsonl /src/internal/refreshprobe/probe.go /src/go.mod /src/web/bun.lock'
-hostsums() { (cd "$ISO" && for f in testdata/parser/sonarr.jsonl internal/refreshprobe/probe.go go.mod web/bun.lock; do set -- $(sha256sum "$f"); printf '%s  /src/%s\n' "$1" "$f"; done); }
+CONSUME='sha256sum /src/testdata/parser/series.jsonl /src/internal/refreshprobe/probe.go /src/go.mod /src/web/bun.lock'
+hostsums() { (cd "$ISO" && for f in testdata/parser/series.jsonl internal/refreshprobe/probe.go go.mod web/bun.lock; do set -- $(sha256sum "$f"); printf '%s  /src/%s\n' "$1" "$f"; done); }
 rr -- sh -c "$CONSUME"
 first=$(cat "$TMP/rout")
 expect "first consumer reports the host fixture, Go source, go.mod and bun.lock hashes" "$RS:$first" "0:$(hostsums)"
-printf 'fixture two, changed on the host\n' >"$ISO/testdata/parser/sonarr.jsonl"
+printf 'fixture two, changed on the host\n' >"$ISO/testdata/parser/series.jsonl"
 printf 'package refreshprobe\n\nconst Version = 2\n' >"$ISO/internal/refreshprobe/probe.go"
 a_refresh() { # holds when the next consumer observes exactly the new bytes
 	rrx "$ISO" "$1" -- sh -c "$CONSUME"
@@ -6935,7 +6945,7 @@ fiso stale-context
 gvariant mut-refresh-skipped controller.go '"--progress", "plain", "."}' '"--progress", "plain", "'$TMP'/stale-context"}'
 rm -rf "$TMP/stale-context"
 mv "$FISO" "$TMP/stale-context"
-printf 'fixture one\n' >"$TMP/stale-context/testdata/parser/sonarr.jsonl" 2>/dev/null || true
+printf 'fixture one\n' >"$TMP/stale-context/testdata/parser/series.jsonl" 2>/dev/null || true
 printf 'package refreshprobe\n\nconst Version = 1\n' >"$TMP/stale-context/internal/refreshprobe/probe.go"
 redgreen "refresh-skipped mutant (stale build context)" a_refresh "$MUT/mut-refresh-skipped.sh" "$RUNNER"
 rm -rf "$TMP/stale-context" "$ISO/testdata" "$ISO/internal/refreshprobe"

@@ -173,11 +173,16 @@ if [ "$HAVE_WRITE" = 1 ]; then
 fi
 
 # --- reference text audit ----------------------------------------------------
+# The two reference checkouts are located only by the owner values BOXSET_REF_SERIES
+# and BOXSET_REF_MOVIE (absolute, link-free directory paths).
 audit_references() {
-	for _app in Sonarr Radarr; do
+	for _side in series movie; do
+		case $_side in series) _root=${BOXSET_REF_SERIES:-} ;; *) _root=${BOXSET_REF_MOVIE:-} ;; esac
+		case $_root in /?*) ;; *) die reference_input_invalid ;; esac
+		case $_root in *[,:\"]* | */) die reference_input_invalid ;; esac
 		for _rel in $REF_DIRS; do
-			_d=reference/$_app/$_rel
-			chain_ok "$_d" || die reference_input_invalid
+			_d=$_root/$_rel
+			(cd / && chain_ok "${_d#/}") || die reference_input_invalid
 			[ -z "$(find "$_d" ! -type f ! -type d -print -quit)" ] || die reference_input_invalid
 			[ -z "$(find "$_d" -type f \( ! -name '*.cs' -o -perm /111 \) -print -quit)" ] || die reference_input_invalid
 			[ -z "$(find "$_d" -type f ! -perm -o=r -print -quit)" ] || die reference_input_invalid

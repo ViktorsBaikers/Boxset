@@ -16,7 +16,9 @@
 // CLOCK_MONOTONIC reading and nothing else: no stdin, no environment, no file.
 // -run is the native lifecycle controller the bootstrap of scripts/dev-run.sh
 // execs (controller.go); it reuses the redaction engine below in process, with
-// one immutable secret selection for every stream.
+// one immutable secret selection for every stream. -ref-archive is the private
+// reference-source producer of the same runner (ref_archive.go): Git objects at
+// one pinned commit as a bounded archive on standard output.
 //
 // Selection: every non-empty value of an environment variable whose
 // ASCII-uppercased name contains SECRET, TOKEN, PASSWORD, PASSWD, CREDENTIAL,
@@ -73,6 +75,9 @@ var markerNames = []string{"SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL"
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "-run" {
 		os.Exit(runController(os.Args, os.Environ()))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "-ref-archive" {
+		os.Exit(runRefArchive(os.Args[2:], os.Stdout))
 	}
 	os.Exit(run(os.Args[1:], os.Environ(), os.Stdin, os.Stdout))
 }
@@ -212,7 +217,6 @@ func redactStream(ac *automaton, o streamOpts, stdin io.Reader, stdout io.Writer
 			chunk := buf[:n]
 			if *capN >= 0 && rawCount+int64(n) > *capN {
 				chunk = chunk[:*capN-rawCount]
-				rawCount += int64(len(chunk))
 				f.feed(chunk)
 				s.flush()
 				if s.err != nil {

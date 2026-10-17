@@ -1,6 +1,6 @@
 #!/bin/sh
 # Canonical Boxset dev runner (host, repository root only):
-#   scripts/dev-run.sh [--write docs/spikes/issue-drafts] [--capture DIR] [--timeout SECONDS] -- COMMAND [ARG...]
+#   scripts/dev-run.sh [--ref] [--write docs/spikes/issue-drafts|testdata/parser] [--capture DIR] [--timeout SECONDS] -- COMMAND [ARG...]
 #
 # Rebuilds the `work` image from the current allowlisted inputs (frozen locks,
 # never a lock regeneration) and runs COMMAND with its exact argv in one fresh,
@@ -16,18 +16,43 @@
 # Exit status: the child's (Docker's checked terminal state), 124 on the
 # deadline, or 125 with a fixed reason word on stderr.
 #
-# --write docs/spikes/issue-drafts publishes the fixed draft names the child
-# left under /src/docs/spikes/issue-drafts (s5-admission.md, s5-tools.md): only
-# after the container stopped, each exported as one tar stream that must hold
-# exactly one regular file of at most 64 KiB, streamed straight through the
-# redactor (never spooled raw) and capped at 64 KiB, and only after the owned
-# container was removed; a draft is published even when the child exits nonzero.
-# The archive's member names are checked in a pipe and only fixed result tokens
-# are kept; copy diagnostics pass through the capped redactor before they are kept.
-# A later rename failure may leave earlier names published. There is no rollback
-# and no durability claim. --ref and --bench belong to later work and fail with
-# <flag>_unavailable. Bootstrap before the redactor exists prints only a fixed
-# reason word; recovery: docs/spikes/s5-version-admission.md.
+# --write publishes the fixed names the child left under /src/<root>, one root per
+# run: docs/spikes/issue-drafts (s5-admission.md, s5-tools.md; at most 64 KiB each)
+# or testdata/parser (series.jsonl, movie.jsonl; at most 32 MiB each, the corpus
+# reader cap). Only after the container stopped, each name is exported as one tar
+# stream that must hold exactly one regular file within its cap, streamed straight
+# through the redactor (never spooled raw) and capped, and published by a private
+# part plus `mv` only after the owned container was removed. A draft is published
+# even when the child exits nonzero; corpus files are published only when the child
+# exited 0 and every name was exported (a missing, oversize, linked or non-regular
+# name publishes nothing). The archive's member names are checked in a pipe and only
+# fixed result tokens are kept; copy diagnostics pass through the capped redactor
+# before they are kept. A later rename failure may leave earlier names published.
+# There is no rollback and no durability claim.
+#
+# --ref delivers reference parser C# text, only as Git objects. The two reference repositories are
+# located only by the host values BOXSET_REF_SERIES and BOXSET_REF_MOVIE (series first): each must
+# be an absolute path to an existing directory free of control characters (unset or empty is
+# ref_unavailable, anything else wrong is ref_invalid). The runner's REFPINS table pins each side to
+# one commit and REFAREAS maps the three upstream directories of that commit to the neutral container
+# areas /ref/<side>/{tests,parser,qualities}; no checkout directory is ever walked, copied or
+# mounted, and the checkout's HEAD, index and working tree are never read. Before any Docker call
+# each pin is checked by a bounded, environment-cleared Git (else ref_commit_invalid). After the
+# container is created and before it starts, one archive per side is piped from the private
+# producer mode of the host redactor into `docker cp -` (producer and receiver statuses are kept
+# apart): a listing that breaks a source rule is ref_invalid, any other failure ref_copy_failed, and
+# /ref/<side> of the unstarted container is read back through the producer's own 18 MiB archive
+# cap (only files and directories under the three areas, owner 0/0, modes 0444/0555). A --ref
+# failure prints only
+# `dev-run: <reason> side=<side>`: never a root value or Git text. Roots never enter the image, a
+# log, a mount or the child; the child gets only the two checked pins as BOXSET_REF_SERIES_COMMIT
+# and BOXSET_REF_MOVIE_COMMIT, and the created container has no mount (else mounts_invalid). The
+# reference is text for extraction only: it is never executed. A corpus export (--write
+# testdata/parser) is published only when the raw file of the stopped container hashes as the
+# sanitized staged bytes (else export_changed). --bench belongs to later work and fails with
+# bench_unavailable.
+# Bootstrap before the redactor exists prints only a fixed reason word; recovery:
+# docs/spikes/s5-version-admission.md.
 #
 # --capture DIR (DIR = .devrites/work/<slug>/screenshots-YYYYMMDDTHHMMSSZ, which must
 # not exist; it is validated before Docker and never reused or deleted) adds only the
@@ -54,6 +79,8 @@ umask 022
 CAP=65536
 DRAFTS='s5-admission.md s5-tools.md'
 WRITE_CHAIN='docs docs/spikes docs/spikes/issue-drafts'
+WCAP=65536
+STREAMCAP=262144
 TIMEOUT=600
 WRITE=
 HAVE_WRITE=0
@@ -65,6 +92,7 @@ R=
 CAPTURE=
 HAVE_CAPTURE=0
 HAVE_BENCH=0
+HAVE_REF=0
 CAPNAMES='dev-desktop dev-mobile preview-desktop preview-mobile'
 CAPMAX=2097152
 CAPSTREAM=2162688
@@ -78,7 +106,7 @@ die() {
 }
 
 usage() {
-	printf '%s\n' 'usage: scripts/dev-run.sh [--write docs/spikes/issue-drafts] [--capture DIR] [--timeout SECONDS] -- COMMAND [ARG...]' >&2
+	printf '%s\n' 'usage: scripts/dev-run.sh [--ref] [--write docs/spikes/issue-drafts|testdata/parser] [--capture DIR] [--timeout SECONDS] -- COMMAND [ARG...]' >&2
 	die usage
 }
 
@@ -105,7 +133,10 @@ trap 'printf "dev-run: interrupted\n" >&2; exit 125' HUP INT TERM
 while [ $# -gt 0 ]; do
 	case $1 in
 	--) break ;;
-	--ref) die ref_unavailable ;;
+	--ref)
+		[ "$HAVE_REF" = 0 ] || usage
+		HAVE_REF=1
+		;;
 	--capture)
 		{ [ $# -ge 2 ] && [ "$HAVE_CAPTURE" = 0 ]; } || die capture_flag_invalid
 		HAVE_CAPTURE=1
@@ -146,7 +177,16 @@ case $TIMEOUT in
 esac
 { [ "${#TIMEOUT}" -le 3 ] && [ "$TIMEOUT" -le 600 ]; } || die timeout_invalid
 if [ "$HAVE_WRITE" = 1 ]; then
-	[ "$WRITE" = docs/spikes/issue-drafts ] || die write_path_invalid
+	case $WRITE in
+	docs/spikes/issue-drafts) ;;
+	testdata/parser)
+		DRAFTS='series.jsonl movie.jsonl'
+		WRITE_CHAIN='testdata testdata/parser'
+		WCAP=33554432
+		STREAMCAP=33751040
+		;;
+	*) die write_path_invalid ;;
+	esac
 fi
 
 { [ -f deploy/dev/Dockerfile ] && [ -f scripts/dev-run.sh ] && [ -f .dockerignore ]; } || die not_repo_root
@@ -186,6 +226,63 @@ write_chain_ok() {
 	done
 }
 [ "$HAVE_WRITE" = 0 ] || write_chain_ok || die write_root_invalid
+
+# --ref: reference text is read only as Git objects of the two reference repositories at their
+# pinned commits, never from a checkout directory. REFPINS is the side table and REFAREAS the one
+# reversible map between the neutral container areas and the upstream directories.
+REFPINS='series:57816c149d02f95543973fefb4780c4495f8121c movie:df2faa64c75e6081556d11232dc46523e7264ea1'
+REFAREAS='tests:src/NzbDrone.Core.Test/ParserTests parser:src/NzbDrone.Core/Parser qualities:src/NzbDrone.Core/Qualities'
+# REFCAP is the producer's archive cap (refMaxStream in deploy/dev/redact/ref_archive.go, 18 MiB: the
+# side plus its tar framing); the readback admits the same envelope and no more.
+REFCAP=18874368
+
+# ref_root SIDE ROOT: the owner value locates the repository only: set (else ref_unavailable), an
+# absolute path to an existing directory free of control characters (else ref_invalid).
+ref_root() {
+	[ -n "$2" ] || die "ref_unavailable side=$1"
+	case $2 in /*) ;; *) die "ref_invalid side=$1" ;; esac
+	[ -d "$2" ] || die "ref_invalid side=$1"
+	[ "$(printf '%s' "$2" | tr -d '\000-\037\177' | wc -c)" = "$(printf '%s' "$2" | wc -c)" ] || die "ref_invalid side=$1"
+}
+# ref_pinof SIDE: sets _pin to the side's pinned commit.
+ref_pinof() {
+	for _e in $REFPINS; do
+		if [ "${_e%%:*}" = "$1" ]; then
+			_pin=${_e#*:}
+			return 0
+		fi
+	done
+	die "ref_commit_invalid side=$1"
+}
+# ref_pin SIDE ROOT PIN: the pinned object must be a commit of that repository, checked by a bounded
+# Git with a cleared environment whose repository discovery stops at the root's parent, no replace
+# refs, no lazy fetch and no system configuration; stderr is discarded, the status checked and the
+# answer must equal the pin. The checkout's HEAD, index and working tree are never read.
+ref_pin() {
+	_par=${2%/*}
+	[ -n "$_par" ] || _par=/
+	_hc=$(timeout 30 env -i PATH="${PATH:-}" LC_ALL=C GIT_CEILING_DIRECTORIES="$_par" GIT_NO_REPLACE_OBJECTS=1 GIT_NO_LAZY_FETCH=1 GIT_CONFIG_NOSYSTEM=1 git -C "$2" rev-parse --verify --quiet "$3^{commit}" 2>/dev/null </dev/null) || die "ref_commit_invalid side=$1"
+	[ "$_hc" = "$3" ] || die "ref_commit_invalid side=$1"
+}
+SERIESROOT=
+MOVIEROOT=
+SERIESCOMMIT=
+MOVIECOMMIT=
+if [ "$HAVE_REF" = 1 ]; then
+	for _t in tr wc timeout env; do
+		command -v "$_t" >/dev/null 2>&1 || die host_tool_missing
+	done
+	SERIESROOT=${BOXSET_REF_SERIES:-}
+	MOVIEROOT=${BOXSET_REF_MOVIE:-}
+	ref_root series "$SERIESROOT"
+	ref_root movie "$MOVIEROOT"
+	ref_pinof series
+	SERIESCOMMIT=$_pin
+	ref_pinof movie
+	MOVIECOMMIT=$_pin
+	ref_pin series "$SERIESROOT" "$SERIESCOMMIT"
+	ref_pin movie "$MOVIEROOT" "$MOVIECOMMIT"
+fi
 
 for _t in docker mktemp timeout od tr rm mv mkdir cat find sha256sum chmod grep head tar env sed wc; do
 	command -v "$_t" >/dev/null 2>&1 || die host_tool_missing
@@ -276,14 +373,27 @@ PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 DO_NOT_TRACK=1
 EOF
-# Capture adds only its two synthetic variables.
+# Capture adds only its two synthetic variables; --ref only the two checked pins.
 if [ "$HAVE_CAPTURE" = 1 ]; then
 	printf 'BOXSET_CAPTURE_DIR=/capture\nBOXSET_CAPTURE_CHALLENGE=%s\n' "$CHAL" >>"$T/lit" || die create_failed
 fi
-timeout 60 docker create --name "$CTR" --label "boxset.dev-run=$RUNID" --network none \
-	--cap-drop ALL --security-opt no-new-privileges --log-driver=none --user 1000:1000 --workdir /src \
-	--env-file "$T/lit" "$IMG" "$@" >/dev/null 2>&1 || die create_failed
+if [ "$HAVE_REF" = 1 ]; then
+	printf 'BOXSET_REF_SERIES_COMMIT=%s\nBOXSET_REF_MOVIE_COMMIT=%s\n' "$SERIESCOMMIT" "$MOVIECOMMIT" >>"$T/lit" || die create_failed
+fi
+# create_ctr CHILD_ARGV...: docker create of the owned container, never with a mount; the image is
+# followed by the byte-exact child argv.
+create_ctr() {
+	timeout 60 docker create --name "$CTR" --label "boxset.dev-run=$RUNID" --network none \
+		--cap-drop ALL --security-opt no-new-privileges --log-driver=none --user 1000:1000 --workdir /src \
+		--env-file "$T/lit" "$IMG" "$@" >/dev/null 2>&1
+}
+create_ctr "$@" || die create_failed
 [ "$(timeout 30 docker inspect --format '{{.HostConfig.LogConfig.Type}}' "$CTR" 2>/dev/null)" = none ] || die log_driver_invalid
+# Effective mounts: none, whatever the flags (the reference text is delivered by copy, never mounted).
+timeout 30 docker inspect --format '{{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}} {{.RW}}{{println}}{{end}}' "$CTR" 2>/dev/null |
+	LC_ALL=C sort >"$T/mnt" || die mounts_invalid
+sed -i -e '/^$/d' "$T/mnt" || die mounts_invalid
+[ ! -s "$T/mnt" ] || die mounts_invalid
 # Effective environment: every created-container line is a literal above or the
 # image's own, and every literal survived unchanged (nothing injected, nothing replaced).
 timeout 30 docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CTR" >"$T/eff" 2>/dev/null || die env_invalid
@@ -295,11 +405,70 @@ done <"$T/eff"
 while IFS= read -r _l; do
 	grep -Fxq -- "$_l" "$T/eff" || die env_invalid
 done <"$T/lit"
+# --ref delivery, before the container is ever started: one archive per side from the private
+# producer mode of the host redactor (the single producer call site), piped into `docker cp -`
+# beside it. The producer's status goes to its own file, apart from the receiver's.
+ref_deliver() {
+	_dside=$1
+	set -- "$2" "$3" $REFAREAS
+	rm -f -- "$T/ps" "$T/rc"
+	{ { timeout 120 "$R" -ref-archive "$@" 2>/dev/null </dev/null; printf '%s' "$?" >"$T/ps"; } |
+		{ timeout 120 docker cp - "$CTR:/ref/$_dside" >/dev/null 2>&1; printf '%s' "$?" >"$T/rc"; }; }
+	_ps=$(cat "$T/ps" 2>/dev/null)
+	case $_ps in '' | *[!0-9]*) die "ref_copy_failed side=$_dside" ;; esac
+	[ "$_ps" != 3 ] || die "ref_invalid side=$_dside"
+	[ "$_ps" = 0 ] || die "ref_copy_failed side=$_dside"
+	[ "$(cat "$T/rc" 2>/dev/null)" = 0 ] || die "ref_copy_failed side=$_dside"
+}
+# ref_readback SIDE: /ref/<side> of the same not-yet-started container is read back through a cap and
+# may hold only relative regular files and directories under the three areas (at least one file in
+# each), owner 0/0, modes 0444 and 0555; diagnostics are discarded.
+ref_readback() {
+	_dside=$1
+	rm -f -- "$T/rp" "$T/rt" "$T/rl"
+	{ { timeout 60 docker cp "$CTR:/ref/$_dside" - 2>/dev/null </dev/null; printf '%s' "$?" >"$T/rp"; } |
+		head -c "$((REFCAP + 1))" |
+		{ tar -t -v --numeric-owner -f - 2>/dev/null; printf '%s' "$?" >"$T/rt"; } >"$T/rl"; }
+	{ [ "$(cat "$T/rp" 2>/dev/null)" = 0 ] && [ "$(cat "$T/rt" 2>/dev/null)" = 0 ]; } || die "ref_copy_failed side=$_dside"
+	_nt=0
+	_np=0
+	_nq=0
+	while read -r _p _o _z _d _t _n; do
+		[ "$_o" = 0/0 ] || die "ref_copy_failed side=$_dside"
+		case $_p in
+		d*)
+			case $_n in
+			"$_dside/") ;;
+			"$_dside/tests/"* | "$_dside/parser/"* | "$_dside/qualities/"*)
+				{ [ "$_p" = dr-xr-xr-x ] && case $_n in */) true ;; *) false ;; esac; } || die "ref_copy_failed side=$_dside"
+				;;
+			*) die "ref_copy_failed side=$_dside" ;;
+			esac
+			;;
+		-r--r--r--)
+			case $_n in
+			"$_dside/tests/"*.cs) _nt=$((_nt + 1)) ;;
+			"$_dside/parser/"*.cs) _np=$((_np + 1)) ;;
+			"$_dside/qualities/"*.cs) _nq=$((_nq + 1)) ;;
+			*) die "ref_copy_failed side=$_dside" ;;
+			esac
+			;;
+		*) die "ref_copy_failed side=$_dside" ;;
+		esac
+	done <"$T/rl"
+	{ [ "$_nt" -ge 1 ] && [ "$_np" -ge 1 ] && [ "$_nq" -ge 1 ]; } || die "ref_copy_failed side=$_dside"
+}
+if [ "$HAVE_REF" = 1 ]; then
+	ref_deliver series "$SERIESROOT" "$SERIESCOMMIT"
+	ref_readback series
+	ref_deliver movie "$MOVIEROOT" "$MOVIECOMMIT"
+	ref_readback movie
+fi
 timeout 60 docker cp "$CTR:/usr/local/share/boxset/inputs.sha256" "$T/inputs" >/dev/null 2>&1 || die inputs_unavailable
 { [ -f "$T/inputs" ] && [ ! -L "$T/inputs" ]; } || die inputs_unavailable
 INPUTS=$(sha256sum <"$T/inputs") || die inputs_unavailable
 INPUTS=${INPUTS%% *}
-printf 'dev-run: image=%s inputs=%s timeout=%ss container=%s log=none\n' "$IMG" "$INPUTS" "$TIMEOUT" "$CTR" >&2
+printf 'dev-run: image=%s inputs=%s timeout=%ss container=%s log=none%s\n' "$IMG" "$INPUTS" "$TIMEOUT" "$CTR" "$([ "$HAVE_REF" = 0 ] || printf ' ref=objects')" >&2
 
 # --- run -------------------------------------------------------------------------
 # Output comes only from the attached stream. The left side of the pipeline
@@ -354,7 +523,6 @@ case $CHILD in '' | *[!0-9]*) die status_unknown ;; esac
 # tar's verbose listing (its stdout; the callback's output never reaches it) is read through a
 # pipe of at most 4096 bytes by list_one, which stores only the fixed token one|bad, never a name:
 # anything tar lists beyond that one entry (links, directories, devices, more files) fails the check.
-STREAMCAP=262144
 EXPORT_CMD='case $TAR_FILETYPE:$TAR_REALNAME in "f:$DR_NAME") ;; *) echo type >"$DR_WHY"; exit 1 ;; esac
 case $TAR_SIZE in "" | *[!0-9]*) echo type >"$DR_WHY"; exit 1 ;; esac
 [ "$TAR_SIZE" -le "$DR_CAP" ] || { echo size >"$DR_WHY"; exit 1; }
@@ -378,10 +546,26 @@ cp_out() {
 		printf '%s' "$?" >"$T/ds"
 	} 3>&1
 }
+# export_same NAME: a corpus is published only when the stopped container's raw file hashes exactly
+# as the sanitized staged bytes: raw bytes only travel through pipes into sha256sum, and a corpus the
+# redactor would change is export_changed with nothing published (the container is still unremoved).
+export_same() {
+	rm -f -- "$T/sp" "$T/hs" "$T/cs" "$T/ds" "$T/mis" "$T/cperr" "$T/ts" "$T/rh"
+	cp_out "/src/$WRITE/$1" | head -c "$STREAMCAP" |
+		{ tar -x -O -f - 2>/dev/null; printf '%s' "$?" >"$T/ts"; } | head -c "$((WCAP + 1))" | sha256sum >"$T/rh"
+	for _f in sp ds hs cs ts; do
+		[ "$(cat "$T/$_f" 2>/dev/null)" = 0 ] || die export_failed
+	done
+	_rh=$(cat "$T/rh" 2>/dev/null)
+	_rh=${_rh%% *}
+	case $_rh in '' | *[!0-9a-f]*) die export_failed ;; esac
+	_sh=$(sha256sum <"$T/p/$1") || die export_failed
+	[ "$_rh" = "${_sh%% *}" ] || die export_changed
+}
 export_one() {
 	rm -f -- "$T/ts" "$T/rs" "$T/why" "$T/seen" "$T/lst" "$T/p/$1"
 	cp_out "/src/$WRITE/$1" | head -c "$STREAMCAP" |
-		{ env DR_NAME="$1" DR_CAP="$CAP" DR_R="$R" DR_WHY="$T/why" DR_SEEN="$T/seen" DR_RS="$T/rs" DR_OUT="$T/p/$1" \
+		{ env DR_NAME="$1" DR_CAP="$WCAP" DR_R="$R" DR_WHY="$T/why" DR_SEEN="$T/seen" DR_RS="$T/rs" DR_OUT="$T/p/$1" \
 			tar -C "$T/x" -x -f - -v --to-command="$EXPORT_CMD" 2>/dev/null; printf '%s' "$?" >"$T/ts"; } |
 		head -c 4096 | list_one "$1"
 	case $(cat "$T/why" 2>/dev/null) in
@@ -394,7 +578,7 @@ export_one() {
 	[ "$(cat "$T/ds" 2>/dev/null)" = 0 ] && [ "$(cat "$T/hs" 2>/dev/null)" = 0 ] && [ "$(cat "$T/cs" 2>/dev/null)" = 0 ] || die export_failed
 	if [ "$_sp" != 0 ]; then
 		# A draft the child never wrote is not an error; every other failure is.
-		if [ "$(cat "$T/mis" 2>/dev/null)" = M ] && [ ! -e "$T/seen" ]; then
+		if [ "$WRITE" = docs/spikes/issue-drafts ] && [ "$(cat "$T/mis" 2>/dev/null)" = M ] && [ ! -e "$T/seen" ]; then
 			rm -f -- "$T/p/$1"
 			return 0
 		fi
@@ -409,10 +593,11 @@ export_one() {
 	[ "$(cat "$T/lst" 2>/dev/null)" = one ] || die export_invalid
 	[ "$(cat "$T/ts" 2>/dev/null)" = 0 ] || die export_failed
 }
-if [ "$HAVE_WRITE" = 1 ]; then
+if [ "$HAVE_WRITE" = 1 ] && { [ "$WRITE" = docs/spikes/issue-drafts ] || [ "$CHILD" = 0 ]; }; then
 	mkdir -m 0700 -- "$T/x" "$T/p" || die export_failed
 	for _n in $DRAFTS; do
 		export_one "$_n"
+		[ "$WRITE" != testdata/parser ] || export_same "$_n"
 	done
 fi
 

@@ -59,12 +59,28 @@ const (
 
 var captureNames = []string{"dev-desktop", "dev-mobile", "preview-desktop", "preview-mobile"}
 
-var refDirs = []string{
-	"src/NzbDrone.Core.Test/ParserTests",
-	"src/NzbDrone.Core.Test/Languages",
-	"src/NzbDrone.Core/Parser",
-	"src/NzbDrone.Core/Qualities",
-	"src/NzbDrone.Core/Languages",
+// refAreas is the one map between the neutral container areas under /ref/<side>
+// and the upstream directories of a reference checkout.
+var refAreas = []struct{ area, dir string }{
+	{"tests", "src/NzbDrone.Core.Test/ParserTests"},
+	{"test-languages", "src/NzbDrone.Core.Test/Languages"},
+	{"parser", "src/NzbDrone.Core/Parser"},
+	{"qualities", "src/NzbDrone.Core/Qualities"},
+	{"languages", "src/NzbDrone.Core/Languages"},
+}
+
+// refSides names each side and the owner environment value that locates its
+// reference checkout; no checkout location is written into a tracked file.
+var refSides = [2]struct{ name, env string }{{"series", "BOXSET_REF_SERIES"}, {"movie", "BOXSET_REF_MOVIE"}}
+
+// envValue is the value of name in environ, or "".
+func envValue(environ []string, name string) string {
+	for _, kv := range environ {
+		if v, ok := strings.CutPrefix(kv, name+"="); ok {
+			return v
+		}
+	}
+	return ""
 }
 
 // In-container scripts, byte for byte as the host runner has always passed them.
@@ -175,13 +191,19 @@ func rootID(r *os.Root) (fileID, bool) {
 	if err != nil {
 		return fileID{}, false
 	}
-	defer f.Close()
+	defer closeQuiet(f)
 	fi, err := f.Stat()
 	if err != nil {
 		return fileID{}, false
 	}
 	return idOf(fi)
 }
+
+// closeQuiet closes a handle the controller never wrote through: a read end, a
+// child-side pipe end, a read-only open or one that never started its writer.
+// Its close error cannot change a result. A written handle's close error is
+// instead part of the existing failure of its writer.
+func closeQuiet(c io.Closer) { _ = c.Close() }
 
 // clockGettime is the one CLOCK_MONOTONIC reader (clock id 1), through stdlib
 // syscall/unsafe: no runtime linkname, wall-time fallback or epoch conversion.
@@ -202,10 +224,10 @@ type ctl struct {
 	write, capture    string
 	argv              []string
 
-	env    []string
-	ac     *automaton
-	out    *outWriter
-	diag   *diagSink
+	env  []string
+	ac   *automaton
+	out  *outWriter
+	diag *diagSink
 
 	devnull *os.File
 
@@ -232,7 +254,6 @@ type ctl struct {
 
 	staged   []string
 	sizes    map[string]int64
-	mapFree  string
 	wInodes  map[string]uint64
 	cInodes  map[string]uint64
 	partP    map[string]fileID
@@ -338,7 +359,7 @@ func hexN(s string, n int) bool {
 		return false
 	}
 	for i := range len(s) {
-		if c := s[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			return false
 		}
 	}
@@ -368,7 +389,7 @@ func parseCapture(dir string) (slug, leaf string, ok bool) {
 		return "", "", false
 	}
 	for i := range len(slug) {
-		if c := slug[i]; !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' && i > 0) {
+		if c := slug[i]; (c < 'a' || c > 'z') && (c < '0' || c > '9') && (c != '-' || i <= 0) {
 			return "", "", false
 		}
 	}
@@ -461,7 +482,7 @@ func (c *ctl) bind(args, environ []string, stdout io.Writer) error {
 	switch args[7] {
 	case "-":
 	case "testdata/parser":
-		c.write, c.mapNames = args[7], []string{"sonarr.jsonl", "radarr.jsonl"}
+		c.write, c.mapNames = args[7], []string{"series.jsonl", "movie.jsonl"}
 	case "docs/spikes/issue-drafts":
 		c.write, c.mapNames = args[7], []string{"s5-admission.md", "s5-tools.md"}
 	default:
@@ -763,11 +784,11 @@ func (c *ctl) start(s *callSpec) (*proc, error) {
 	var childEnds []*os.File
 	closeAll := func() {
 		for _, f := range childEnds {
-			f.Close()
+			closeQuiet(f)
 		}
 		for _, r := range p.readers {
 			if r != nil {
-				r.Close()
+				closeQuiet(r)
 			}
 		}
 	}
@@ -808,7 +829,7 @@ func (c *ctl) start(s *callSpec) (*proc, error) {
 		c.issued = append(c.issued, s.issue)
 	}
 	for _, f := range childEnds {
-		f.Close()
+		closeQuiet(f)
 	}
 	p.pgid = cmd.Process.Pid
 	p.deadline = time.Now().Add(s.bound)
@@ -836,7 +857,7 @@ func (c *ctl) start(s *callSpec) (*proc, error) {
 func (p *proc) abandon() {
 	for _, r := range p.readers {
 		if r != nil {
-			r.Close()
+			closeQuiet(r)
 		}
 	}
 }
@@ -882,7 +903,7 @@ func (p *proc) wait() callResult {
 			} else {
 				res.err, res.errOK = w.v, true
 			}
-			p.readers[w.idx].Close()
+			closeQuiet(p.readers[w.idx])
 			if st, _ := w.v.(int); s.removeOnOut != "" && w.idx == 0 && st != 0 && rm == nil {
 				if rm = c.startRm(s.removeOnOut); rm != nil {
 					rmCh, rmTimer = rm.waitCh, time.NewTimer(time.Until(rm.deadline))
@@ -1333,7 +1354,7 @@ func (c *ctl) claimCapture() bool {
 	f, err := os.Open("/dev/urandom")
 	if err == nil {
 		_, err = io.ReadFull(f, b[:])
-		f.Close()
+		closeQuiet(f)
 	}
 	if err != nil {
 		c.die("capture_host_tool_missing", statusFail)
@@ -1362,7 +1383,7 @@ func (c *ctl) buildImage() bool {
 		return c.stepDie("image_build_failed")
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 4096))
-	f.Close()
+	closeQuiet(f)
 	img := strings.TrimRight(string(data), "\n")
 	if err != nil || len(img) != 71 || !strings.HasPrefix(img, "sha256:") {
 		return c.stepDie("image_build_failed")
@@ -1393,9 +1414,13 @@ func (c *ctl) startContainer() bool {
 		args = append(args, "--tmpfs", "/src/"+c.write+writeTmpfsOpts)
 	}
 	if c.ref {
-		for _, pair := range [][2]string{{"Sonarr", "sonarr"}, {"Radarr", "radarr"}} {
-			for _, rel := range refDirs {
-				args = append(args, "--mount", "type=bind,source="+c.repo+"/reference/"+pair[0]+"/"+rel+",target=/ref/"+pair[1]+"/"+rel+",readonly")
+		for _, side := range refSides {
+			root := envValue(c.env, side.env)
+			if !cleanAbs(root) || strings.ContainsAny(root, ",:\"") {
+				return c.stepDie("container_start_failed")
+			}
+			for _, a := range refAreas {
+				args = append(args, "--mount", "type=bind,source="+root+"/"+a.dir+",target=/ref/"+side.name+"/"+a.area+",readonly")
 			}
 		}
 	}
@@ -1466,7 +1491,7 @@ func procOK(text, id string) bool {
 		}
 	}
 	g, ok := statusField(text, "Groups")
-	if !ok || !(len(g) == 0 || (len(g) == 1 && g[0] == id)) {
+	if !ok || (len(g) != 0 && (len(g) != 1 || g[0] != id)) {
 		return false
 	}
 	for _, k := range []string{"CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"} {
@@ -1650,7 +1675,7 @@ func inputLineOK(l []byte) bool {
 		return false
 	}
 	for _, ch := range l[:64] {
-		if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
 			return false
 		}
 	}
@@ -1709,7 +1734,6 @@ func (c *ctl) runChild() (cs, rs int, tmo, ok bool) {
 		c.stepDie("child_status_unknown")
 		return 0, 0, false, false
 	}
-	defer tmoFile.Close()
 	r := c.do(&callSpec{
 		kind: kOther,
 		argv: argv,
@@ -1720,6 +1744,15 @@ func (c *ctl) runChild() (cs, rs int, tmo, ok bool) {
 		bound:       time.Duration(c.timeout+5) * time.Second,
 		removeOnOut: c.ctr, // output-error removal, owned by the controller alone
 	})
+	// tmoFile is a written handle (the child's stderr): a close error leaves its
+	// deadline note unknown, so the child status is unknown too.
+	if err := tmoFile.Close(); err != nil {
+		if !c.cancelled.Load() {
+			c.closure()
+			c.die("child_status_unknown", statusFail)
+		}
+		return 0, 0, false, false
+	}
 	if r.startErr != nil {
 		if !errors.Is(r.startErr, errCancelled) {
 			c.closure()
@@ -1892,18 +1925,25 @@ func (c *ctl) exportPart(name string, size int64) bool {
 		kind: kOther,
 		argv: c.exportArgv(name),
 		stdout: func(in io.Reader) any {
-			defer f.Close()
 			lim := io.LimitReader(in, capMap+1)
 			if drafts {
-				return redactStream(c.ac, streamOpts{capN: capDraft, raw: size, tail: -1}, lim, f)
+				st := redactStream(c.ac, streamOpts{capN: capDraft, raw: size, tail: -1}, lim, f)
+				// f is a written handle: its close error is a failed export.
+				if err := f.Close(); err != nil && st == exitOK {
+					st = exitWrite
+				}
+				return st
 			}
 			n, err := io.Copy(f, lim)
+			if cerr := f.Close(); err == nil {
+				err = cerr
+			}
 			return copyRes{n, err}
 		},
 		bound: supBound(30),
 	})
 	if r.startErr != nil {
-		f.Close()
+		closeQuiet(f) // never written: the exporter did not start
 		return false
 	}
 	if r.status != 0 || !r.outOK {
@@ -2212,7 +2252,7 @@ func (c *ctl) capEntries() ([]string, bool) {
 	if err != nil {
 		return nil, false
 	}
-	defer f.Close()
+	defer closeQuiet(f)
 	names, err := f.Readdirnames(-1)
 	return names, err == nil
 }
@@ -2263,7 +2303,7 @@ func (c *ctl) writeManifest(content string) error {
 		return err
 	}
 	if _, err := io.WriteString(f, content); err != nil {
-		f.Close()
+		_ = f.Close() // the write error already fails the call
 		return err
 	}
 	return f.Close()
@@ -2297,14 +2337,17 @@ func (c *ctl) captureStage() string {
 			kind: kOther,
 			argv: c.capCatArgv(left, name),
 			stdout: func(in io.Reader) any {
-				defer rf.Close()
 				n, err := io.Copy(rf, io.LimitReader(in, capPNG+1))
+				// rf is a written handle: its close error is a failed copy.
+				if cerr := rf.Close(); err == nil {
+					err = cerr
+				}
 				return copyRes{n, err}
 			},
 			bound: supBound(left),
 		})
 		if xr.startErr != nil {
-			rf.Close()
+			closeQuiet(rf) // never written: the exporter did not start
 			if errors.Is(xr.startErr, errCancelled) {
 				return reasonCancelled
 			}
@@ -2329,7 +2372,7 @@ func (c *ctl) captureStage() string {
 		}
 		pf, err := c.croot.OpenFile(part, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 		if err != nil {
-			in.Close()
+			closeQuiet(in)
 			return "capture_copy_failed"
 		}
 		vr := c.do(&callSpec{
@@ -2337,9 +2380,12 @@ func (c *ctl) captureStage() string {
 			argv:  c.validatorArgv(left, vname, name),
 			stdin: in,
 			stdout: func(src io.Reader) any {
-				defer pf.Close()
 				pw := &pngWriter{w: pf, h: sha256.New()}
 				_, err := io.Copy(pw, io.LimitReader(src, capPNG+1))
+				// pf is a written handle: its close error is a failed stage.
+				if cerr := pf.Close(); err == nil {
+					err = cerr
+				}
 				res := pngRes{n: pw.n, first: pw.first, tail: pw.tail, err: err}
 				copy(res.sum[:], pw.h.Sum(nil))
 				return res
@@ -2347,10 +2393,10 @@ func (c *ctl) captureStage() string {
 			bound: validatorBound(left),
 			issue: vname,
 		})
-		in.Close()
+		closeQuiet(in)
 		_ = c.croot.Remove(raw)
 		if vr.startErr != nil {
-			pf.Close()
+			closeQuiet(pf)
 			if errors.Is(vr.startErr, errCancelled) {
 				return reasonCancelled
 			}
@@ -2461,12 +2507,12 @@ func (c *ctl) captureAbort() {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer closeQuiet(f)
 	parent, err := os.OpenRoot("/proc/self/fd/" + strconv.Itoa(int(f.Fd())) + "/..")
 	if err != nil {
 		return
 	}
-	defer parent.Close()
+	defer closeQuiet(parent)
 	if fi, err := parent.Lstat(c.leaf); err == nil && fi.IsDir() {
 		if id, ok := idOf(fi); ok && id == c.cid {
 			_ = parent.Remove(c.leaf)

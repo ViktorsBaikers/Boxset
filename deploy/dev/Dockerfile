@@ -188,7 +188,9 @@ RUN chown root:root /usr/local/libexec/boxset/capture-check \
 COPY web/package.json web/bun.lock /src/web/
 RUN cd /src/web && HOME=/home/boxset bun install --frozen-lockfile --ignore-scripts
 COPY go.mod go.sum* /src/
-RUN cd /src && GOCACHE=/var/cache/go-build GOTOOLCHAIN=local GOFLAGS=-mod=readonly \
+# The download uses the runner's exact module locations (GOPATH/GOMODCACHE of the
+# child environment), so the offline -mod=readonly consumer finds this image-only cache.
+RUN cd /src && GOPATH=/go GOMODCACHE=/go/pkg/mod GOCACHE=/var/cache/go-build GOTOOLCHAIN=local GOFLAGS=-mod=readonly \
     GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org go mod download
 COPY . /src/
 RUN set -eu; \
@@ -203,3 +205,7 @@ RUN set -eu; \
     install -d -o 1000 -g 1000 -m 0700 /capture; \
     find /usr /etc -xtype l -delete; \
     find /usr /etc ! -type l -perm /022 -exec chmod go-w {} +
+# Empty destinations of the runner's `--ref` delivery of pinned Git-object reference text: six
+# root-owned read-only directories, filled only by `docker cp` into the created container, never
+# from the build context and never by a mount.
+RUN for s in series movie; do for a in tests parser qualities; do install -d -o root -g root -m 0555 "/ref/$s/$a"; done; done

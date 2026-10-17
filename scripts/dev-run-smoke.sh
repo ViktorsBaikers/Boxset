@@ -7,6 +7,10 @@
 # so no owner-shaped nested file is ever copied), so repository drafts are never
 # touched. Seven direct assertions print `ok R<n>` or `not ok R<n>`;
 # `DEV-RUN-SMOKE-PASS checks=7` prints only when all seven pass, any failure exits 1.
+# R1 also runs the `--ref` root and pinned-commit rejections of the neutral reference values
+# (BOXSET_REF_SERIES, BOXSET_REF_MOVIE) and R3 the pinned Git-object delivery, source-rule, producer-
+# and receiver-after-delivery and readback-cap controls, R5 the corpus export identity, R6 the producer
+# unit tests and R7 the Go admission negatives, all against synthetic repositories built only inside the scratch.
 # `--tools-failure` instead runs the real eight-tool script in the scratch copy through ten
 # controls, each on a real child and Docker: a genuine compiler syntax error carrying the
 # sentinel (exactly one start record, redacted draft with tool/file/line), an unwritable draft
@@ -78,7 +82,7 @@ RRENV=
 # rr ARGS...: the scratch copy's own runner (under the extra `env` words in $RRENV);
 # merged output in $S/out, status in $RC.
 rr() {
-	(cd "$S/repo" && exec env $RRENV sh scripts/dev-run.sh "$@") </dev/null >"$S/out" 2>&1
+	(cd "$S/repo" && exec env $RRENV sh ${RSH:-scripts/dev-run.sh} "$@") </dev/null >"$S/out" 2>&1
 	RC=$?
 }
 
@@ -98,6 +102,324 @@ names_ok() {
 	[ "$_seen" = 1 ]
 }
 
+# T26 `--ref` fixtures, all inside the unique scratch and never from an owner reference. TD is a
+# smoke-owned directory of links to exactly the host tools the runner's `--ref` validation and pin
+# check need (never docker), TDNG the same without git. REFD carries a unique non-secret marker. The
+# synthetic repositories hold the runner's three upstream directories with small .cs files (one
+# nested) and one committed .cs outside them: plain (a directory, no Git), git and git2 (distinct
+# repositories whose retained control commit is followed by a later HEAD commit changing every file, a
+# staged edit, working-tree edits and an untracked .cs file in each directory), git2/inner (nested in
+# git2, no repository of its own) and bad, whose three commits lack the qualities directory, add a
+# symlink blob in the parser directory and add one .cs blob of 2 MiB + 1 byte.
+# sgit DIR ARGS...: Git on a fixture only: cleared environment, the tool directory as PATH, scratch
+# HOME, no system or global configuration, a smoke-local identity and empty owned template and hooks
+# directories; no inherited GIT_* value ever enters.
+sgit() {
+	_gd=$1
+	shift
+	env -i PATH="$TD" HOME="$S/githome" LC_ALL=C GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+		GIT_AUTHOR_NAME=smoke GIT_AUTHOR_EMAIL=smoke@example.invalid GIT_COMMITTER_NAME=smoke GIT_COMMITTER_EMAIL=smoke@example.invalid \
+		git -C "$_gd" -c core.hooksPath="$S/gh" -c init.templateDir="$S/gt" -c commit.gpgsign=false "$@"
+}
+REFPAIRS='tests:src/NzbDrone.Core.Test/ParserTests parser:src/NzbDrone.Core/Parser qualities:src/NzbDrone.Core/Qualities'
+# ref_repo DIR TAG: a repository whose first commit is the control commit.
+ref_repo() {
+	mkdir -p "$1" && sgit "$1" init -q "--template=$S/gt" -b main || return 1
+	for _p in $REFPAIRS; do
+		_u=${_p#*:}
+		mkdir -p "$1/$_u/sub" && printf 'class A%s {}\n' "$2" >"$1/$_u/a.cs" && printf 'class N%s {}\n' "$2" >"$1/$_u/sub/n.cs" || return 1
+	done
+	mkdir -p "$1/outside" && printf 'class O%s {}\n' "$2" >"$1/outside/o.cs" &&
+		sgit "$1" add -A && sgit "$1" commit -q -m "control $2"
+}
+# ref_dirty DIR: a later HEAD commit changing every file, then a staged edit, working-tree edits and
+# an untracked .cs file in each directory.
+ref_dirty() {
+	for _f in $(sgit "$1" ls-files); do
+		printf '// later\n' >>"$1/$_f" || return 1
+	done
+	sgit "$1" add -A && sgit "$1" commit -q -m later || return 1
+	_k=0
+	for _p in $REFPAIRS; do
+		_u=${_p#*:}
+		_k=$((_k + 1))
+		printf 'class U {}\n' >"$1/$_u/untracked.cs" && printf '// worktree\n' >>"$1/$_u/sub/n.cs" || return 1
+		if [ "$_k" = 1 ]; then
+			printf '// staged\n' >>"$1/$_u/a.cs" && sgit "$1" add "$_u/a.cs" || return 1
+		else
+			printf '// worktree\n' >>"$1/$_u/a.cs" || return 1
+		fi
+	done
+}
+# ref_head DIR: the commit HEAD names.
+ref_head() { sgit "$1" rev-parse --verify 'HEAD^{commit}'; }
+ref_fixtures() {
+	MARK=refmark$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')
+	REFD=$S/$MARK
+	TD=$S/tools
+	TDNG=$S/tools-nogit
+	mkdir "$TD" "$TDNG" "$S/githome" "$S/gh" "$S/gt" "$S/pin" "$REFD" "$REFD/plain" || return 1
+	for _t in tr wc timeout env; do
+		_p=$(command -v "$_t") && [ -x "$_p" ] && ln -s "$_p" "$TD/$_t" && ln -s "$_p" "$TDNG/$_t" || return 1
+	done
+	_p=$(command -v git) && [ -x "$_p" ] && ln -s "$_p" "$TD/git" || return 1
+	ref_repo "$REFD/git" S && CS=$(ref_head "$REFD/git") && ref_dirty "$REFD/git" || return 1
+	ref_repo "$REFD/git2" M && CM=$(ref_head "$REFD/git2") && ref_dirty "$REFD/git2" || return 1
+	mkdir "$REFD/git2/inner" || return 1
+	ref_repo "$REFD/bad" B && _bc=$(ref_head "$REFD/bad") || return 1
+	set -- $REFPAIRS
+	_t0=${1#*:}
+	_pa=${2#*:}
+	_qu=${3#*:}
+	sgit "$REFD/bad" rm -q -r "$_qu" && sgit "$REFD/bad" commit -q -m noq && BADQ=$(ref_head "$REFD/bad") && sgit "$REFD/bad" reset -q --hard "$_bc" &&
+		ln -s ../a.cs "$REFD/bad/$_pa/link.cs" && sgit "$REFD/bad" add -A && sgit "$REFD/bad" commit -q -m link && BADL=$(ref_head "$REFD/bad") && sgit "$REFD/bad" reset -q --hard "$_bc" &&
+		head -c 2097153 /dev/zero | tr '\0' x >"$REFD/bad/$_t0/big.cs" && sgit "$REFD/bad" add -A && sgit "$REFD/bad" commit -q -m big && BADB=$(ref_head "$REFD/bad") || return 1
+	[ "${#CS}" = 40 ] && [ "${#CM}" = 40 ] && [ "$CS" != "$CM" ] || return 1
+	_nl='
+'
+	_tab=$(printf '\t')
+	cp -R "$REFD/plain" "$REFD/p${_nl}n" && cp -R "$REFD/plain" "$REFD/p${_tab}t"
+}
+# pin_copy OUT SERIESPIN MOVIEPIN: a smoke-owned copy of the scratch runner whose side table holds
+# other pins; each real pin must occur exactly once in the runner and each new pin once in the copy.
+pin_copy() {
+	set -- "$1" "$2" "$3" $(sed -n "s/^REFPINS='series:\([0-9a-f]*\) movie:\([0-9a-f]*\)'\$/\1 \2/p" "$S/repo/scripts/dev-run.sh")
+	[ $# = 5 ] || return 1
+	for _p in "$4" "$5"; do
+		[ "$(grep -o "$_p" "$S/repo/scripts/dev-run.sh" | wc -l | tr -d ' ')" = 1 ] || return 1
+	done
+	sed -e "s/$4/$2/" -e "s/$5/$3/" "$S/repo/scripts/dev-run.sh" >"$1" || return 1
+	[ "$(grep -o "$2" "$1" | wc -l | tr -d ' ')" = 1 ] && [ "$(grep -o "$3" "$1" | wc -l | tr -d ' ')" = 1 ]
+}
+# r1_ref WORD TOOLS SERIES MOVIE [RUNNER]: the runner's `--ref` run (the scratch runner unless a pinned
+# copy is given) from `env -i` with only the tool directory TOOLS as PATH and the two selected
+# NAME=value words (`-` leaves a variable unset), so owner BOXSET_REF_* values never reach it: status
+# 125 and merged output exactly `dev-run: WORD`, never a root value, scratch path, sentinel or Git
+# text. A run that reached Docker could only report host_tool_missing.
+r1_ref() {
+	_w=$1
+	_tl=$2
+	_sv=$3
+	_mv=$4
+	_rn=${5:-scripts/dev-run.sh}
+	set -- env -i "PATH=$_tl"
+	[ "$_sv" = - ] || set -- "$@" "BOXSET_REF_SERIES=$_sv"
+	[ "$_mv" = - ] || set -- "$@" "BOXSET_REF_MOVIE=$_mv"
+	(cd "$S/repo" && exec "$@" /bin/sh "$_rn" --ref -- true) </dev/null >"$S/out" 2>&1
+	[ $? = 125 ] && [ "$(cat "$S/out")" = "dev-run: $_w" ]
+}
+# r1_ref_side SIDE: every root rejection of one side alone, the other side being the plain directory.
+r1_ref_side() {
+	for _c in unset empty relative newline tab missing; do
+		case $_c in
+		unset) _v=- _w=ref_unavailable ;;
+		empty) _v= _w=ref_unavailable ;;
+		relative) _v=../$MARK/plain _w=ref_invalid ;;
+		newline) _v="$REFD/p${_nl}n" _w=ref_invalid ;;
+		tab) _v="$REFD/p${_tab}t" _w=ref_invalid ;;
+		missing) _v=$REFD/$SENTINEL _w=ref_invalid ;;
+		esac
+		if [ "$1" = series ]; then
+			r1_ref "$_w side=series" "$TD" "$_v" "$REFD/plain"
+		else
+			r1_ref "$_w side=movie" "$TD" "$REFD/plain" "$_v"
+		fi || return 1
+	done
+}
+# r1_ref_commits: the pin check of each side. The unmodified scratch runner enforces its real pins
+# (the checkout's HEAD is never used); with a copy pinned to the control commits, a root no Git
+# repository answers for (no Git, no repository, a repository lacking the pin, a pin that names a
+# blob, a directory nested in another repository) is ref_commit_invalid for the first failing side.
+r1_ref_commits() {
+	set -- $REFPAIRS
+	_bl=$(sgit "$REFD/git" rev-parse --verify "$CS:${1#*:}/a.cs") || return 1
+	pin_copy "$S/pin/ok.sh" "$CS" "$CM" && pin_copy "$S/pin/blob.sh" "$_bl" "$CM" || return 1
+	r1_ref 'ref_commit_invalid side=series' "$TD" "$REFD/git" "$REFD/git2" &&
+		r1_ref 'ref_commit_invalid side=series' "$TDNG" "$REFD/plain" "$REFD/plain" "$S/pin/ok.sh" &&
+		r1_ref 'ref_commit_invalid side=series' "$TD" "$REFD/plain" "$REFD/plain" "$S/pin/ok.sh" &&
+		r1_ref 'ref_commit_invalid side=series' "$TD" "$REFD/git2" "$REFD/git2" "$S/pin/ok.sh" &&
+		r1_ref 'ref_commit_invalid side=series' "$TD" "$REFD/git" "$REFD/git2" "$S/pin/blob.sh" &&
+		r1_ref 'ref_commit_invalid side=movie' "$TD" "$REFD/git" "$REFD/git2/inner" "$S/pin/ok.sh"
+}
+# lbl: the containers carrying any dev-run label, sorted.
+lbl() { docker ps -aq --filter label=boxset.dev-run | LC_ALL=C sort; }
+# r3_expect SIDE REPO COMMIT: one `f SHA256 444 0 /ref/SIDE/AREA/REL` line per .cs file of the control
+# commit under the three upstream directories, the bytes read as Git objects (never the checkout).
+r3_expect() {
+	for _p in $REFPAIRS; do
+		_a=${_p%%:*}
+		_u=${_p#*:}
+		for _f in $(sgit "$2" ls-tree -r --name-only "$3" -- "$_u/" | grep '[.]cs$'); do
+			_h=$(sgit "$2" cat-file blob "$3:$_f" | sha256sum) || return 1
+			printf 'f %s 444 0 /ref/%s/%s/%s\n' "${_h%% *}" "$1" "$_a" "${_f#"$_u"/}"
+		done
+	done | LC_ALL=C sort
+}
+# r3_differs REPO COMMIT: no delivered file equals the later HEAD, staged or working-tree bytes.
+r3_differs() {
+	for _p in $REFPAIRS; do
+		_u=${_p#*:}
+		for _f in $(sgit "$1" ls-tree -r --name-only "$2" -- "$_u/" | grep '[.]cs$'); do
+			_c=$(sgit "$1" cat-file blob "$2:$_f" | sha256sum) || return 1
+			for _o in "$(sgit "$1" cat-file blob "HEAD:$_f" | sha256sum)" "$(sgit "$1" cat-file blob ":$_f" | sha256sum)" "$(sha256sum <"$1/$_f")"; do
+				[ "${_o%% *}" != "${_c%% *}" ] || return 1
+			done
+		done
+	done
+}
+# R3SCRIPT: what the --ref child reports: its mount table, environment, file listing with digest, mode and
+# owner, and whether it can create, overwrite or unlink under each side.
+R3SCRIPT='sed "s/^/MI /" /proc/self/mountinfo; env | sed "s/^/ENV /"; for f in $(find /ref -type f | LC_ALL=C sort); do printf "f %s %s %s\n" "$(sha256sum <"$f" | cut -c1-64)" "$(stat -c "%a %u" "$f")" "$f"; done; for s in series movie; do c=fail; o=fail; u=fail; touch /ref/$s/tests/new.cs 2>/dev/null && c=ok; { printf x >>/ref/$s/tests/a.cs; } 2>/dev/null && o=ok; rm -f /ref/$s/tests/a.cs 2>/dev/null && u=ok; [ -f /ref/$s/tests/a.cs ] || u=ok; printf "attempt %s create=%s overwrite=%s unlink=%s\n" "$s" "$c" "$o" "$u"; done'
+# r3_pinned: the pinned-object delivery on git (series) and git2 (movie) whose paths carry the marker. The
+# created container has no mount; the merged output holds neither the marker nor any scratch root; each
+# side's file set is exactly the control commit's .cs files under the three directories with the pinned
+# blobs' digests (never the later HEAD, staged, working-tree, untracked or outside bytes), read-only
+# files owned by 0; with conflicting host commit values and a GIT_DIR/GIT_WORK_TREE aimed at the other
+# repository the child still observes exactly the two pins. This proves delivery, not extraction.
+r3_pinned() {
+	_cs=1111111111111111111111111111111111111111
+	_cm=2222222222222222222222222222222222222222
+	RSH=$S/pin/ok.sh
+	RRENV="BOXSET_REF_SERIES=$REFD/git BOXSET_REF_MOVIE=$REFD/git2 BOXSET_REF_SERIES_COMMIT=$_cs BOXSET_REF_MOVIE_COMMIT=$_cm GIT_DIR=$REFD/git2/.git GIT_WORK_TREE=$REFD/git2"
+	rr --ref -- sh -c "$R3SCRIPT"
+	RRENV=
+	RSH=
+	{ r3_expect series "$REFD/git" "$CS" && r3_expect movie "$REFD/git2" "$CM"; } | LC_ALL=C sort >"$S/want.files" || return 1
+	grep '^f ' "$S/out" | LC_ALL=C sort >"$S/got.files"
+	[ "$RC" = 0 ] && [ -s "$S/want.files" ] && cmp -s "$S/want.files" "$S/got.files" &&
+		[ "$(wc -l <"$S/got.files" | tr -d ' ')" = 12 ] &&
+		r3_differs "$REFD/git" "$CS" && r3_differs "$REFD/git2" "$CM" &&
+		grep -q '^MI ' "$S/out" &&
+		grep -Fxq 'attempt series create=fail overwrite=fail unlink=fail' "$S/out" &&
+		grep -Fxq 'attempt movie create=fail overwrite=fail unlink=fail' "$S/out" &&
+		grep -Fxq "ENV BOXSET_REF_SERIES_COMMIT=$CS" "$S/out" &&
+		grep -Fxq "ENV BOXSET_REF_MOVIE_COMMIT=$CM" "$S/out" &&
+		! grep -Fq -e "$MARK" -e "$S" -e "$_cs" -e "$_cm" "$S/out" &&
+		! grep -Eq '^ENV (GIT_|BOXSET_REF_(SERIES|MOVIE)=)' "$S/out" &&
+		grep -q ' log=none ref=objects$' "$S/out" || return 1
+	for _n in $(sed -n 's/^ENV \([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$S/out"); do
+		case " $ALLOWED BOXSET_REF_SERIES_COMMIT BOXSET_REF_MOVIE_COMMIT " in *" $_n "*) ;; *) return 1 ;; esac
+	done
+}
+# r3_bad: a pinned copy with series pinned to each bad commit (no qualities directory, a symlink blob
+# in parser, a .cs blob of 2 MiB + 1 byte) and movie to git2's control commit, run with --write
+# testdata/parser over pre-seeded corpora and a child that would print REF-CHILD-RAN: status 125 and
+# exactly `dev-run: ref_invalid side=series`, no child, corpora unchanged, no part file, no new
+# labelled container.
+r3_bad() {
+	_cd=$S/repo/testdata/parser
+	[ -f "$_cd/series.jsonl" ] && [ -f "$_cd/movie.jsonl" ] && sha256sum "$_cd/series.jsonl" "$_cd/movie.jsonl" >"$S/seed.sum" || return 1
+	for _bc in $BADQ $BADL $BADB; do
+		pin_copy "$S/pin/bad.sh" "$_bc" "$CM" || return 1
+		lbl >"$S/lbl.before"
+		RSH=$S/pin/bad.sh
+		RRENV="BOXSET_REF_SERIES=$REFD/bad BOXSET_REF_MOVIE=$REFD/git2"
+		rr --ref --write testdata/parser -- sh -c 'echo REF-CHILD-RAN'
+		RRENV=
+		RSH=
+		[ "$RC" = 125 ] && [ "$(cat "$S/out")" = 'dev-run: ref_invalid side=series' ] && ! grep -q REF-CHILD-RAN "$S/out" &&
+			sha256sum -c "$S/seed.sum" >/dev/null 2>&1 && [ -z "$(find "$_cd" -name '*.part*' -print)" ] &&
+			[ "$(lbl)" = "$(cat "$S/lbl.before")" ] || return 1
+	done
+}
+# r3_fault_setup: the smoke-owned fault pieces of the delivery controls. A copy of the pinned runner
+# has its single producer call site wrapped (exactly one occurrence is required) by a forwarding
+# producer: it runs the unchanged real producer, records its actual status and exits with DR_FAULT_EXIT,
+# or with that status when DR_FAULT_EXIT is empty. A forwarding docker shim runs the real docker and,
+# for the delivery `docker cp -`, records its actual status and exits with DR_SHIM_EXIT, or with that
+# status when DR_SHIM_EXIT is empty; for the readback of the series side it can instead stream the
+# file DR_SHIM_READBACK. R3DK is the real docker.
+r3_fault_setup() {
+	mkdir "$S/fault" "$S/shim" || return 1
+	[ "$(grep -cF '"$R" -ref-archive' "$S/pin/ok.sh")" = 1 ] &&
+		sed 's|"\$R" -ref-archive|"$DR_FAULT" "$R" -ref-archive|' "$S/pin/ok.sh" >"$S/fault/dev-run.sh" &&
+		[ "$(grep -cF '"$DR_FAULT" "$R" -ref-archive' "$S/fault/dev-run.sh")" = 1 ] || return 1
+	cat >"$S/fault/producer.sh" <<'EOF' || return 1
+#!/bin/sh
+real=$1
+shift
+"$real" "$@"
+s=$?
+printf '%s' "$s" >"$DR_FAULT_STATUS"
+exit "${DR_FAULT_EXIT:-$s}"
+EOF
+	cat >"$S/shim/docker" <<'EOF' || return 1
+#!/bin/sh
+if [ "${1:-}" = cp ] && [ "${3:-}" = - ] && [ -n "${DR_SHIM_READBACK:-}" ]; then
+	case ${2:-} in *:/ref/series) exec cat "$DR_SHIM_READBACK" ;; esac
+fi
+"$DR_SHIM_REAL" "$@"
+s=$?
+if [ "${1:-}" = cp ] && [ "${2:-}" = - ]; then
+	printf '%s' "$s" >"$DR_SHIM_STATUS"
+	exit "${DR_SHIM_EXIT:-$s}"
+fi
+exit "$s"
+EOF
+	chmod 0755 "$S/fault/producer.sh" "$S/shim/docker" || return 1
+	R3DK=$(command -v docker) || return 1
+	sha256sum "$S/repo/testdata/parser/series.jsonl" "$S/repo/testdata/parser/movie.jsonl" >"$S/seed.sum"
+}
+# r3_fault PEXIT SEXIT: the series delivery with the real producer and the real receiver `docker cp`
+# both run to completion, each status recorded from the actual command (both must be 0), and then
+# one of them is made to report nonzero: PEXIT the producer (nonzero after delivery), SEXIT the
+# receiver (nonzero after a real, successful copy); the other keeps its real status. The runner must
+# give status 125 `ref_copy_failed side=series`, never start the child, leave both corpora unchanged
+# and no part file or new labelled container. A runner that ignores the producer status, or the
+# receiver status, fails here: the readback of the really delivered side would otherwise succeed and
+# the child would run.
+r3_fault() {
+	_cd=$S/repo/testdata/parser
+	rm -f "$S/fault.status" "$S/shim.status"
+	lbl >"$S/lbl.before"
+	RSH=$S/fault/dev-run.sh
+	RRENV="PATH=$S/shim:$PATH DR_SHIM_REAL=$R3DK DR_SHIM_STATUS=$S/shim.status DR_SHIM_EXIT=$2 DR_FAULT=$S/fault/producer.sh DR_FAULT_STATUS=$S/fault.status DR_FAULT_EXIT=$1 BOXSET_REF_SERIES=$REFD/git BOXSET_REF_MOVIE=$REFD/git2"
+	rr --ref --write testdata/parser -- sh -c 'echo REF-CHILD-RAN'
+	RRENV=
+	RSH=
+	[ "$(cat "$S/fault.status" 2>/dev/null)" = 0 ] && [ "$(cat "$S/shim.status" 2>/dev/null)" = 0 ] || return 1
+	[ "$RC" = 125 ] && [ "$(cat "$S/out")" = 'dev-run: ref_copy_failed side=series' ] && ! grep -q REF-CHILD-RAN "$S/out" &&
+		sha256sum -c "$S/seed.sum" >/dev/null 2>&1 && [ -z "$(find "$_cd" -name '*.part*' -print)" ] &&
+		[ "$(lbl)" = "$(cat "$S/lbl.before")" ]
+}
+# r3_cap: the readback admits exactly the producer's own envelope. The producer caps its archive at
+# 18 MiB (refMaxStream); the readback of the series side, replaced by a hand-built tar of the three
+# areas (owner 0/0, modes 0444/0555) of exactly that many bytes, is accepted and the child runs, while
+# the same tar 2048 bytes larger (2 KiB, so the cut of the capped stream falls inside the file data,
+# not the end blocks) is ref_copy_failed side=series with no child and no owned container left. The
+# tar is seven headers, the one-block parser and qualities files, the two end blocks and the padded
+# tests file.
+r3_cap() {
+	_cap=$((18 * 1048576))
+	grep -Eq '^[[:space:]]*refMaxStream[[:space:]]+= 18 << 20' "$S/repo/deploy/dev/redact/ref_archive.go" &&
+		[ "$(sed -n 's/^REFCAP=//p' "$S/repo/scripts/dev-run.sh")" = "$_cap" ] || return 1
+	_st=$S/capside
+	mkdir -p "$_st/series/tests" "$_st/series/parser" "$_st/series/qualities" &&
+		printf 'class P {}\n' >"$_st/series/parser/a.cs" && printf 'class Q {}\n' >"$_st/series/qualities/a.cs" || return 1
+	for _n in exact over; do
+		case $_n in exact) _big=$((_cap - 5632)) ;; *) _big=$((_cap - 5632 + 2048)) ;; esac
+		head -c "$_big" /dev/zero >"$_st/series/tests/a.cs" &&
+			tar -c -b 1 --format=ustar --owner=0 --group=0 --numeric-owner --mode=a-w -f "$S/cap.$_n" -C "$_st" series || return 1
+	done
+	[ "$(wc -c <"$S/cap.exact" | tr -d ' ')" = "$_cap" ] && [ "$(wc -c <"$S/cap.over" | tr -d ' ')" = $((_cap + 2048)) ] || return 1
+	for _n in exact over; do
+		lbl >"$S/lbl.before"
+		RSH=$S/pin/ok.sh
+		RRENV="PATH=$S/shim:$PATH DR_SHIM_REAL=$R3DK DR_SHIM_STATUS=$S/shim.status DR_SHIM_READBACK=$S/cap.$_n BOXSET_REF_SERIES=$REFD/git BOXSET_REF_MOVIE=$REFD/git2"
+		rr --ref -- sh -c 'echo REF-CHILD-RAN'
+		RRENV=
+		RSH=
+		case $_n in
+		exact) { [ "$RC" = 0 ] && grep -q REF-CHILD-RAN "$S/out"; } || return 1 ;;
+		*) { [ "$RC" = 125 ] && [ "$(cat "$S/out")" = 'dev-run: ref_copy_failed side=series' ]; } || return 1 ;;
+		esac
+		[ "$(lbl)" = "$(cat "$S/lbl.before")" ] || return 1
+	done
+}
+r3_ref() {
+	r3_pinned && r3_bad && r3_fault_setup && r3_fault 1 '' && r3_fault '' 1 && r3_cap
+}
+
 # R1: argument errors give 125 and a fixed word before Docker is reachable (no PATH).
 r1_one() {
 	_w=$1
@@ -109,7 +431,7 @@ r1() {
 	r1_one usage true &&
 		r1_one timeout_invalid --timeout 0 -- true &&
 		r1_one write_path_invalid --write ../x -- true &&
-		r1_one ref_unavailable --ref -- true &&
+		ref_fixtures && r1_ref_side series && r1_ref_side movie && r1_ref_commits &&
 		r1_one capture_flag_invalid --capture &&
 		r1_one capture_destination_invalid --capture d -- true &&
 		r1_one capture_destination_invalid --capture .devrites/work/Bad/screenshots-20260101T000000Z -- true &&
@@ -176,7 +498,8 @@ r3() {
 		grep -Fxq 'home /home/boxset' "$S/out" &&
 		grep -Fxq 'net lo' "$S/out" &&
 		! grep -v '^net lo$' "$S/out" | grep -q '^net ' &&
-		grep -q '^dev-run: image=sha256:[0-9a-f]* inputs=[0-9a-f]* .* log=none$' "$S/out"
+		grep -q '^dev-run: image=sha256:[0-9a-f]* inputs=[0-9a-f]* .* log=none$' "$S/out" || return 1
+	r3_ref
 }
 
 # R4: a secret value printed by the child never reaches the runner's output.
@@ -287,6 +610,24 @@ r5_bad() {
 		[ -z "$(find "$DRAFTS" -name '*.part*' -print)" ] && obs_ok
 }
 
+# r5_identity: the corpus export identity (T27). With the sentinel selected, a zero-exit child that
+# writes a sentinel-free series.jsonl/movie.jsonl pair under --write testdata/parser publishes both
+# byte-identical to the child's bytes; a zero-exit child whose movie.jsonl holds the selected value
+# is export_changed (the raw bytes of the stopped container do not hash as the sanitized staged
+# bytes): status 125, both pre-seeded scratch corpora unchanged and no part file left.
+r5_identity() {
+	_cd=$S/repo/testdata/parser
+	rr --write testdata/parser -- sh -c 'printf "series-rows\n" >testdata/parser/series.jsonl && printf "movie-rows\n" >testdata/parser/movie.jsonl'
+	printf 'series-rows\n' >"$S/want.series" && printf 'movie-rows\n' >"$S/want.movie" || return 1
+	[ "$RC" = 0 ] && cmp -s "$S/want.series" "$_cd/series.jsonl" && cmp -s "$S/want.movie" "$_cd/movie.jsonl" &&
+		[ -z "$(find "$_cd" -name '*.part*' -print)" ] && ! grep -Fq "$SENTINEL" "$S/out" && ctr_gone || return 1
+	sha256sum "$_cd/series.jsonl" "$_cd/movie.jsonl" >"$S/corpora.sum" || return 1
+	rr --write testdata/parser -- sh -c 'printf "series-rows-2\n" >testdata/parser/series.jsonl && printf "movie %s\n" "$1" >testdata/parser/movie.jsonl' x "$SENTINEL"
+	[ "$RC" = 125 ] && grep -qx 'dev-run: export_changed' "$S/out" && ! grep -Fq "$SENTINEL" "$S/out" &&
+		sha256sum -c "$S/corpora.sum" >/dev/null 2>&1 &&
+		[ -z "$(find "$_cd" -name '*.part*' -print)" ]
+}
+
 # R5: combined sentinel check. The child writes the value and a secret URL into the issue
 # draft and lists its environment names, then exits 1: status kept, draft published
 # redacted without either, no part file, owned container gone, runner output clean, and the
@@ -340,20 +681,26 @@ r5() {
 	printf 'tools [REDACTED] [REDACTED]\n' >"$S/want.tools" || return 1
 	[ "$_e5" = 1 ] && cmp -s "$S/want.tools" "$DRAFTS/s5-tools.md" && [ ! -e "$DRAFTS/s5-admission.md" ] &&
 		! grep -Fq "$SENTINEL" "$DRAFTS/s5-tools.md" "$S/out" &&
-		[ -z "$(find "$DRAFTS" -name '*.part*' -print)" ] && ctr_gone && obs_ok
+		[ -z "$(find "$DRAFTS" -name '*.part*' -print)" ] && ctr_gone && obs_ok || return 1
+	r5_identity
 }
 
-# R6: the existing redaction-only Go tests pass through the runner (cgo off, as the repo's
-# ordinary Go tests run); the selector names only main_test.go tests.
-RX='^(TestSelected|TestSelection|TestUsage|TestOverlaps|TestSecretSplit|TestURL|TestUndelimited|TestNUL|TestRaw|TestWriteError|TestTail|TestBinary|TestReadError|TestOneSelection)'
+# R6: the existing redaction-only Go tests and the bounded TestRefArchive producer tests pass through
+# the runner (cgo off, as the repo's ordinary Go tests run); the selector names only main_test.go
+# and ref_archive_test.go tests, at least one of each, and no controller or clock test.
+RX='^(TestSelected|TestSelection|TestUsage|TestOverlaps|TestSecretSplit|TestURL|TestUndelimited|TestNUL|TestRaw|TestWriteError|TestTail|TestBinary|TestReadError|TestOneSelection|TestRefArchive)'
 r6() {
 	rr -- env CGO_ENABLED=0 go test ./deploy/dev/redact -run "$RX" -count=1 -v
 	[ "$RC" = 0 ] && grep -q '^--- PASS' "$S/out" && ! grep -Eq -- '--- (FAIL|SKIP)' "$S/out" || return 1
+	grep '^--- PASS: TestRefArchive' "$S/out" >/dev/null && grep '^--- PASS: ' "$S/out" | grep -v 'TestRefArchive' >/dev/null || return 1
 	rr -- env CGO_ENABLED=0 go test ./deploy/dev/redact -list "$RX"
 	[ "$RC" = 0 ] || return 1
-	grep -o '^func Test[A-Za-z0-9_]*' "$S/repo/deploy/dev/redact/main_test.go" | sed 's/^func //' >"$S/names"
+	grep -o '^func Test[A-Za-z0-9_]*' "$S/repo/deploy/dev/redact/main_test.go" | sed 's/^func //' >"$S/names.main"
+	grep -o '^func Test[A-Za-z0-9_]*' "$S/repo/deploy/dev/redact/ref_archive_test.go" | sed 's/^func //' >"$S/names.ref"
+	cat "$S/names.main" "$S/names.ref" >"$S/names"
 	grep '^Test' "$S/out" >"$S/listed"
-	[ -s "$S/listed" ] && [ -z "$(grep -Fvx -f "$S/names" "$S/listed")" ]
+	[ -s "$S/listed" ] && [ -z "$(grep -Fvx -f "$S/names" "$S/listed")" ] &&
+		grep -Fxq -f "$S/names.main" "$S/listed" && grep -Fxq -f "$S/names.ref" "$S/listed"
 }
 
 # R7: the root alias /src/. gets the real admission controls (an unexpected child variable
@@ -361,6 +708,36 @@ r6() {
 # the distinct manifest-only line (no admission PASS, no runtime control), then the real
 # admission through the runner blocks an impossible executed Bun date and a stale annual evidence
 # date (the latter retaining the draft).
+# r7_go_real FIELD OLD NEW WORD: one real-root admission run (the scratch /src) whose ADM go row has
+# one cell mutated: status 1, the named reason for that row, never a PASS. The valid control is the
+# real-root run above, whose only block is its planted variable. The report is always restored.
+r7_go_real() {
+	_f=$S/repo/docs/spikes/s5-version-admission.md
+	_row=$(grep -m1 '^| ADM-[0-9]* | go | go-dependency |' "$S/report.orig") || return 1
+	_gid=${_row#'| '}
+	_gid=${_gid%% *}
+	sed -E "/^\\| $_gid /s#$2#$3#" "$S/report.orig" >"$S/report.new" && ! cmp -s "$S/report.orig" "$S/report.new" || return 1
+	cat "$S/report.new" >"$_f" || return 1
+	rr -- scripts/s5-toolchain.sh --admission
+	_e=$RC
+	cat "$S/report.orig" >"$_f" || return 1
+	[ "$_e" = 1 ] && grep -q "^ADMISSION-BLOCKED $_gid: $4" "$S/out" && ! grep -q '^S5-ADMISSION-PASS' "$S/out"
+}
+# r7_go: the go row's licence SHA-256, origin commit and h1: pin each mutated in their own real-root
+# run, then a manifest-only copy with one extra go.mod directive and one require without a row.
+r7_go() {
+	cp "$S/repo/docs/spikes/s5-version-admission.md" "$S/report.orig" || return 1
+	r7_go_real licence 'license-sha256=[0-9a-f]{64}' 'license-sha256=0000000000000000000000000000000000000000000000000000000000000000' 'licence_mismatch' &&
+		r7_go_real source ' origin=(https:[^ ]*) commit=[0-9a-f]{40} ref=' ' origin=\1 commit=1111111111111111111111111111111111111111 ref=' 'source_mismatch' &&
+		r7_go_real pin ' h1:[A-Za-z0-9+/]{43}= \|' ' h1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= |' "go.sum lacks '" || return 1
+	rr -- sh -c 'd=$(mktemp -d) && mkdir -p "$d/deploy/dev" "$d/docs/spikes" "$d/web" && cp /src/deploy/dev/Dockerfile "$d/deploy/dev/" && cp /src/docs/spikes/s5-version-admission.md "$d/docs/spikes/" && cp /src/web/package.json /src/web/bun.lock "$d/web/" && cp /src/go.mod "$d/" && printf "\nreplace example.invalid/x => example.invalid/y v1.0.0\nrequire example.invalid/norow v1.0.0\n" >>"$d/go.mod" && exec scripts/s5-toolchain.sh --admission --root "$d"'
+	[ "$RC" = 1 ] &&
+		grep -qx 'ADMISSION-UNLISTED go.mod directive replace' "$S/out" &&
+		grep -qx 'ADMISSION-UNLISTED go example.invalid/norow@v1.0.0' "$S/out" &&
+		grep -qx 'S5-ADMISSION-FAIL blocked=0 unlisted=2' "$S/out" &&
+		! grep -q -e '^S5-ADMISSION-PASS' -e '^S5-MANIFEST-ONLY-PASS' "$S/out"
+}
+
 r7() {
 	rr -- env DEV_RUN_SMOKE_CHILD_MARKER=1 scripts/s5-toolchain.sh --admission --root /src/.
 	[ "$RC" = 1 ] &&
@@ -390,6 +767,7 @@ r7() {
 		grep -qx "ADMISSION-BLOCKED $_id: recorded Bun result date 2026-02-30 is not a valid date" "$S/out" &&
 		grep -qx 'S5-ADMISSION-FAIL blocked=1 unlisted=0' "$S/out" &&
 		! grep -q '^S5-ADMISSION-PASS' "$S/out" || return 1
+	r7_go || return 1
 	sed -E "/^\| $_id /s/ [0-9]{4}-[0-9]{2}-[0-9]{2} (https:)/ $_old \1/" "$_f" >"$S/report.new" &&
 		grep -q "^| $_id .* $_old https:" "$S/report.new" &&
 		cat "$S/report.new" >"$_f" || return 1

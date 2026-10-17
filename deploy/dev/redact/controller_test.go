@@ -54,7 +54,7 @@ func testCtl(t *testing.T) (*ctl, *syncBuf) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { dn.Close() })
+	t.Cleanup(func() { _ = dn.Close() })
 	c.devnull = dn
 	c.out = &outWriter{w: io.Discard}
 	return c, errb
@@ -163,7 +163,9 @@ func TestRunArgvRejectedBeforeAnyEffect(t *testing.T) {
 		{name: "long runid", edit: func(a []string, _ runFixture) { a[2] = testRunID + "0" }},
 		{name: "relative tmpd", edit: func(a []string, _ runFixture) { a[3] = "boxset-dev-run." + testRunID }},
 		{name: "tmpd with another basename", edit: func(a []string, f runFixture) { a[3] = filepath.Join(f.parent, "boxset-dev-run.ffffffffffffffff") }},
-		{name: "tmpd with dot dot", edit: func(a []string, f runFixture) { a[3] = f.parent + "/../" + filepath.Base(f.parent) + "/boxset-dev-run." + testRunID }},
+		{name: "tmpd with dot dot", edit: func(a []string, f runFixture) {
+			a[3] = f.parent + "/../" + filepath.Base(f.parent) + "/boxset-dev-run." + testRunID
+		}},
 		{name: "tmpd mode 0755", setup: func(t *testing.T, f runFixture) {
 			if err := os.Chmod(f.tmpd, 0o755); err != nil {
 				t.Fatal(err)
@@ -439,7 +441,9 @@ func signalCell(t *testing.T, cell string) {
 	if signal.Ignored(sig) != (mode == "ignored") {
 		t.Fatalf("%v is ignored at entry: %v, the cell is %s", sig, signal.Ignored(sig), mode)
 	}
-	os.Stdout.WriteString("ready\n")
+	if _, err := os.Stdout.WriteString("ready\n"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := io.ReadFull(os.Stdin, make([]byte, 1)); err != nil {
 		t.Fatal(err)
 	}
@@ -473,7 +477,9 @@ func signalCell(t *testing.T, cell string) {
 		res += " term=" + latched(5*time.Second) + " interrupted=" + strconv.Itoa(lines())
 	}
 	stop()
-	os.Stdout.WriteString(res + "\n")
+	if _, err := os.Stdout.WriteString(res + "\n"); err != nil {
+		t.Fatal(err)
+	}
 	os.Exit(0)
 }
 
@@ -535,7 +541,9 @@ func runSignalCell(t *testing.T, mode, sig string) {
 	if _, err := in.Write([]byte("g")); err != nil {
 		t.Fatal(err)
 	}
-	in.Close()
+	if err := in.Close(); err != nil {
+		t.Fatal(err)
+	}
 	rest, err := io.ReadAll(br)
 	waited = true
 	if werr := cmd.Wait(); err != nil || werr != nil {
@@ -906,7 +914,7 @@ func abortFixture(t *testing.T) (c *ctl, repo string) {
 	if c.repoRoot, err = os.OpenRoot(repo); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { c.repoRoot.Close() })
+	t.Cleanup(func() { _ = c.repoRoot.Close() })
 	c.slug, c.leaf = "feat", "screenshots-20260101T000000Z"
 	c.capture = ".devrites/work/feat/" + c.leaf
 	if err := os.MkdirAll(filepath.Join(repo, ".devrites/work/feat"), 0o755); err != nil {
@@ -921,7 +929,7 @@ func abortFixture(t *testing.T) (c *ctl, repo string) {
 	if c.croot, err = c.repoRoot.OpenRoot(c.capture); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { c.croot.Close() })
+	t.Cleanup(func() { _ = c.croot.Close() })
 	var ok bool
 	if c.cid, ok = rootID(c.croot); !ok {
 		t.Fatal("no identity for the pinned directory")
@@ -998,7 +1006,7 @@ func publishFixture(t *testing.T) (c *ctl, dir string) {
 	c, _ = testCtl(t)
 	c.repo, c.write, c.runid = repo, "testdata/parser", testRunID
 	c.writeComps = strings.Split(c.write, "/")
-	c.mapNames = []string{"sonarr.jsonl", "radarr.jsonl"}
+	c.mapNames = []string{"series.jsonl", "movie.jsonl"}
 	dir = filepath.Join(repo, c.write)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -1007,16 +1015,16 @@ func publishFixture(t *testing.T) (c *ctl, dir string) {
 	if c.repoRoot, err = os.OpenRoot(repo); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { c.repoRoot.Close() })
+	t.Cleanup(func() { _ = c.repoRoot.Close() })
 	if c.wroot, err = c.repoRoot.OpenRoot(c.write); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { c.wroot.Close() })
+	t.Cleanup(func() { _ = c.wroot.Close() })
 	var ok bool
 	if c.wid, ok = rootID(c.wroot); !ok {
 		t.Fatal("no identity for the pinned write root")
 	}
-	c.staged = []string{"sonarr.jsonl", "radarr.jsonl"}
+	c.staged = []string{"series.jsonl", "movie.jsonl"}
 	return c, dir
 }
 
@@ -1033,17 +1041,17 @@ func inode(t *testing.T, p string) uint64 {
 // prior inode and bytes of the replaced name return and nothing owned remains.
 func TestPublishRollsBackWhenALaterRenameFails(t *testing.T) {
 	c, dir := publishFixture(t)
-	for n, body := range map[string]string{"sonarr.jsonl": "prior sonarr", "radarr.jsonl": "prior radarr"} {
+	for n, body := range map[string]string{"series.jsonl": "prior series", "movie.jsonl": "prior movie"} {
 		if err := os.WriteFile(filepath.Join(dir, n), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	s0, r0 := inode(t, filepath.Join(dir, "sonarr.jsonl")), inode(t, filepath.Join(dir, "radarr.jsonl"))
-	if err := os.WriteFile(filepath.Join(dir, ".sonarr.jsonl."+testRunID+".part"), []byte("new sonarr"), 0o644); err != nil {
+	s0, r0 := inode(t, filepath.Join(dir, "series.jsonl")), inode(t, filepath.Join(dir, "movie.jsonl"))
+	if err := os.WriteFile(filepath.Join(dir, ".series.jsonl."+testRunID+".part"), []byte("new series"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// A directory cannot replace a regular file: the second rename fails.
-	if err := os.Mkdir(filepath.Join(dir, ".radarr.jsonl."+testRunID+".part"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(dir, ".movie.jsonl."+testRunID+".part"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if reason := c.publishInRoot(); reason != "write_publish_failed" {
@@ -1052,7 +1060,7 @@ func TestPublishRollsBackWhenALaterRenameFails(t *testing.T) {
 	for n, want := range map[string]struct {
 		body string
 		ino  uint64
-	}{"sonarr.jsonl": {"prior sonarr", s0}, "radarr.jsonl": {"prior radarr", r0}} {
+	}{"series.jsonl": {"prior series", s0}, "movie.jsonl": {"prior movie", r0}} {
 		b, err := os.ReadFile(filepath.Join(dir, n))
 		if err != nil || string(b) != want.body || inode(t, filepath.Join(dir, n)) != want.ino {
 			t.Fatalf("%s is %q (%v) on inode %d, want its prior bytes on inode %d", n, b, err, inode(t, filepath.Join(dir, n)), want.ino)
@@ -1070,58 +1078,58 @@ func TestPublishRollsBackWhenALaterRenameFails(t *testing.T) {
 // by the rollback; its backup is kept and the conflict is reported.
 func TestPublishRollbackKeepsAForeignReplacement(t *testing.T) {
 	c, dir := publishFixture(t)
-	c.staged = []string{"sonarr.jsonl"}
-	if err := os.WriteFile(filepath.Join(dir, "sonarr.jsonl"), []byte("prior sonarr"), 0o644); err != nil {
+	c.staged = []string{"series.jsonl"}
+	if err := os.WriteFile(filepath.Join(dir, "series.jsonl"), []byte("prior series"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".sonarr.jsonl."+testRunID+".part"), []byte("new sonarr"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".series.jsonl."+testRunID+".part"), []byte("new series"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	errb := &syncBuf{}
 	c.diag = newDiagSink(errb)
 	// The sequence publishInRoot follows, with a foreign file standing in for the name
 	// between the rename and the failure that triggers the rollback.
-	q := inode(t, filepath.Join(dir, "sonarr.jsonl"))
-	qid, _ := c.identOf("sonarr.jsonl")
-	pid, _ := c.identOf(".sonarr.jsonl." + testRunID + ".part")
-	c.partP["sonarr.jsonl"], c.partQ["sonarr.jsonl"] = pid, qid
-	if err := c.wroot.Link("sonarr.jsonl", ".sonarr.jsonl."+testRunID+".prev"); err != nil {
+	q := inode(t, filepath.Join(dir, "series.jsonl"))
+	qid, _ := c.identOf("series.jsonl")
+	pid, _ := c.identOf(".series.jsonl." + testRunID + ".part")
+	c.partP["series.jsonl"], c.partQ["series.jsonl"] = pid, qid
+	if err := c.wroot.Link("series.jsonl", ".series.jsonl."+testRunID+".prev"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.renameOne(".sonarr.jsonl."+testRunID+".part", "sonarr.jsonl"); err != nil {
+	if err := c.renameOne(".series.jsonl."+testRunID+".part", "series.jsonl"); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, ".foreign"), []byte("foreign bytes"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(filepath.Join(dir, ".foreign"), filepath.Join(dir, "sonarr.jsonl")); err != nil {
+	if err := os.Rename(filepath.Join(dir, ".foreign"), filepath.Join(dir, "series.jsonl")); err != nil {
 		t.Fatal(err)
 	}
 	c.rollback()
-	if b, _ := os.ReadFile(filepath.Join(dir, "sonarr.jsonl")); string(b) != "foreign bytes" {
+	if b, _ := os.ReadFile(filepath.Join(dir, "series.jsonl")); string(b) != "foreign bytes" {
 		t.Fatalf("the rollback overwrote the foreign replacement: %q", b)
 	}
-	if b, _ := os.ReadFile(filepath.Join(dir, ".sonarr.jsonl."+testRunID+".prev")); string(b) != "prior sonarr" || inode(t, filepath.Join(dir, ".sonarr.jsonl."+testRunID+".prev")) != q {
+	if b, _ := os.ReadFile(filepath.Join(dir, ".series.jsonl."+testRunID+".prev")); string(b) != "prior series" || inode(t, filepath.Join(dir, ".series.jsonl."+testRunID+".prev")) != q {
 		t.Fatalf("the prior backup was not kept byte-exact on its inode: %q", b)
 	}
-	if got := diag(c, errb); !strings.Contains(got, "dev-run: publish_rollback_conflict root=testdata/parser name=sonarr.jsonl\n") {
+	if got := diag(c, errb); !strings.Contains(got, "dev-run: publish_rollback_conflict root=testdata/parser name=series.jsonl\n") {
 		t.Fatalf("no conflict line in %q", got)
 	}
 }
 
 func TestPublishRefusesAnythingButARegularTarget(t *testing.T) {
 	c, dir := publishFixture(t)
-	c.staged = []string{"sonarr.jsonl"}
-	if err := os.WriteFile(filepath.Join(dir, ".sonarr.jsonl."+testRunID+".part"), []byte("new"), 0o644); err != nil {
+	c.staged = []string{"series.jsonl"}
+	if err := os.WriteFile(filepath.Join(dir, ".series.jsonl."+testRunID+".part"), []byte("new"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("/etc/passwd", filepath.Join(dir, "sonarr.jsonl")); err != nil {
+	if err := os.Symlink("/etc/passwd", filepath.Join(dir, "series.jsonl")); err != nil {
 		t.Fatal(err)
 	}
 	if reason := c.publishInRoot(); reason != "write_publish_failed" {
 		t.Fatalf("reason %q, want write_publish_failed for a symlink target", reason)
 	}
-	if got, err := os.Readlink(filepath.Join(dir, "sonarr.jsonl")); err != nil || got != "/etc/passwd" {
+	if got, err := os.Readlink(filepath.Join(dir, "series.jsonl")); err != nil || got != "/etc/passwd" {
 		t.Fatalf("the symlink target was changed: %q %v", got, err)
 	}
 }
@@ -1153,38 +1161,38 @@ func TestProcOKGroupsPredicate(t *testing.T) {
 
 func TestCheckMapFacts(t *testing.T) {
 	mount := "MOUNT tmpfs /src/testdata/parser tmpfs rw,nosuid,nodev,noexec,relatime,size=32768k,nr_inodes=8,mode=755,uid=65534,gid=65534 0 0\n"
-	files := "F sonarr.jsonl 11 65534 65534 666 1 f 0\nF radarr.jsonl 12 65534 65534 666 1 f 0\n"
+	files := "F series.jsonl 11 65534 65534 666 1 f 0\nF movie.jsonl 12 65534 65534 666 1 f 0\n"
 	anc := "A / 0 0 755\nA /src 0 0 1777\nA /src/testdata 0 0 755\n"
-	names := []string{"sonarr.jsonl", "radarr.jsonl"}
+	names := []string{"series.jsonl", "movie.jsonl"}
 	free, sizes, inodes, ok := checkMap(mount+files+"FREE 8192\n"+anc, true, writeMapTokens, capMap, names, nil)
-	if !ok || free != "8192" || len(sizes) != 2 || inodes["sonarr.jsonl"] != 11 || inodes["radarr.jsonl"] != 12 {
+	if !ok || free != "8192" || len(sizes) != 2 || inodes["series.jsonl"] != 11 || inodes["movie.jsonl"] != 12 {
 		t.Fatalf("a correct preflight was refused: %v %q %v %v", ok, free, sizes, inodes)
 	}
 	for name, text := range map[string]string{
-		"no size option":      strings.Replace(mount, "size=32768k,", "", 1) + files + "FREE 1\n" + anc,
-		"writable ancestor":   mount + files + "FREE 1\nA / 0 0 777\n",
-		"owned ancestor":      mount + files + "FREE 1\nA / 1000 0 755\n",
-		"missing file":        mount + "F sonarr.jsonl 11 65534 65534 666 1 f 0\nFREE 1\n" + anc,
-		"extra name":          mount + files + "F other 13 65534 65534 666 1 f 0\nFREE 1\n" + anc,
-		"two links":           mount + strings.Replace(files, "666 1 f", "666 2 f", 1) + "FREE 1\n" + anc,
-		"child owned":         mount + strings.Replace(files, "65534 65534 666", "1000 1000 666", 1) + "FREE 1\n" + anc,
-		"nonzero at preflight": mount + strings.Replace(files, "f 0\nF radarr", "f 5\nF radarr", 1) + "FREE 1\n" + anc,
-		"two mounts":          mount + mount + files + "FREE 1\n" + anc,
-		"no free blocks line": mount + files + anc,
+		"no size option":       strings.Replace(mount, "size=32768k,", "", 1) + files + "FREE 1\n" + anc,
+		"writable ancestor":    mount + files + "FREE 1\nA / 0 0 777\n",
+		"owned ancestor":       mount + files + "FREE 1\nA / 1000 0 755\n",
+		"missing file":         mount + "F series.jsonl 11 65534 65534 666 1 f 0\nFREE 1\n" + anc,
+		"extra name":           mount + files + "F other 13 65534 65534 666 1 f 0\nFREE 1\n" + anc,
+		"two links":            mount + strings.Replace(files, "666 1 f", "666 2 f", 1) + "FREE 1\n" + anc,
+		"child owned":          mount + strings.Replace(files, "65534 65534 666", "1000 1000 666", 1) + "FREE 1\n" + anc,
+		"nonzero at preflight": mount + strings.Replace(files, "f 0\nF movie", "f 5\nF movie", 1) + "FREE 1\n" + anc,
+		"two mounts":           mount + mount + files + "FREE 1\n" + anc,
+		"no free blocks line":  mount + files + anc,
 	} {
 		if _, _, _, ok := checkMap(text, true, writeMapTokens, capMap, names, nil); ok {
 			t.Errorf("%s: a wrong preflight was accepted", name)
 		}
 	}
-	audit := mount + "F sonarr.jsonl 11 65534 65534 666 1 f 100\nF radarr.jsonl 12 65534 65534 666 1 f 0\nFREE 0\n"
-	if free, sizes, _, ok := checkMap(audit, false, "", capMap, names, map[string]uint64{"sonarr.jsonl": 11, "radarr.jsonl": 12}); !ok || free != "0" || sizes["sonarr.jsonl"] != 100 {
+	audit := mount + "F series.jsonl 11 65534 65534 666 1 f 100\nF movie.jsonl 12 65534 65534 666 1 f 0\nFREE 0\n"
+	if free, sizes, _, ok := checkMap(audit, false, "", capMap, names, map[string]uint64{"series.jsonl": 11, "movie.jsonl": 12}); !ok || free != "0" || sizes["series.jsonl"] != 100 {
 		t.Fatalf("a correct audit was refused: %v %q %v", ok, free, sizes)
 	}
-	if _, _, _, ok := checkMap(audit, false, "", capMap, names, map[string]uint64{"sonarr.jsonl": 99, "radarr.jsonl": 12}); ok {
+	if _, _, _, ok := checkMap(audit, false, "", capMap, names, map[string]uint64{"series.jsonl": 99, "movie.jsonl": 12}); ok {
 		t.Error("a changed inode was accepted by the audit")
 	}
-	big := mount + "F sonarr.jsonl 11 65534 65534 666 1 f 20971520\nF radarr.jsonl 12 65534 65534 666 1 f 20971520\nFREE 0\n"
-	if _, _, _, ok := checkMap(big, false, "", capMap, names, map[string]uint64{"sonarr.jsonl": 11, "radarr.jsonl": 12}); ok {
+	big := mount + "F series.jsonl 11 65534 65534 666 1 f 20971520\nF movie.jsonl 12 65534 65534 666 1 f 20971520\nFREE 0\n"
+	if _, _, _, ok := checkMap(big, false, "", capMap, names, map[string]uint64{"series.jsonl": 11, "movie.jsonl": 12}); ok {
 		t.Error("sizes summing over the cap were accepted by the audit")
 	}
 }
@@ -1236,18 +1244,18 @@ func TestPublishNeverRemovesAPreExistingBackup(t *testing.T) {
 	for _, shape := range []string{"foreign", "target-link"} {
 		t.Run(shape, func(t *testing.T) {
 			c, dir := publishFixture(t)
-			c.staged = []string{"sonarr.jsonl"}
-			target := filepath.Join(dir, "sonarr.jsonl")
-			bak := filepath.Join(dir, ".sonarr.jsonl."+testRunID+".prev")
-			if err := os.WriteFile(target, []byte("prior sonarr"), 0o644); err != nil {
+			c.staged = []string{"series.jsonl"}
+			target := filepath.Join(dir, "series.jsonl")
+			bak := filepath.Join(dir, ".series.jsonl."+testRunID+".prev")
+			if err := os.WriteFile(target, []byte("prior series"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(dir, ".sonarr.jsonl."+testRunID+".part"), []byte("new sonarr"), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, ".series.jsonl."+testRunID+".part"), []byte("new series"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			wantBytes := "collision"
 			if shape == "target-link" {
-				wantBytes = "prior sonarr"
+				wantBytes = "prior series"
 				if err := os.Link(target, bak); err != nil {
 					t.Fatal(err)
 				}
@@ -1262,24 +1270,24 @@ func TestPublishNeverRemovesAPreExistingBackup(t *testing.T) {
 			if b, err := os.ReadFile(bak); err != nil || string(b) != wantBytes || inode(t, bak) != b0 {
 				t.Fatalf("the pre-existing backup is %q (%v) on inode %d, want %q on inode %d", b, err, inode(t, bak), wantBytes, b0)
 			}
-			if b, err := os.ReadFile(target); err != nil || string(b) != "prior sonarr" || inode(t, target) != t0 {
+			if b, err := os.ReadFile(target); err != nil || string(b) != "prior series" || inode(t, target) != t0 {
 				t.Fatalf("the target is %q (%v), want its prior bytes on inode %d", b, err, t0)
 			}
 		})
 	}
 	// the control: with no collision the run's own backup is made, published over and removed after the commit point
 	c, dir := publishFixture(t)
-	c.staged = []string{"sonarr.jsonl"}
-	if err := os.WriteFile(filepath.Join(dir, "sonarr.jsonl"), []byte("prior sonarr"), 0o644); err != nil {
+	c.staged = []string{"series.jsonl"}
+	if err := os.WriteFile(filepath.Join(dir, "series.jsonl"), []byte("prior series"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".sonarr.jsonl."+testRunID+".part"), []byte("new sonarr"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".series.jsonl."+testRunID+".part"), []byte("new series"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if reason := c.publishInRoot(); reason != "" {
 		t.Fatalf("reason %q without a collision, want success", reason)
 	}
-	if b, _ := os.ReadFile(filepath.Join(dir, "sonarr.jsonl")); string(b) != "new sonarr" || exists(filepath.Join(dir, ".sonarr.jsonl."+testRunID+".prev")) {
+	if b, _ := os.ReadFile(filepath.Join(dir, "series.jsonl")); string(b) != "new series" || exists(filepath.Join(dir, ".series.jsonl."+testRunID+".prev")) {
 		t.Fatalf("the published target is %q or the run's own backup survived the commit point", b)
 	}
 }
@@ -1288,7 +1296,7 @@ func TestPublishNeverRemovesAPreExistingBackup(t *testing.T) {
 // run's own backups are removed, nothing is published and no part remains.
 func TestPublishCancelledDuringBackupPreparationRestoresPriorState(t *testing.T) {
 	c, dir := publishFixture(t)
-	prior := map[string]string{"sonarr.jsonl": "prior sonarr", "radarr.jsonl": "prior radarr"}
+	prior := map[string]string{"series.jsonl": "prior series", "movie.jsonl": "prior movie"}
 	inodes := map[string]uint64{}
 	for n, body := range prior {
 		if err := os.WriteFile(filepath.Join(dir, n), []byte(body), 0o644); err != nil {
@@ -1320,9 +1328,9 @@ func TestPublishCancelledDuringBackupPreparationRestoresPriorState(t *testing.T)
 // latched at the backup checkpoint rolls back to the absent target and leaves the foreign file on its inode.
 func TestPublishCancelledWithAbsentTargetKeepsAForeignBackup(t *testing.T) {
 	c, dir := publishFixture(t)
-	c.staged = []string{"sonarr.jsonl"}
-	bak := filepath.Join(dir, ".sonarr.jsonl."+testRunID+".prev")
-	if err := os.WriteFile(filepath.Join(dir, ".sonarr.jsonl."+testRunID+".part"), []byte("new sonarr"), 0o644); err != nil {
+	c.staged = []string{"series.jsonl"}
+	bak := filepath.Join(dir, ".series.jsonl."+testRunID+".prev")
+	if err := os.WriteFile(filepath.Join(dir, ".series.jsonl."+testRunID+".part"), []byte("new series"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(bak, []byte("foreign backup"), 0o644); err != nil {
@@ -1333,13 +1341,13 @@ func TestPublishCancelledWithAbsentTargetKeepsAForeignBackup(t *testing.T) {
 	if reason := c.publishInRoot(); reason != reasonCancelled {
 		t.Fatalf("reason %q, want %q", reason, reasonCancelled)
 	}
-	if _, err := os.Lstat(filepath.Join(dir, "sonarr.jsonl")); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := os.Lstat(filepath.Join(dir, "series.jsonl")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("the absent target was not preserved: %v", err)
 	}
 	if b, err := os.ReadFile(bak); err != nil || string(b) != "foreign backup" || inode(t, bak) != b0 {
 		t.Fatalf("the foreign backup is %q (%v) on inode %d, want its bytes on inode %d", b, err, inode(t, bak), b0)
 	}
-	if exists(filepath.Join(dir, ".sonarr.jsonl."+testRunID+".part")) {
+	if exists(filepath.Join(dir, ".series.jsonl."+testRunID+".part")) {
 		t.Fatal("the run's own part was left behind")
 	}
 }
@@ -1354,27 +1362,27 @@ func TestPublishRollbackNeverConsumesAReplacedBackup(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			c, dir := publishFixture(t)
-			c.staged = []string{"sonarr.jsonl"}
-			target := filepath.Join(dir, "sonarr.jsonl")
-			bak := filepath.Join(dir, ".sonarr.jsonl."+testRunID+".prev")
-			if err := os.WriteFile(target, []byte("prior sonarr"), 0o644); err != nil {
+			c.staged = []string{"series.jsonl"}
+			target := filepath.Join(dir, "series.jsonl")
+			bak := filepath.Join(dir, ".series.jsonl."+testRunID+".prev")
+			if err := os.WriteFile(target, []byte("prior series"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(dir, ".sonarr.jsonl."+testRunID+".part"), []byte("new sonarr"), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, ".series.jsonl."+testRunID+".part"), []byte("new series"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			errb := &syncBuf{}
 			c.diag = newDiagSink(errb)
 			t0 := inode(t, target)
 			// the acquisition publishInRoot makes: the no-overwrite link to the identity just observed
-			qid, _ := c.identOf("sonarr.jsonl")
-			pid, _ := c.identOf(".sonarr.jsonl." + testRunID + ".part")
-			if err := c.wroot.Link("sonarr.jsonl", ".sonarr.jsonl."+testRunID+".prev"); err != nil {
+			qid, _ := c.identOf("series.jsonl")
+			pid, _ := c.identOf(".series.jsonl." + testRunID + ".part")
+			if err := c.wroot.Link("series.jsonl", ".series.jsonl."+testRunID+".prev"); err != nil {
 				t.Fatal(err)
 			}
-			c.partP["sonarr.jsonl"], c.partQ["sonarr.jsonl"] = pid, qid
+			c.partP["series.jsonl"], c.partQ["series.jsonl"] = pid, qid
 			if renamed {
-				if err := c.renameOne(".sonarr.jsonl."+testRunID+".part", "sonarr.jsonl"); err != nil {
+				if err := c.renameOne(".series.jsonl."+testRunID+".part", "series.jsonl"); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -1389,15 +1397,15 @@ func TestPublishRollbackNeverConsumesAReplacedBackup(t *testing.T) {
 			if b, err := os.ReadFile(bak); err != nil || string(b) != "foreign backup" || inode(t, bak) != b0 {
 				t.Fatalf("the replaced backup is %q (%v) on inode %d, want its bytes on inode %d", b, err, inode(t, bak), b0)
 			}
-			want, wantIno := "prior sonarr", t0
+			want, wantIno := "prior series", t0
 			if renamed {
-				want, wantIno = "new sonarr", g0
+				want, wantIno = "new series", g0
 			}
 			if b, err := os.ReadFile(target); err != nil || string(b) != want || inode(t, target) != wantIno {
 				t.Fatalf("the target is %q (%v), want %q on inode %d", b, err, want, wantIno)
 			}
 			if renamed {
-				if got := diag(c, errb); !strings.Contains(got, "dev-run: publish_rollback_conflict root=testdata/parser name=sonarr.jsonl\n") {
+				if got := diag(c, errb); !strings.Contains(got, "dev-run: publish_rollback_conflict root=testdata/parser name=series.jsonl\n") {
 					t.Fatalf("no conflict line in %q", got)
 				}
 			}

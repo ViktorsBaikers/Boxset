@@ -616,6 +616,43 @@ enum_deps() {
 }
 enum_deps "$PKG" >"$T/deps" 2>"$T/deps.err" || block bun "cannot enumerate web/package.json dependencies: $(head -c 300 "$T/deps.err")"
 
+# --- go.mod: only module, go and require directives are admitted ---------------------------
+# $T/gomod.req lists path<TAB>version of every require (single-line or block, direct or
+# indirect); any other directive stays unlisted.
+TARGET_LIST='linux/amd64 linux/arm64 linux/arm windows/amd64 windows/arm64 darwin/amd64 freebsd/amd64 freebsd/arm64'
+GOROWS=0
+: >"$T/gomod.req"
+_inreq=0
+while IFS= read -r _l || [ -n "$_l" ]; do
+	_l=${_l%%//*}
+	set -- $_l
+	[ $# -gt 0 ] || continue
+	if [ "$_inreq" = 1 ]; then
+		if [ $# = 1 ] && [ "$1" = ")" ]; then
+			_inreq=0
+		elif [ $# = 2 ]; then
+			printf '%s\t%s\n' "$1" "$2" >>"$T/gomod.req"
+		else
+			unlisted go.mod "requirement line '$_l'"
+		fi
+		continue
+	fi
+	case $1 in
+	module | go) [ $# = 2 ] || unlisted go.mod "$1 directive" ;;
+	require)
+		if [ $# = 2 ] && [ "$2" = "(" ]; then
+			_inreq=1
+		elif [ $# = 3 ]; then
+			printf '%s\t%s\n' "$2" "$3" >>"$T/gomod.req"
+		else
+			unlisted go.mod "require line '$_l'"
+		fi
+		;;
+	*) unlisted go.mod "directive $1" ;;
+	esac
+done <"$GOMOD"
+[ "$_inreq" = 0 ] || unlisted go.mod "unterminated require block"
+
 # --- inventory rows ---------------------------------------------------------------------
 # Row cells: ID | kind | category | name | version | pin | source | publisher | licence | maintenance | targets | bun
 while IFS='|' read -r _ id kind category name version pin source publisher licence maint targets bun _; do
@@ -798,6 +835,60 @@ while IFS='|' read -r _ id kind category name version pin source publisher licen
 				block "$id" "installed node_modules/$name is not $version"
 		fi
 		;;
+	go)
+		# Go module row: name is the module path, version an exact release, pin its go.sum h1: hash.
+		GOROWS=$((GOROWS + 1))
+		printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || block "$id" "go version $version is not an exact vMAJOR.MINOR.PATCH release"
+		printf '%s' "$pin" | grep -Eq '^h1:[A-Za-z0-9+/]{43}=$' || block "$id" "pin is not a go.sum h1: hash"
+		printf '%s\t%s\n' "$name" "$version" | grep -Fxqf - "$T/gomod.req" 2>/dev/null || block "$id" "go.mod does not require $name $version exactly"
+		# source: go-proxy https://proxy.golang.org origin=<https URL> commit=<40 hex> ref=refs/tags/<version>
+		set -- $source
+		s3=${3:-}
+		s4=${4:-}
+		s5=${5:-}
+		src_origin=${s3#origin=}
+		src_commit=${s4#commit=}
+		{ [ $# = 5 ] && [ "${1:-}" = go-proxy ] && [ "${2:-}" = https://proxy.golang.org ] && [ "$s3" != "$src_origin" ] && [ "$s4" != "$src_commit" ] &&
+			[ "$s5" = "ref=refs/tags/$version" ] && case $src_origin in https://?*) true ;; *) false ;; esac &&
+			printf '%s' "$src_commit" | grep -Eq '^[0-9a-f]{40}$'; } ||
+			block "$id" "source_mismatch: source cell '$source' is not go-proxy https://proxy.golang.org origin=<https URL> commit=<40 hex> ref=refs/tags/$version"
+		# licence: <SPDX name> license-sha256=<64 hex> of the module root LICENSE
+		want_lic=
+		for tok in $licence; do
+			case $tok in license-sha256=*) want_lic=${tok#license-sha256=} ;; esac
+		done
+		set -- $licence
+		{ [ -n "${1:-}" ] && printf '%s' "$want_lic" | grep -Eq '^[0-9a-f]{64}$'; } ||
+			block "$id" "licence_mismatch: licence cell lacks an SPDX name or license-sha256=<64 lowercase hex>"
+		case $targets in "pure Go"*) ;; *) block "$id" "targets must state pure Go for every compile target" ;; esac
+		for t in $TARGET_LIST; do
+			case " $targets " in *" $t "*) ;; *) block "$id" "targets lack $t" ;; esac
+		done
+		[ "$bun" = n/a ] || block "$id" "go rows carry bun n/a, not '$bun'"
+		if [ "$ROOT" = /src ]; then
+			# Real-root phase, never fetching (the runner's GOFLAGS=-mod=readonly GOPROXY=off GOMODCACHE).
+			grep -Fxq "$name $version $pin" "$ROOT/go.sum" 2>/dev/null || block "$id" "go.sum lacks '$name $version $pin'"
+			grep -Fq "$name $version/go.mod h1:" "$ROOT/go.sum" 2>/dev/null || block "$id" "go.sum lacks the $name $version/go.mod hash"
+			gmc=$(go env GOMODCACHE 2>/dev/null)
+			gl=$(cd "$ROOT" && go list -m -f '{{.Version}} {{.Dir}}' "$name" 2>&1) || gl=
+			gl_v=${gl%% *}
+			gl_d=${gl#* }
+			if { [ "$gl_v" = "$version" ] && [ -n "$gmc" ] && case $gl_d in "$gmc"/?*) true ;; *) false ;; esac; }; then
+				got_lic=
+				if [ -f "$gl_d/LICENSE" ]; then
+					set -- $(sha256sum "$gl_d/LICENSE")
+					got_lic=$1
+				fi
+				[ "$got_lic" = "$want_lic" ] || block "$id" "licence_mismatch: license-sha256=$want_lic, module LICENSE is ${got_lic:-missing}"
+				esc=$(printf '%s' "$name" | sed 's/[A-Z]/!&/g' | tr 'A-Z' 'a-z')
+				got_info=$(S5_INFO=$gmc/cache/download/$esc/@v/$version.info bun -e 'const i=JSON.parse(require("fs").readFileSync(process.env.S5_INFO,"utf8"));const o=i.Origin||{};console.log([i.Version||"",o.URL||"",o.Hash||"",o.Ref||""].join("\t"))' 2>/dev/null)
+				want_info=$(printf '%s\t%s\t%s\t%s' "$version" "$src_origin" "$src_commit" "refs/tags/$version")
+				[ "$got_info" = "$want_info" ] || block "$id" "source_mismatch: module cache .info says '$got_info', source cell says '$want_info'"
+			else
+				block "$id" "go list -m resolved '$gl' for $name, want $version under ${gmc:-GOMODCACHE}"
+			fi
+		fi
+		;;
 	*) block "$id" "unknown kind $kind" ;;
 	esac
 
@@ -928,7 +1019,25 @@ while IFS= read -r line; do
 		;;
 	esac
 done <"$T/froms"
-if grep -Eq '^(require|replace|toolchain)|^[[:space:]]' "$GOMOD"; then unlisted go.mod "dependency or toolchain line"; fi
+# Every go.mod require has exactly one go row; at the real root go.sum holds only the rows'
+# module lines and `go mod verify` proves the cached bytes against it.
+while IFS="$(printf '\t')" read -r pkg ver; do
+	[ -n "$pkg" ] || continue
+	grep -Fq "| go | go-dependency | $pkg | $ver |" "$T/rows" || unlisted go "$pkg@$ver"
+done <"$T/gomod.req"
+if [ "$ROOT" = /src ]; then
+	while read -r gp gv gh _; do
+		[ -n "$gp" ] || continue
+		case $gv in
+		*/go.mod) { grep -Fq "| go | go-dependency | $gp | ${gv%/go.mod} |" "$T/rows" && printf '%s' "$gh" | grep -Eq '^h1:[A-Za-z0-9+/]{43}=$'; } || unlisted go.sum "$gp $gv" ;;
+		*) grep -Fq "| go | go-dependency | $gp | $gv | $gh |" "$T/rows" || unlisted go.sum "$gp $gv" ;;
+		esac
+	done <"$ROOT/go.sum"
+	if [ "$GOROWS" -gt 0 ]; then
+		gvout=$(cd "$ROOT" && go mod verify 2>&1)
+		[ "$gvout" = "all modules verified" ] || block go.mod "go mod verify said '$gvout'"
+	fi
+fi
 GODIR=$(grep '^go ' "$GOMOD") && GODIR=${GODIR#go }
 [ -n "${GODIR:-}" ] || block go.mod "no go directive"
 if grep -Eq 'npm i|npm ci|yarn |pnpm |npx |nodejs|apt-get install[^&]*nodejs' "$DOCKERFILE"; then
@@ -948,7 +1057,7 @@ cmt() {
 	CMT_TEXT=$_row
 }
 if cmt CMT-TARGETS; then
-	for t in linux/amd64 linux/arm64 linux/arm windows/amd64 windows/arm64 darwin/amd64 freebsd/amd64 freebsd/arm64; do
+	for t in $TARGET_LIST; do
 		case " $CMT_TEXT " in *" $t "*) ;; *) block CMT-TARGETS "target $t missing" ;; esac
 		go tool dist list | grep -Fxq "$t" || block CMT-TARGETS "Go toolchain does not list $t"
 	done
