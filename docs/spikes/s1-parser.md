@@ -1,18 +1,19 @@
-# S1 parser spike: attributed quality corpora and the native quality parser
+# S1 parser spike: attributed corpora, the native quality parser and the movie title parser
 
-Status: quality parsing for the series and movie sides and custom-format compilation, evaluation and batch evaluation are
-implemented. Quality parsing is checked against the complete extracted source test corpora. Title parsing and the production
-latency benchmark are later work and are not present in `internal/parse` yet. Nothing here is a performance claim and no ARM
-latency claim is made.
+Status: quality parsing for the series and movie sides, movie title parsing (`ParseTitle` with `KindMovie`, with the language and
+release group parsing it runs) and custom-format compilation, evaluation and batch evaluation are implemented. Quality and movie
+title parsing are checked against the complete extracted source test corpora. Series title parsing and the production latency
+benchmark are later work and are not present in `internal/parse` yet (`ParseTitle` with `KindSeries` is an explicit
+`kind_unsupported` error). Nothing here is a performance claim and no ARM latency claim is made.
 
 ## What exists
 
 | Part | Path | Role |
 | --- | --- | --- |
-| Native parser | `internal/parse/parser.go`, `limits.go`, `regex.go`, `vocab.go`, `quality_series.go`, `quality_movie.go` | `NewParser`, `ParseQuality`, bounded regexp2 matching, explicit code maps, the two ported quality parsers |
+| Native parser | `internal/parse/parser.go`, `limits.go`, `regex.go`, `vocab.go`, `quality_series.go`, `quality_movie.go`, `title.go`, `title_movie.go`, `language_movie.go`, `releasegroup_movie.go` | `NewParser`, `ParseQuality`, `ParseTitle`, bounded regexp2 matching, explicit code maps, the two ported quality parsers and the ported movie title, language and release group parsers |
 | Format evaluator | `internal/parse/formats.go` | `CompileFormats`, `Evaluate`, `EvaluateBatch`, typed `FormatResult`/`ReleaseResult`; the compiled payload never leaves the `Parser` |
 | Corpus contract | `internal/parse/corpus/corpus.go` | Header/Case/Value schema, bounded JSONL `Read`/`Marshal`, count reconciliation, dispositions, `TimeContext.Materialize` |
-| Extractor | `internal/parse/corpus/extract/main.go` | Reads the reference C# test text (never executes it) and writes the two corpora |
+| Extractor | `internal/parse/corpus/extract/main.go` | Reads the reference C# test text (never executes it) and writes the two corpora: quality cases on both sides, title cases on the movie side |
 | Corpora | `testdata/parser/series.jsonl`, `movie.jsonl`, `dispositions.json` | Attributed, counted, committed inputs and the (currently empty) owner dispositions |
 | Emulation | `scripts/parse-emulated.sh` | Cross-compiled tests under `qemu-aarch64` and `qemu-arm` |
 | Runner | `scripts/dev-run.sh --ref`, `--write testdata/parser` | Pinned Git-object reference text delivered by copy into the created container; fixed corpus write table with a raw-to-sanitized identity check |
@@ -31,9 +32,14 @@ if err != nil { /* *parse.ReasonError: a built-in pattern failed to compile */ }
 q, err := p.ParseQuality(ctx, "Movie.Title.2016.REMUX.1080p.BluRay.AVC.DTS-HD.MA.5.1-iFT", parse.KindMovie)
 // q.Code == "remux-1080p", q.Source == "bluray", q.Modifier == "remux", q.Resolution == 1080,
 // q.SourceDetection == "name", q.Revision == parse.Revision{Version: 1}
+
+n, err := p.ParseTitle(ctx, "Movie.Name.2015.German.DL.1080p.BluRay.x264-GRP", parse.KindMovie)
+// n.Kind == parse.KindMovie; n.Movie.MovieTitles == []string{"Movie Name"}, n.Movie.Year == 2015,
+// n.Movie.ReleaseGroup == "GRP", n.Movie.Languages == []string{"german", "original"}, n.Movie.Quality.Code == "bluray-1080p"
 ```
 
-`KindMovie` runs the movie port and `KindSeries` the series port. A `*Parser` is immutable and safe for concurrent use.
+`KindMovie` runs the movie port and `KindSeries` the series port of `ParseQuality`; `ParseTitle` has only the movie branch. A
+`*Parser` is immutable and safe for concurrent use.
 
 ### Limits and errors
 
@@ -43,12 +49,12 @@ Validation runs before any pattern is matched; a rejected input never reaches th
 | --- | --- | --- |
 | name longer than 4096 UTF-8 bytes (4096 admitted) | `release_name_too_long` | `limit_bytes`, `observed_bytes` |
 | name is not valid UTF-8 | `release_name_invalid_utf8` | `offset` |
-| kind is neither `KindMovie` nor `KindSeries` | `kind_unsupported` | `kind` |
+| kind is neither `KindMovie` nor `KindSeries` (`ParseQuality`), or is not `KindMovie` (`ParseTitle`; the series title parser lands later) | `kind_unsupported` | `kind` |
 | one 250 ms elapsed-work budget exhausted (also after a late successful match, and for a blank or unmatched name: the budget and context are checked once more before any usable value is returned) | `release_work_budget_exhausted` | `limit_ms` |
 | regexp2 match timeout (fixed 50 ms) | `match_timeout` | `limit_ms` |
 | regexp2 backtracking stack limit (library default) | `regex_stack_limit` | none |
 | context cancelled / deadline exceeded | `evaluation_cancelled` / `decision_deadline_exceeded` | none |
-| a version digit the source's `Convert.ToInt32` would throw on | `title_unrecognized` | none |
+| a version digit the source's `Convert.ToInt32` would throw on; a title the source's `ParseMovieTitle` returns null for | `title_unrecognized` | none |
 | a built-in pattern fails to compile (constructor) | `regex_compile_failed` | `pattern_index` |
 
 ```go
@@ -73,6 +79,41 @@ Faithful-adapter decisions: `Trim`/whitespace follow `char.IsWhiteSpace`; `Path.
 follow Linux (only NUL is invalid, only `/` separates); `ContainsIgnoreCase` is used only with ASCII needles; extension
 lookups compare with per-rune upper-casing (ordinal ignore case). regexp2 runs on runes where .NET runs on UTF-16 units; they
 agree on the Basic Multilingual Plane.
+
+## Movie titles
+
+`ParseTitle(ctx, name, parse.KindMovie)` ports the movie reference's `ParseMovieTitle` (`parser/Parser.cs`, with
+`parser/ReleaseGroupParser.cs`, `parser/LanguageParser.cs` `ParseLanguages` and the `parser/ParserCommon.cs` cleanup patterns) at
+commit `df2faa64c75e6081556d11232dc46523e7264ea1`. Semantic pattern order and pattern text follow the source; the tables compile
+once with the `Parser`. It returns `ParsedTitle{Kind, Movie *MovieInfo}`; `MovieInfo` carries `MovieTitles`, `Languages`
+(Boxset codes from the explicit member table in `vocab.go`, for example `portuguese-br`), `OriginalTitle`, `ReleaseTitle`,
+`SimpleReleaseTitle`, `ReleaseGroup`, `ReleaseHash`, `Edition`, `ImdbID`, `HardcodedSubs`, `Quality`, `Year` and `TmdbID`. The
+primary title is `MovieTitles[0]`; an absent source value is the empty string or 0.
+
+Fail closed, one budget. The name is validated and the kind checked before any matching. One 250 ms budget, created by
+`ParseTitle`, covers the title patterns and every subparser it runs (the quality, language, release group, hardcoded-subs,
+edition and ID parsing): none starts a budget of its own, and the budget and context are checked before and after every match,
+the replacement helpers included, and once more before a result is returned. `TestBudgetMovieTitleIsSharedByEverySubparser` sweeps
+every clock read of `ParseTitle` from 2 to its last: for each k a clock with a one-read blip returns a time past the budget at read k
+only, and the parse must stop with the budget reason, no value and exactly k reads (no work after the exhaustion). A stage that
+started a budget of its own reads the clock to create it; at that read the blip puts the new deadline a whole budget later, so the
+parse finishes instead of failing and the test catches it.
+`TestHostileMovieTitleMatchInAnySubparserFailsClosed` injects a catastrophic pattern into each of the title, quality, language
+and release group tables in turn and gets `match_timeout` with no value; a 4096-byte legitimate name parses (`TestMovieBounds...`) and
+4097 bytes, invalid UTF-8, an unsupported kind, a hashed release and a cancelled or expired context are structured errors with the
+zero value. The source's own generated-name tests (an MD5 chain, random 32- and 40-character hashes) are reproduced against
+`ParseTitle` (`TestHostileMovieTitleRejectsGeneratedHashNames`) because the corpus cannot record generated inputs. The source asserts
+no `ReleaseHash`, `ReleaseTitle` or `SimpleReleaseTitle`, so `TestMovieCorpusPublicParseTitleReleaseFields` fixes them by hand
+through the public `ParseTitle` (an anime hash, a `1280x720` name that has no hash, a non-ASCII title index), and the language
+member table is checked against an independent literal table in `TestLanguageVocabularyMatchesIndependentMemberTable`.
+
+Measured limit (one dev-image run): a 4096-byte name whose bulk is a trailing dotted word parsed in about 18 ms. A name whose
+title, or whose German tag, is thousands of characters long exceeds the 50 ms match timeout in the source's unanchored
+bracketed-alternative pattern (about 290 ms for 4000 characters when it runs without a timeout) or its German-remux quality
+pattern (about 700 ms) and fails closed with `match_timeout`; the source has no timeout and would return a result.
+
+Faithful-adapter decisions are listed in `docs/parity-matrix.md` (null results, the `isDir` directory form, the reversed-title
+marker, the file extension helper, UTF-16 indexes, language members).
 
 ## Custom formats: compile, evaluate, batch
 
@@ -156,8 +197,12 @@ scripts/dev-run.sh -- go test ./internal/parse -run '^TestTimeoutOvershootReport
 Each corpus is JSONL: a `Header` (schema 1, app `series` or `movie`, source locator `env:BOXSET_REF_SERIES` or `env:BOXSET_REF_MOVIE`, commit, source paths, licence `GPL-3.0`, counts), then one `Case`
 per source test case with its file, method, entry (`TestCase#n`, `TestCaseSource:name#n`, `Test`), source line, upstream
 status, scope, arguments exactly as written and the asserted result properties. `expected["$input"]` holds the release names
-passed to `QualityParser.ParseQuality` (a `string` or a symbolic relative date); every other key is the asserted C# property
-path (for example `Quality`, `Quality.Resolution`, `Revision.Version`). Values are tagged `string|bool|int|decimal|enum|array|
+passed to the scoped entry point (`QualityParser.ParseQuality` for scope `quality`; `Parser.ParseMovieTitle`,
+`ReleaseGroupParser.ParseReleaseGroup` or `LanguageParser.ParseLanguages` for scope `title`; a `string` or a symbolic relative
+date); every other key is the asserted C# property path (for example `Quality`, `Quality.Resolution`, `Revision.Version`,
+`PrimaryMovieTitle`, `MovieTitles[1]`, `Languages.Count`, `Languages.First()`). Title cases add three reserved or derived keys:
+`$result` (an assertion on the entry point's own result, `null` for a rejected name), `<list>.Contain` (a membership assertion, the
+ordered array of expected members) and `$isDir` (the `isDir` argument of `ParseMovieTitle`, present only when true). Values are tagged `string|bool|int|decimal|enum|array|
 null|date`; an unknown tag, field or form rejects the file. Source paths, count keys and each case's `file` use the form `<area>/<file>`
 (`tests/`, `parser/`, `qualities/`, relative to `/ref/<side>`). One shared validator, used by both `Read` and `Marshal`, enforces
 the app's own locator, the licence exactly `GPL-3.0`, canonical paths in the header, the count keys and every case, every
@@ -169,14 +214,26 @@ bytes carry no upstream project name. Caps: 32 MiB per file, 256 KiB per record,
 streaming; oversize, partial (unterminated record or non-reconciling counts) or malformed input yields no usable case.
 
 Counts reconcile per file: `cases = enabled + disabled + out_of_scope`, plus the extractor's raw tallies under `source:` (test
-methods, `TestCase` attributes, `TestCaseSource` rows, setup methods, commented-out test forms). A commented-out test is counted,
-not extracted. Duplicate rows are kept and get distinct identities
+methods, `TestCase` attributes, `TestCaseSource` rows, plain `[Test]` methods when a file has any, setup methods, commented-out
+test forms). A commented-out test is counted, not extracted. Duplicate rows are kept and get distinct identities
 (`<app>:<file>:<method>:<input hash>:<ordinal>`); relative dates stay symbolic in identities and bytes and are materialized by
 `corpus.TimeContext` with local-calendar `AddDays` (never a 24-hour duration).
 
-An unsupported source form (loops other than `foreach` over an array, unknown class or method attributes, unsupported assertions,
-interpolated strings, properties, a lone UTF-16 surrogate, …) fails extraction with `extract: unsupported app=… file=… line=… col=…
-reason=…`; it is never skipped or relabelled.
+Title scope (movie side). The extractor reads seven title fixtures (`ParserFixture`, `EditionParserFixture`,
+`LanguageParserFixture`, `CrapParserFixture`, `HashedReleaseFixture`, `ReleaseGroupParserFixture`, `UrlFixture`) and classifies
+each test method by the identifiers of its body: a method that asserts one of the three title entry points becomes scope
+`title`; every other method is retained as scope `out_of_scope` under its own entry point with its arguments, an empty `$input`
+and no assertion, and its body is never interpreted (`docs/parity-matrix.md` lists the owners and reasons). A method that names
+no known entry point rejects the extraction. The assertion forms are `Should().Be`, `Contain` and `BeNull`, `for` loops bounded
+by an already asserted count, indexers, `First()`, `.Id` on a language member, `using (new AssertionScope())` and `new[] {…}`
+arrays. The `Language` declaration is outside the delivered areas (`languages/` is study-only), so the members an assertion may
+name are those `parser/LanguageParser.cs` itself names; the ported sources (`Parser.cs`, `ReleaseGroupParser.cs`,
+`ParserCommon.cs`, `RegexReplace.cs`, `Model/ParsedMovieInfo.cs`) are recorded as attributed source paths with their hashes and
+are never interpreted. The series side extracts no title case until its title port lands, so `series.jsonl` is unchanged.
+
+An unsupported source form (loops other than `foreach` and a counted `for`, other `using` statements, unknown class or method
+attributes, unsupported assertions, interpolated strings, properties, a lone UTF-16 surrogate, …) fails extraction with
+`extract: unsupported app=… file=… line=… col=… reason=…`; it is never skipped or relabelled, and no partial output is published.
 
 ### Regenerate and verify
 
@@ -186,8 +243,8 @@ repository location is written into the repository.
 
 ```sh
 scripts/dev-run.sh --ref --write testdata/parser -- sh -c 'exec go run ./internal/parse/corpus/extract -series /ref/series -movie /ref/movie -series-commit "$BOXSET_REF_SERIES_COMMIT" -movie-commit "$BOXSET_REF_MOVIE_COMMIT" -out testdata/parser'
-scripts/dev-run.sh -- go test ./internal/parse/corpus/... ./internal/parse -run '^(TestCorpus|TestExtract|TestQualityCorpus|TestQualityBounds)' -count=1 -v
-scripts/dev-run.sh -- scripts/parse-emulated.sh '^TestQualityCorpus$'   # arm64 and arm/v7 under QEMU user mode
+scripts/dev-run.sh -- go test ./internal/parse/corpus/... ./internal/parse -run '^(TestCorpus|TestExtract|TestQualityCorpus|TestQualityBounds|TestMovie|TestTitle)' -count=1 -v
+scripts/dev-run.sh -- scripts/parse-emulated.sh '^(TestQualityCorpus|TestMovieCorpus)$'   # arm64 and arm/v7 under QEMU user mode
 ```
 
 `--ref` reads reference text only as Git objects at the runner's pinned commits (`REFPINS` in `scripts/dev-run.sh`: series
@@ -236,7 +293,10 @@ the 18 MiB readback bound, corpus export
 identity). NOT-RUN here: extraction from the real reference repositories, which needs the two owner locations and is owned by the
 root verification; until it runs, the
 committed corpora are the retained extraction (their per-file hashes are recorded in the feature evidence), and no source
-success is claimed. A Go consumer run counts for the same immutable runtime payload as an admission run only by the payload
+success is claimed. The title section of `movie.jsonl` was produced by running this extractor over a Git-object extraction of
+the movie reference's `parser/`, `tests/` and `qualities/` areas at the pinned commit (the same three areas `--ref` delivers, in
+a scratch container with no network and no mount of any checkout), not by `--ref`; the quality records are byte-identical to
+the earlier extraction, repeated extraction is byte-identical, and `series.jsonl` was not regenerated. A Go consumer run counts for the same immutable runtime payload as an admission run only by the payload
 comparison in `docs/spikes/s5-version-admission.md` (ordered layers, `Config` SHA-256, platform, `inputs=<sha>`), never by the image ID.
 
 `TestCorpusFull` pins the exact per-file inventories and source commits; changing a reference commit means re-extracting and

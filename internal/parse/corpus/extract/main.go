@@ -1,11 +1,14 @@
-// Command extract reads the series and movie quality-parser test sources as
-// text and writes the two attributed canonical corpora. The C# is never
-// compiled or executed: a small lexer, a statement/expression parser for the
-// NUnit subset these tests use and a symbolic interpreter that records the
-// assertions made on the scoped entry point (QualityParser.ParseQuality)
-// lower every source test case into corpus records. A source form the
-// extractor does not understand is rejected with its source location, never
-// skipped.
+// Command extract reads the series and movie parser test sources as text and
+// writes the two attributed canonical corpora. The C# is never compiled or
+// executed: a small lexer, a statement/expression parser for the NUnit subset
+// these tests use and a symbolic interpreter that records the assertions made
+// on the scoped entry points lower every source test case into corpus records:
+// QualityParser.ParseQuality (scope quality) and, on the movie side, the title
+// entry points Parser.ParseMovieTitle, ReleaseGroupParser.ParseReleaseGroup and
+// LanguageParser.ParseLanguages (scope title). A test method of a title fixture
+// that asserts no title entry point is retained out of scope with its source
+// arguments. A source form the extractor does not understand is rejected with
+// its source location, never skipped.
 //
 // Usage:
 //
@@ -41,9 +44,26 @@ import (
 const (
 	extractorVersion = "1"
 	maxSourceBytes   = 2 << 20
-	scopeOwner       = "QualityParser.ParseQuality"
+	qualityOwner     = "QualityParser.ParseQuality"
 	license          = "GPL-3.0"
 	maxHelperDepth   = 8
+)
+
+// Reserved Expected keys beside the corpus's input key: the assertion made on
+// the result of a title entry point itself, and the isDir argument of
+// ParseMovieTitle (recorded only when true).
+const (
+	resultKey      = "$result"
+	dirKey         = "$isDir"
+	movieTitleCall = "ParseMovieTitle"
+	movieTitleOwn  = "Parser.ParseMovieTitle"
+	cleanTitleOwn  = "Parser.CleanMovieTitle"
+
+	// cleanTitleKey is the property path of the parsed primary title after the
+	// source's CleanMovieTitle normalization. Its recorded value is the expected
+	// title before normalization: the assertion is that both sides normalize alike.
+	cleanTitleKey = "MovieTitle.CleanMovieTitle"
+	cleanTag      = "clean"
 )
 
 // Interpreter work limits per side, checked before the step or the growth each
@@ -64,12 +84,20 @@ type work struct {
 // appSpec names the source files one side contributes. Paths are relative to
 // the side's neutral root (/ref/<side>, whose tests/, parser/ and qualities/
 // areas the runner maps to the reference checkout) and double as the corpus
-// SourcePaths.
+// SourcePaths. tests are the quality fixtures. titles are the fixtures whose
+// methods assert the title entry points (a method that asserts none is retained
+// out of scope); languages is the parser source whose Language members the
+// title assertions may name (the Language declaration itself is outside the
+// delivered areas); provenance are ported sources recorded for attribution
+// only and never interpreted.
 type appSpec struct {
 	name       string
 	repository string
 	tests      []string
 	models     []string
+	titles     []string
+	languages  string
+	provenance []string
 }
 
 func appSpecs() [2]appSpec {
@@ -100,6 +128,16 @@ func appSpecs() [2]appSpec {
 				"qualities/QualitySource.cs",
 				"qualities/Modifier.cs",
 				"qualities/QualityDetectionSource.cs",
+			},
+			titles: []string{
+				test("ParserFixture.cs"), test("EditionParserFixture.cs"), test("LanguageParserFixture.cs"),
+				test("CrapParserFixture.cs"), test("HashedReleaseFixture.cs"), test("ReleaseGroupParserFixture.cs"),
+				test("UrlFixture.cs"),
+			},
+			languages: "parser/LanguageParser.cs",
+			provenance: []string{
+				"parser/Parser.cs", "parser/ReleaseGroupParser.cs", "parser/ParserCommon.cs", "parser/RegexReplace.cs",
+				"parser/Model/ParsedMovieInfo.cs",
 			},
 		},
 	}
@@ -273,36 +311,75 @@ func extractApp(spec appSpec, dir, commit string) (*corpus.Corpus, []sourceInfo,
 	if len(m.enums["Quality"]) == 0 {
 		return nil, nil, &srcError{spec.models[0], 1, 1, "no Quality members found in the model sources"}
 	}
+	if spec.languages != "" {
+		src, info, err := readSource(root, spec.languages)
+		if err != nil {
+			return nil, nil, err
+		}
+		lx, err := lex(spec.languages, src)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := m.scanLanguages(spec.languages, lx.toks); err != nil {
+			return nil, nil, err
+		}
+		infos = append(infos, info)
+	}
+	type fixture struct {
+		rel   string
+		title bool
+	}
+	var fixtures []fixture
+	for _, rel := range spec.tests {
+		fixtures = append(fixtures, fixture{rel, false})
+	}
+	for _, rel := range spec.titles {
+		fixtures = append(fixtures, fixture{rel, true})
+	}
 	var cases []corpus.Case
 	counts := map[string]int{}
-	for _, rel := range spec.tests {
-		src, info, err := readSource(root, rel)
+	for _, f := range fixtures {
+		src, info, err := readSource(root, f.rel)
 		if err != nil {
 			return nil, nil, err
 		}
 		infos = append(infos, info)
-		fc, st, err := fileCases(spec.name, rel, src, m, w)
+		fc, st, err := fileCases(spec.name, f.rel, src, m, w, f.title)
 		if err != nil {
 			return nil, nil, err
 		}
 		cases = append(cases, fc...)
-		counts["source:test_methods:"+rel] = st.testMethods
-		counts["source:testcase_attrs:"+rel] = st.testCaseAttrs
-		counts["source:source_rows:"+rel] = st.sourceRows
-		counts["source:setup_methods:"+rel] = st.setupMethods
-		counts["source:commented_test_forms:"+rel] = st.commented
+		counts["source:test_methods:"+f.rel] = st.testMethods
+		counts["source:testcase_attrs:"+f.rel] = st.testCaseAttrs
+		counts["source:source_rows:"+f.rel] = st.sourceRows
+		counts["source:setup_methods:"+f.rel] = st.setupMethods
+		counts["source:commented_test_forms:"+f.rel] = st.commented
+		if st.plain > 0 {
+			counts["source:plain_tests:"+f.rel] = st.plain
+		}
+	}
+	for _, rel := range spec.provenance {
+		_, info, err := readSource(root, rel)
+		if err != nil {
+			return nil, nil, err
+		}
+		infos = append(infos, info)
 	}
 	for k, v := range corpus.Tally(cases) {
 		counts[k] = v
 	}
-	paths := append(append([]string{}, spec.tests...), spec.models...)
+	paths := append(append(append([]string{}, spec.tests...), spec.titles...), spec.models...)
+	if spec.languages != "" {
+		paths = append(paths, spec.languages)
+	}
+	paths = append(paths, spec.provenance...)
 	return &corpus.Corpus{
 		Header: corpus.Header{
 			Schema:           corpus.SchemaVersion,
 			App:              spec.name,
 			SourceRepository: spec.repository,
-			SourceCommit:     commit,
 			SourcePaths:      paths,
+			SourceCommit:     commit,
 			License:          license,
 			Counts:           counts,
 		},
@@ -608,6 +685,15 @@ type (
 		p       pos
 		c, a, b expr
 	}
+	idxE struct {
+		p    pos
+		x, i expr
+	}
+	assignE struct {
+		p        pos
+		name, op string
+		x        expr
+	}
 )
 
 type stmt interface{}
@@ -634,6 +720,15 @@ type (
 	blockS struct{ body []stmt }
 )
 
+// forS is for (var name = init; cond; post) body.
+type forS struct {
+	p          pos
+	name       string
+	init, cond expr
+	post       expr
+	body       []stmt
+}
+
 type attr struct {
 	p     pos
 	name  string
@@ -652,6 +747,7 @@ type method struct {
 	attrs  []attr
 	params []param
 	body   []stmt
+	toks   []token // the tokens between the braces of the body
 }
 
 type field struct {
@@ -670,9 +766,10 @@ type class struct {
 // ---- parser --------------------------------------------------------------------
 
 type parser struct {
-	file string
-	t    []token
-	i    int
+	file  string
+	t     []token
+	i     int
+	title bool // title fixture: a body that asserts no title entry point is not interpreted
 }
 
 func (p *parser) cur() token { return p.t[p.i] }
@@ -937,7 +1034,16 @@ func (p *parser) parseMember(c *class) error {
 		if !p.isP("{") {
 			return p.fail(p.cur(), "only block-bodied methods are supported")
 		}
-		if m.body, err = p.parseBlock(); err != nil {
+		open := p.i
+		end := p.matchingBrace()
+		if end < 0 {
+			return p.fail(p.cur(), "unterminated block")
+		}
+		m.toks = p.t[open+1 : end]
+		if scope, _ := classify(m.toks); p.title && scope != corpus.ScopeTitle {
+			// Retained out of scope with its source arguments; the body is never interpreted.
+			p.i = end + 1
+		} else if m.body, err = p.parseBlock(); err != nil {
 			return err
 		}
 		c.methods = append(c.methods, m)
@@ -978,9 +1084,52 @@ func (p *parser) parseBlock() ([]stmt, error) {
 	return body, nil
 }
 
+// matchingBrace returns the index of the brace that closes the block opened at
+// the current token, or -1.
+func (p *parser) matchingBrace() int {
+	depth := 0
+	for i := p.i; i < len(p.t); i++ {
+		if p.t[i].kind != tPunct {
+			continue
+		}
+		switch p.t[i].text {
+		case "{":
+			depth++
+		case "}":
+			if depth--; depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
 var unsupportedStmt = map[string]bool{
-	"for": true, "while": true, "do": true, "try": true, "switch": true, "using": true, "throw": true,
+	"while": true, "do": true, "try": true, "switch": true, "throw": true,
 	"lock": true, "yield": true, "goto": true, "break": true, "continue": true, "else": true,
+}
+
+// parseStep parses a for-loop step: name++, name--, name += expr or name -= expr.
+func (p *parser) parseStep() (expr, error) {
+	n, err := p.expectIdent()
+	if err != nil {
+		return nil, err
+	}
+	t := p.cur()
+	switch {
+	case p.isP("++"), p.isP("--"):
+		p.advance()
+		op := "+="
+		if t.text == "--" {
+			op = "-="
+		}
+		return &assignE{p: n.p(), name: n.text, op: op, x: &litE{val{k: vInt, i: 1}}}, nil
+	case p.isP("+="), p.isP("-="):
+		p.advance()
+		x, err := p.parseExpr()
+		return &assignE{p: n.p(), name: n.text, op: t.text, x: x}, err
+	}
+	return nil, p.fail(t, "unsupported for step")
 }
 
 func (p *parser) looksLikeDecl() bool {
@@ -1066,6 +1215,57 @@ func (p *parser) parseStmt() (stmt, error) {
 			return nil, err
 		}
 		return s, nil
+	case p.isID("for"):
+		p.advance()
+		if _, err := p.expectP("("); err != nil {
+			return nil, err
+		}
+		if !p.looksLikeDecl() {
+			return nil, p.fail(p.cur(), "unsupported for initializer")
+		}
+		if _, err := p.parseType(); err != nil {
+			return nil, err
+		}
+		n := p.advance()
+		if _, err := p.expectP("="); err != nil {
+			return nil, err
+		}
+		init, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expectP(";"); err != nil {
+			return nil, err
+		}
+		cond, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expectP(";"); err != nil {
+			return nil, err
+		}
+		post, err := p.parseStep()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expectP(")"); err != nil {
+			return nil, err
+		}
+		s := &forS{p: t.p(), name: n.text, init: init, cond: cond, post: post}
+		if s.body, err = p.parseBody(); err != nil {
+			return nil, err
+		}
+		return s, nil
+	case p.isID("using"):
+		p.advance()
+		for _, want := range [...]string{"(", "new", "AssertionScope", "(", ")", ")"} {
+			if p.cur().kind == tStr || p.cur().text != want {
+				return nil, p.fail(p.cur(), "only using (new AssertionScope()) is supported")
+			}
+			p.advance()
+		}
+		body, err := p.parseBody()
+		return &blockS{body}, err
 	case p.isID("return"):
 		p.advance()
 		if !p.isP(";") {
@@ -1073,6 +1273,17 @@ func (p *parser) parseStmt() (stmt, error) {
 		}
 		p.advance()
 		return &retS{}, nil
+	case p.isID("const"):
+		// A local constant is a declaration with an initializer.
+		p.advance()
+		s, err := p.parseStmt()
+		if err != nil {
+			return nil, err
+		}
+		if d, ok := s.(*declS); !ok || d.init == nil {
+			return nil, p.fail(t, "unsupported const declaration")
+		}
+		return s, nil
 	case p.looksLikeDecl():
 		if _, err := p.parseType(); err != nil {
 			return nil, err
@@ -1227,8 +1438,18 @@ func (p *parser) parsePostfix() (expr, error) {
 			}
 			p.advance()
 			x = c
-		case p.isP("?.") || p.isP("["):
+		case p.isP("?."):
 			return nil, p.fail(t, "unsupported member access form "+t.text)
+		case p.isP("["):
+			p.advance()
+			i, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expectP("]"); err != nil {
+				return nil, err
+			}
+			x = &idxE{p: t.p(), x: x, i: i}
 		default:
 			return x, nil
 		}
@@ -1265,8 +1486,17 @@ func (p *parser) parsePrimary() (expr, error) {
 			return &litE{val{k: vNull}}, nil
 		case "new":
 			p.advance()
-			if _, err := p.parseType(); err != nil {
+			if p.isP("[") && p.at(1).kind == tPunct && p.at(1).text == "]" {
+				p.advance()
+				p.advance()
+			} else if _, err := p.parseType(); err != nil {
 				return nil, err
+			}
+			if p.isP("[") && p.at(1).kind == tNum && p.at(1).text == "0" && p.at(2).kind == tPunct && p.at(2).text == "]" {
+				p.advance()
+				p.advance()
+				p.advance()
+				return &arrE{p: t.p()}, nil
 			}
 			if !p.isP("{") {
 				return nil, p.fail(p.cur(), "only array creation with an initializer is supported")
@@ -1394,6 +1624,25 @@ func (m *model) scanQuality(file string, toks []token, i int) error {
 	return nil
 }
 
+// scanLanguages records the Language members the parser source names. The
+// Language declaration is outside the delivered areas, so the members a title
+// assertion may name are the ones the parser itself produces.
+func (m *model) scanLanguages(file string, toks []token) error {
+	members := map[string]int64{}
+	for i := 0; i+2 < len(toks); i++ {
+		if toks[i].kind == tIdent && toks[i].text == "Language" && toks[i+1].kind == tPunct && toks[i+1].text == "." && toks[i+2].kind == tIdent {
+			if _, dup := members[toks[i+2].text]; !dup {
+				members[toks[i+2].text] = int64(len(members))
+			}
+		}
+	}
+	if len(members) == 0 {
+		return &srcError{file, 1, 1, "no Language members found in the language parser source"}
+	}
+	m.enums["Language"] = members
+	return nil
+}
+
 // ---- symbolic interpreter ---------------------------------------------------------
 
 type vk int
@@ -1429,6 +1678,7 @@ type val struct {
 type observation struct {
 	input   corpus.Value
 	asserts map[string]corpus.Value
+	dir     bool // the isDir argument of ParseMovieTitle
 }
 
 type interp struct {
@@ -1438,8 +1688,9 @@ type interp struct {
 	scopes  []map[string]val
 	obs     []observation
 	depth   int
-	w       *work // the side's cumulative budget
-	at      pos   // last known source position, where a limit is reported
+	w       *work  // the side's cumulative budget
+	at      pos    // last known source position, where a limit is reported
+	entry   string // the scoped entry point, Type.Method
 }
 
 func (it *interp) fail(p pos, why string) error {
@@ -1456,6 +1707,52 @@ func (it *interp) lookup(name string) (val, bool) {
 }
 
 func (it *interp) set(name string, v val) { it.scopes[len(it.scopes)-1][name] = v }
+
+// assign stores v in the innermost scope that declares name.
+func (it *interp) assign(name string, v val) {
+	for i := len(it.scopes) - 1; i >= 0; i-- {
+		if _, ok := it.scopes[i][name]; ok {
+			it.scopes[i][name] = v
+			return
+		}
+	}
+}
+
+// concrete resolves a property of the entry point's result that the source has
+// already asserted to be an integer (for example MovieTitles.Count after
+// MovieTitles.Count.Should().Be(n)): a passing upstream test fixes its value.
+func (it *interp) concrete(v val) val {
+	if v.k == vRes && v.s != "" {
+		if a, ok := it.obs[v.i].asserts[v.s]; ok && a.Kind == corpus.KindInt {
+			return val{k: vInt, i: a.Int}
+		}
+	}
+	return v
+}
+
+// loop runs a for statement whose variable is already declared in the
+// innermost scope; every iteration is charged one interpreter step.
+func (it *interp) loop(s *forS) (bool, error) {
+	for {
+		it.at = s.p
+		if err := it.step(); err != nil {
+			return false, err
+		}
+		c, err := it.eval(s.cond)
+		if err != nil || c.k != vBool {
+			return false, errors.Join(err, it.fail(s.p, "condition is not a boolean"))
+		}
+		if !c.b {
+			return false, nil
+		}
+		if ret, err := it.exec(s.body); err != nil || ret {
+			return ret, err
+		}
+		if _, err := it.eval(s.post); err != nil {
+			return false, err
+		}
+	}
+}
 
 // posOf returns the source position of an expression node that has one.
 func posOf(e expr) (pos, bool) {
@@ -1475,6 +1772,10 @@ func posOf(e expr) (pos, bool) {
 	case *binE:
 		return e.p, true
 	case *condE:
+		return e.p, true
+	case *idxE:
+		return e.p, true
+	case *assignE:
 		return e.p, true
 	}
 	return pos{}, false
@@ -1587,7 +1888,7 @@ func (it *interp) eval(e expr) (val, error) {
 		if v, ok := it.lookup(e.name); ok {
 			return v, nil
 		}
-		if e.name == "string" || e.name == "DateTime" || e.name == "QualityParser" || it.m.enums[e.name] != nil {
+		if typeNames[e.name] || it.m.enums[e.name] != nil {
 			return val{k: vType, s: e.name}, nil
 		}
 		return val{}, it.fail(e.p, "unknown identifier "+e.name)
@@ -1640,6 +1941,43 @@ func (it *interp) eval(e expr) (val, error) {
 			return it.eval(e.a)
 		}
 		return it.eval(e.b)
+	case *idxE:
+		x, err := it.eval(e.x)
+		if err != nil {
+			return val{}, err
+		}
+		i, err := it.eval(e.i)
+		if err != nil {
+			return val{}, err
+		}
+		if i = it.concrete(i); i.k != vInt || i.i < 0 {
+			return val{}, it.fail(e.p, "index is not a known non-negative integer")
+		}
+		switch {
+		case x.k == vArr && i.i < int64(len(x.arr)):
+			return x.arr[i.i], nil
+		case x.k == vRes:
+			return val{k: vRes, s: x.s + "[" + strconv.FormatInt(i.i, 10) + "]", i: x.i}, nil
+		}
+		return val{}, it.fail(e.p, "unsupported index operand")
+	case *assignE:
+		cur, ok := it.lookup(e.name)
+		if !ok || cur.k != vInt {
+			return val{}, it.fail(e.p, "assignment target is not an integer variable")
+		}
+		x, err := it.eval(e.x)
+		if err != nil {
+			return val{}, err
+		}
+		if x = it.concrete(x); x.k != vInt {
+			return val{}, it.fail(e.p, "assigned value is not an integer")
+		}
+		n := cur.i + x.i
+		if e.op == "-=" {
+			n = cur.i - x.i
+		}
+		it.assign(e.name, val{k: vInt, i: n})
+		return val{k: vNull}, nil
 	}
 	return val{}, errors.New("unsupported expression node")
 }
@@ -1666,6 +2004,7 @@ func (it *interp) binary(e *binE) (val, error) {
 	if err != nil {
 		return val{}, err
 	}
+	l, r = it.concrete(l), it.concrete(r)
 	switch e.op {
 	case "==", "!=":
 		eq, ok := valEq(l, r)
@@ -1673,6 +2012,22 @@ func (it *interp) binary(e *binE) (val, error) {
 			return val{}, it.fail(e.p, "unsupported comparison operands")
 		}
 		return val{k: vBool, b: eq == (e.op == "==")}, nil
+	case "<", ">", "<=", ">=":
+		if l.k != vInt || r.k != vInt {
+			return val{}, it.fail(e.p, "unsupported comparison operands")
+		}
+		var holds bool
+		switch e.op {
+		case "<":
+			holds = l.i < r.i
+		case ">":
+			holds = l.i > r.i
+		case "<=":
+			holds = l.i <= r.i
+		default:
+			holds = l.i >= r.i
+		}
+		return val{k: vBool, b: holds}, nil
 	case "+":
 		if l.k == vStr && (r.k == vStr || r.k == vInt || r.k == vChar) {
 			rt := text(r)
@@ -1725,6 +2080,9 @@ func (it *interp) member(e *memberE) (val, error) {
 		if recv.s == "DateTime" && e.name == "Today" {
 			return val{k: vDate}, nil
 		}
+		if recv.s == "Parser" && (e.name == "Parser" || e.name == "ReleaseGroupParser") {
+			return val{k: vType, s: e.name}, nil
+		}
 		if members, ok := it.m.enums[recv.s]; ok {
 			if _, ok := members[e.name]; ok {
 				return val{k: vEnum, t: recv.s, s: e.name}, nil
@@ -1736,6 +2094,14 @@ func (it *interp) member(e *memberE) (val, error) {
 			if n, ok := it.m.names[recv.s]; ok {
 				return val{k: vStr, s: n}, nil
 			}
+		}
+		if recv.t == "Language" && e.name == "Id" {
+			// A Language is identified by its Id, so an Id comparison is a member comparison.
+			return recv, nil
+		}
+	case vArr:
+		if e.name == "Length" {
+			return val{k: vInt, i: int64(len(recv.arr))}, nil
 		}
 	case vRes:
 		path := e.name
@@ -1780,10 +2146,10 @@ func (it *interp) call(e *callE) (val, error) {
 		}
 		return val{}, it.invoke(h, args, e.p)
 	case *memberE:
-		if fn.name == "Be" && len(e.args) == 1 {
+		if kind := fn.name; (kind == "Be" || kind == "Contain") && len(e.args) == 1 || kind == "BeNull" && len(e.args) == 0 {
 			if in, ok := fn.x.(*callE); ok && len(in.args) == 0 {
 				if im, ok := in.fn.(*memberE); ok && im.name == "Should" {
-					return val{}, it.assertBe(im.x, e.args[0], e.p)
+					return val{}, it.assert(kind, im.x, e.args, e.p)
 				}
 			}
 		}
@@ -1800,28 +2166,70 @@ func (it *interp) call(e *callE) (val, error) {
 	return val{}, it.fail(e.p, "unsupported call form")
 }
 
-func (it *interp) assertBe(target, want expr, p pos) error {
+// assert records one FluentAssertions assertion on the entry point's result.
+// Be and BeNull set the asserted value of a property path (the result itself
+// is the reserved result key); Contain collects, under the path plus
+// ".Contain", the members a list must contain.
+func (it *interp) assert(kind string, target expr, args []expr, p pos) error {
 	tv, err := it.eval(target)
 	if err != nil {
 		return err
 	}
-	if tv.k != vRes || tv.s == "" {
+	if tv.k != vRes || (tv.s == "" && it.entry == qualityOwner) {
 		return it.fail(p, "assertion target is not a property of the entry point result")
 	}
-	wv, err := it.eval(want)
-	if err != nil {
-		return err
+	key := tv.s
+	if key == "" {
+		key = resultKey
 	}
-	cv, err := it.toCorpus(wv, p)
-	if err != nil {
-		return err
+	// A normalized-title property is compared only with a normalized title, and the
+	// reverse; the recorded value is then the title that both sides are normalized from.
+	want := val{k: vNull}
+	if key == cleanTitleKey && kind != "Be" {
+		return it.fail(p, "unsupported assertion on a normalized title")
+	}
+	if kind != "BeNull" {
+		if want, err = it.eval(args[0]); err != nil {
+			return err
+		}
+	}
+	if (key == cleanTitleKey) != (want.k == vStr && want.t == cleanTag) {
+		return it.fail(p, "a normalized title is compared only with a normalized title")
 	}
 	o := &it.obs[tv.i]
-	if prior, ok := o.asserts[tv.s]; ok && !corpus.Equal(prior, cv) {
-		return it.fail(p, "conflicting assertions on "+tv.s)
+	if kind == "Contain" {
+		key += ".Contain"
+		if prior, ok := o.asserts[key]; ok {
+			item, err := it.toCorpus(want, p)
+			if err != nil {
+				return err
+			}
+			for _, have := range prior.Items {
+				if corpus.Equal(have, item) {
+					return nil
+				}
+			}
+			prior.Items = append(prior.Items, item)
+			o.asserts[key] = prior
+			return nil
+		}
+		list, err := it.toCorpus(val{k: vArr, arr: []val{want}}, p)
+		if err != nil {
+			return err
+		}
+		it.at = p
+		o.asserts[key] = list
+		return nil
+	}
+	cv, err := it.toCorpus(want, p)
+	if err != nil {
+		return err
+	}
+	if prior, ok := o.asserts[key]; ok && !corpus.Equal(prior, cv) {
+		return it.fail(p, "conflicting assertions on "+key)
 	}
 	it.at = p
-	o.asserts[tv.s] = cv
+	o.asserts[key] = cv
 	return nil
 }
 
@@ -1829,7 +2237,15 @@ func (it *interp) method(recv val, name string, args []val, p pos) (val, error) 
 	switch {
 	case recv.k == vType && recv.s == "string" && name == "Format":
 		return it.format(args, p)
-	case recv.k == vType && recv.s == "QualityParser" && name == "ParseQuality" && len(args) == 1:
+	case recv.k == vType && recv.s+"."+name == it.entry:
+		dir := false
+		switch {
+		case len(args) == 1:
+		case len(args) == 2 && name == movieTitleCall && args[1].k == vBool:
+			dir = args[1].b
+		default:
+			return val{}, it.fail(p, "unsupported arguments of "+it.entry)
+		}
 		in, err := it.toCorpus(args[0], p)
 		if err != nil || (in.Kind != corpus.KindString && in.Kind != corpus.KindDate) {
 			return val{}, errors.Join(err, it.fail(p, "entry point input is not a release name"))
@@ -1839,8 +2255,39 @@ func (it *interp) method(recv val, name string, args []val, p pos) (val, error) 
 			return val{}, it.fail(p, "observation limit exceeded")
 		}
 		it.w.observations++
+		it.obs = append(it.obs, observation{input: in, asserts: map[string]corpus.Value{}, dir: dir})
+		return val{k: vRes, i: int64(len(it.obs) - 1)}, nil
+	case recv.k == vType && recv.s == "ExceptionVerification" && name == "IgnoreWarns" && len(args) == 0:
+		return val{k: vNull}, nil
+	case recv.k == vStr && name == "CleanMovieTitle" && len(args) == 0 && it.entry == cleanTitleOwn:
+		// The helper is the entry point: its input is the string it normalizes.
+		in, err := it.toCorpus(recv, p)
+		if err != nil {
+			return val{}, err
+		}
+		it.at = p
+		if it.w.observations >= maxObservations {
+			return val{}, it.fail(p, "observation limit exceeded")
+		}
+		it.w.observations++
 		it.obs = append(it.obs, observation{input: in, asserts: map[string]corpus.Value{}})
 		return val{k: vRes, i: int64(len(it.obs) - 1)}, nil
+	case recv.k == vRes && name == "CleanMovieTitle" && len(args) == 0 && recv.s == "MovieTitle" && it.entry == movieTitleOwn:
+		return val{k: vRes, s: cleanTitleKey, i: recv.i}, nil
+	case recv.k == vStr && name == "CleanMovieTitle" && len(args) == 0 && it.entry == movieTitleOwn:
+		// The expected side of a normalized-title assertion: the source normalizes the
+		// expected title as it normalizes the parsed one, so the raw title is recorded
+		// and the tag keeps it from being taken for a plain string.
+		return val{k: vStr, s: recv.s, t: cleanTag}, nil
+	case recv.k == vStr && name == "AsOsAgnostic" && len(args) == 0:
+		// Host-path adaptation of a literal: an out-of-scope case keeps the source literal.
+		return recv, nil
+	case recv.k == vRes && name == "First" && len(args) == 0:
+		path := "First()"
+		if recv.s != "" {
+			path = recv.s + "." + path
+		}
+		return val{k: vRes, s: path, i: recv.i}, nil
 	case recv.k == vDate && name == "AddDays" && len(args) == 1 && args[0].k == vInt:
 		off := recv.i + args[0].i
 		if (args[0].i > 0 && off < recv.i) || (args[0].i < 0 && off > recv.i) {
@@ -2055,6 +2502,18 @@ func (it *interp) exec(body []stmt) (bool, error) {
 					return ret, err
 				}
 			}
+		case *forS:
+			init, err := it.eval(s.init)
+			if err != nil {
+				return false, err
+			}
+			it.push()
+			it.set(s.name, init)
+			ret, err := it.loop(s)
+			it.pop()
+			if err != nil || ret {
+				return ret, err
+			}
 		case *blockS:
 			if ret, err := it.exec(s.body); err != nil || ret {
 				return ret, err
@@ -2077,6 +2536,8 @@ func (it *interp) typeOK(typ string, v val) bool {
 	case "char":
 		return v.k == vChar
 	case "object[]":
+		return v.k == vArr
+	case "string[]":
 		return v.k == vArr
 	case "object":
 		return true
@@ -2129,7 +2590,7 @@ func (it *interp) invoke(m *method, args []val, p pos) error {
 // ---- test cases ------------------------------------------------------------------
 
 type fileStats struct {
-	testMethods, testCaseAttrs, sourceRows, setupMethods, commented int
+	testMethods, testCaseAttrs, sourceRows, setupMethods, commented, plain int
 }
 
 type row struct {
@@ -2152,7 +2613,69 @@ func hasAttr(attrs []attr, name string) bool {
 	return false
 }
 
-func fileCases(app, rel, src string, m *model, w *work) ([]corpus.Case, fileStats, error) {
+// typeNames are the identifiers the interpreter treats as static types.
+var typeNames = map[string]bool{
+	"string": true, "DateTime": true, "QualityParser": true, "Parser": true, "LanguageParser": true,
+	"ReleaseGroupParser": true, "ExceptionVerification": true,
+}
+
+// titleEntries are the entry points whose results title cases assert, with the
+// owner each case records. otherEntries are the entry points of the other
+// tests of the title fixtures: those cases are retained out of scope under the
+// owner named here, with their source arguments.
+var (
+	titleEntries = [...]struct{ call, owner string }{
+		{movieTitleCall, movieTitleOwn},
+		{"ParseReleaseGroup", "ReleaseGroupParser.ParseReleaseGroup"},
+		{"ParseLanguages", "LanguageParser.ParseLanguages"},
+	}
+	otherEntries = [...]struct{ call, owner string }{
+		{"ParseMoviePath", "Parser.ParseMoviePath"},
+		{"ParseSubtitleLanguageInformation", "LanguageParser.ParseSubtitleLanguageInformation"},
+		{"ParseSubtitleLanguage", "LanguageParser.ParseSubtitleLanguage"},
+		{"NormalizeImdbId", "Parser.NormalizeImdbId"},
+	}
+)
+
+// classify decides the scope and owner of a title-fixture test method from the
+// identifiers of its body: title for a method that asserts a title entry point,
+// out of scope for the others, and no scope when it names no known entry
+// point. A method that parses a title and normalizes it through
+// CleanMovieTitle is a title case asserting the normalized title; one that
+// calls CleanMovieTitle alone is a title case of the helper itself (its input
+// is the string it normalizes), and one that builds its names with MD5 or
+// Random has no recordable input.
+func classify(toks []token) (scope, owner string) {
+	has := func(name string) bool {
+		for _, t := range toks {
+			if t.kind == tIdent && t.text == name {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case has("CleanMovieTitle") && has(movieTitleCall):
+		return corpus.ScopeTitle, movieTitleOwn
+	case has("CleanMovieTitle"):
+		return corpus.ScopeTitle, cleanTitleOwn
+	case has("MD5") || has("Random"):
+		return corpus.ScopeOutOfScope, movieTitleOwn
+	}
+	for _, e := range titleEntries {
+		if has(e.call) {
+			return corpus.ScopeTitle, e.owner
+		}
+	}
+	for _, e := range otherEntries {
+		if has(e.call) {
+			return corpus.ScopeOutOfScope, e.owner
+		}
+	}
+	return "", ""
+}
+
+func fileCases(app, rel, src string, m *model, w *work, title bool) ([]corpus.Case, fileStats, error) {
 	var st fileStats
 	lx, err := lex(rel, src)
 	if err != nil {
@@ -2163,7 +2686,7 @@ func fileCases(app, rel, src string, m *model, w *work) ([]corpus.Case, fileStat
 			st.commented++
 		}
 	}
-	p := &parser{file: rel, t: lx.toks}
+	p := &parser{file: rel, t: lx.toks, title: title}
 	classes, err := p.parseFile()
 	if err != nil {
 		return nil, st, err
@@ -2228,9 +2751,18 @@ func fileCases(app, rel, src string, m *model, w *work) ([]corpus.Case, fileStat
 				return nil, st, err
 			}
 			st.testMethods++
+			scope, owner := corpus.ScopeQuality, qualityOwner
+			if title {
+				if scope, owner = classify(mt.toks); scope == "" {
+					return nil, st, &srcError{rel, mt.p.line, mt.p.col, "test method " + mt.name + " has no recognized entry point"}
+				}
+			}
 			off := classOff || hasAttr(mt.attrs, "Ignore") || hasAttr(mt.attrs, "Explicit")
 			for _, r := range rows {
-				cs, err := runRow(rel, mt, r, helpers, m, w)
+				if r.entry == "Test" {
+					st.plain++
+				}
+				cs, err := runRow(rel, mt, r, helpers, m, w, scope, owner)
 				if err != nil {
 					return nil, st, err
 				}
@@ -2323,33 +2855,44 @@ func methodRows(rel string, mt *method, sources map[string]*field, m *model, w *
 	return rows, nil
 }
 
-func runRow(rel string, mt *method, r row, helpers map[string]*method, m *model, w *work) (corpus.Case, error) {
+func runRow(rel string, mt *method, r row, helpers map[string]*method, m *model, w *work, scope, owner string) (corpus.Case, error) {
 	at := pos{r.line, 1}
-	it := &interp{file: rel, m: m, helpers: helpers, w: w, at: at}
-	if err := it.invoke(mt, r.args, at); err != nil {
-		return corpus.Case{}, err
+	it := &interp{file: rel, m: m, helpers: helpers, w: w, at: at, entry: owner}
+	if scope != corpus.ScopeOutOfScope {
+		if err := it.invoke(mt, r.args, at); err != nil {
+			return corpus.Case{}, err
+		}
 	}
 	fail := func(why string) (corpus.Case, error) {
 		return corpus.Case{}, &srcError{rel, r.line, 1, mt.name + " " + r.entry + ": " + why}
 	}
-	if len(it.obs) == 0 {
-		return fail("the case never calls " + scopeOwner)
-	}
-	first := it.obs[0].asserts
-	if len(first) == 0 {
-		return fail("the result of " + scopeOwner + " is never asserted")
-	}
 	inputs := corpus.Value{Kind: corpus.KindArray, Items: []corpus.Value{}}
-	for _, o := range it.obs {
-		if !equalAsserts(first, o.asserts) {
-			return fail("invocations assert different expectations")
+	expected := map[string]corpus.Value{}
+	if scope != corpus.ScopeOutOfScope {
+		if len(it.obs) == 0 {
+			return fail("the case never calls " + owner)
 		}
-		inputs.Items = append(inputs.Items, o.input)
+		first := it.obs[0].asserts
+		if len(first) == 0 {
+			return fail("the result of " + owner + " is never asserted")
+		}
+		for _, o := range it.obs {
+			if !equalAsserts(first, o.asserts) {
+				return fail("invocations assert different expectations")
+			}
+			if o.dir != it.obs[0].dir {
+				return fail("invocations differ in the isDir argument")
+			}
+			inputs.Items = append(inputs.Items, o.input)
+		}
+		for k, v := range first {
+			expected[k] = v
+		}
+		if it.obs[0].dir {
+			expected[dirKey] = corpus.Value{Kind: corpus.KindBool, Bool: true}
+		}
 	}
-	expected := map[string]corpus.Value{corpus.InputKey: inputs}
-	for k, v := range first {
-		expected[k] = v
-	}
+	expected[corpus.InputKey] = inputs
 	args := make([]corpus.Value, 0, len(r.args))
 	for _, a := range r.args {
 		cv, err := it.toCorpus(a, at)
@@ -2363,8 +2906,8 @@ func runRow(rel string, mt *method, r row, helpers map[string]*method, m *model,
 		Method:     mt.name,
 		Entry:      r.entry,
 		Line:       r.line,
-		Scope:      corpus.ScopeQuality,
-		ScopeOwner: scopeOwner,
+		Scope:      scope,
+		ScopeOwner: owner,
 		Args:       args,
 		Expected:   expected,
 	}, nil

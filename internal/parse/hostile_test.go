@@ -2,10 +2,17 @@ package parse
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
+	"errors"
+	"math/rand/v2"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/dlclark/regexp2/v2"
 )
 
 // evilPattern backtracks exponentially on evilName (a run of 'a' that fails
@@ -228,6 +235,217 @@ func TestHostileFailedRequiredConditionDoesNotSkipALaterError(t *testing.T) {
 			if res != nil {
 				t.Errorf("%s %+v: results = %+v, want none", tc.name, later, res)
 			}
+		}
+	}
+}
+
+// ---- movie title boundaries -------------------------------------------------------------
+
+// movieName is a legitimate release name that parses to a known movie.
+const movieName = "Movie.Name.2015.German.DL.1080p.BluRay.x264-GRP"
+
+func TestMovieBoundsFailClosed(t *testing.T) {
+	p := newTestParser(t, nil)
+	ctx := context.Background()
+
+	// The 4096-byte control that must still parse is TestMovieBoundsLegitimate4096ByteNameParses; it
+	// runs on the real clock and so is excluded under -race with the complete corpus run.
+	for _, tc := range []struct {
+		name   string
+		input  string
+		kind   Kind
+		code   string
+		params map[string]int64
+	}{
+		{"4097 bytes", padTo(movieName, 4097), KindMovie, codeReleaseNameTooLong, map[string]int64{"limit_bytes": 4096, "observed_bytes": 4097}},
+		{"invalid UTF-8", "Movie.2015.720p\xff-GRP", KindMovie, codeReleaseNameInvalidUTF8, map[string]int64{"offset": 15}},
+		{"series has no title parser yet", movieName, KindSeries, codeKindUnsupported, map[string]int64{"kind": int64(KindSeries)}},
+		{"unknown kind", movieName, Kind(9), codeKindUnsupported, map[string]int64{"kind": 9}},
+		{"nothing to parse", "----", KindMovie, codeTitleUnrecognized, map[string]int64{}},
+		{"hashed release", "0e895c37245186812cb08aab1529cf8ee389dd05.mkv", KindMovie, codeTitleUnrecognized, map[string]int64{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := p.ParseTitle(ctx, tc.input, tc.kind)
+			wantReason(t, err, tc.code, tc.params)
+			if got.Movie != nil || got.Kind != 0 {
+				t.Errorf("a refused name must carry no usable value: %+v", got)
+			}
+		})
+	}
+}
+
+// A hostile match in any parser ParseTitle runs (the title patterns, the quality,
+// language and release group parsers) is a match_timeout reason, never a result.
+func TestHostileMovieTitleMatchInAnySubparserFailsClosed(t *testing.T) {
+	evil := func(t *testing.T) *regexp2.Regexp {
+		t.Helper()
+		re, err := regexp2.Compile(`(a+)+$`, ic)
+		if err != nil {
+			t.Fatal(err)
+		}
+		re.MatchTimeout = matchTimeout
+		return re
+	}
+	name := "Movie.Name.2015.720p." + strings.Repeat("a", 64) + "!.x264-GRP"
+	for _, tc := range []struct {
+		stage   string
+		inject  func(p *Parser, re *regexp2.Regexp)
+		wantErr string
+	}{
+		{"title simple release", func(p *Parser, re *regexp2.Regexp) { p.movieTitle.simpleRelease = re }, codeMatchTimeout},
+		{"title hardcoded subs", func(p *Parser, re *regexp2.Regexp) { p.movieTitle.hardcodedSubs = re }, codeMatchTimeout},
+		{"edition", func(p *Parser, re *regexp2.Regexp) { p.movieTitle.reportEdition = re }, codeMatchTimeout},
+		{"quality", func(p *Parser, re *regexp2.Regexp) { p.movie.source = re }, codeMatchTimeout},
+		{"language", func(p *Parser, re *regexp2.Regexp) { p.movieTitle.lang.insensitive = re }, codeMatchTimeout},
+		{"language case-sensitive", func(p *Parser, re *regexp2.Regexp) { p.movieTitle.lang.caseSensitive = re }, codeMatchTimeout},
+		{"release group", func(p *Parser, re *regexp2.Regexp) { p.movieTitle.group.group = re }, codeMatchTimeout},
+	} {
+		t.Run(tc.stage, func(t *testing.T) {
+			p := newTestParser(t, nil)
+			// The control: the same name parses with the real tables.
+			if _, err := p.ParseTitle(context.Background(), name, KindMovie); err != nil {
+				t.Fatalf("control: %v", err)
+			}
+			tc.inject(p, evil(t))
+			got, err := p.ParseTitle(context.Background(), name, KindMovie)
+			wantReason(t, err, tc.wantErr, map[string]int64{"limit_ms": 50})
+			if got.Movie != nil || got.Kind != 0 {
+				t.Errorf("a timeout must carry no usable value: %+v", got)
+			}
+		})
+	}
+}
+
+// blipClock reads a constant time, except that its read number at returns a time
+// past the release budget (and only that read does). Exactly that read is then the
+// one that finds the budget exhausted, whichever budget it belongs to.
+type blipClock struct {
+	mu    sync.Mutex
+	base  time.Time
+	at    int
+	calls int
+}
+
+func (c *blipClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	if c.calls == c.at {
+		return c.base.Add(releaseBudget)
+	}
+	return c.base
+}
+
+func (c *blipClock) Calls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+// One release budget covers every suboperation. A full ParseTitle is run once to
+// count its clock reads, then once more for every read k from the first check
+// through completion, with the budget found exhausted at read k and no other.
+// Every such parse must stop with the budget reason, no value, and exactly k reads
+// (no work after the exhaustion). A stage that started a budget of its own reads
+// the clock to create it: at that read the blip makes the new deadline a whole
+// budget later, so nothing expires and the parse finishes instead of failing.
+// Read 1 creates the one legitimate budget (its time defines the deadline).
+func TestBudgetMovieTitleIsSharedByEverySubparser(t *testing.T) {
+	ctx := context.Background()
+	run := func(at int) (*blipClock, ParsedTitle, error) {
+		clk := &blipClock{base: time.Unix(1000, 0), at: at}
+		pt, err := newTestParser(t, clk.Now).ParseTitle(ctx, movieName, KindMovie)
+		return clk, pt, err
+	}
+	probe, _, err := run(0)
+	if err != nil {
+		t.Fatalf("ParseTitle: %v", err)
+	}
+	reads := probe.Calls()
+	quality := &blipClock{base: time.Unix(1000, 0)}
+	if _, err := newTestParser(t, quality.Now).ParseQuality(ctx, movieName, KindMovie); err != nil {
+		t.Fatalf("ParseQuality: %v", err)
+	}
+	if reads <= 2*quality.Calls() {
+		t.Fatalf("ParseTitle read the clock %d times, ParseQuality %d: the title, language and group work must add to the quality work", reads, quality.Calls())
+	}
+
+	failures := 0
+	for k := 2; k <= reads; k++ {
+		clk, got, err := run(k)
+		var re *ReasonError
+		switch {
+		case !errors.As(err, &re) || re.Reason.Code != codeWorkBudgetExhausted:
+			t.Errorf("budget exhausted at read %d of %d: err = %v, want %s (a stage with a budget of its own?)", k, reads, err, codeWorkBudgetExhausted)
+		case got.Movie != nil || got.Kind != 0:
+			t.Errorf("budget exhausted at read %d: no usable value expected, got %+v", k, got)
+		case clk.Calls() != k:
+			t.Errorf("budget exhausted at read %d: the clock was read %d times (work after the exhaustion)", k, clk.Calls())
+		default:
+			continue
+		}
+		if failures++; failures == 5 {
+			t.Fatal("more than 5 reads fail; stopping")
+		}
+	}
+}
+
+func TestBudgetMovieTitleContextCancellationAndDeadlineFailClosed(t *testing.T) {
+	p := newTestParser(t, nil)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	got, err := p.ParseTitle(cancelled, movieName, KindMovie)
+	wantReason(t, err, codeCancelled, map[string]int64{})
+	if got.Movie != nil {
+		t.Errorf("a cancelled parse must carry no usable value: %+v", got)
+	}
+	expired, stop := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer stop()
+	got, err = p.ParseTitle(expired, movieName, KindMovie)
+	wantReason(t, err, codeDeadlineExceeded, map[string]int64{})
+	if got.Movie != nil {
+		t.Errorf("an expired parse must carry no usable value: %+v", got)
+	}
+}
+
+// A name that only the directory form reads: the year-first folder pattern.
+func TestMovieTitleDirectoryFormIsTheOnlyReaderOfAYearFirstName(t *testing.T) {
+	p := newTestParser(t, nil)
+	ctx := context.Background()
+	pt, err := p.parseTitle(ctx, "(1995) Movie Name", KindMovie, true)
+	if err != nil || pt.Movie == nil || pt.Movie.MovieTitles[0] != "Movie Name" || pt.Movie.Year != 1995 {
+		t.Errorf("directory form = %+v, %v", pt, err)
+	}
+	_, err = p.ParseTitle(ctx, "(1995) Movie Name", KindMovie)
+	wantReason(t, err, codeTitleUnrecognized, map[string]int64{})
+}
+
+// The source's generated-name tests (an MD5 chain and random alphanumeric hashes) have
+// no recordable input in the corpus, so they are run here: no such name is a title.
+func TestHostileMovieTitleRejectsGeneratedHashNames(t *testing.T) {
+	p := newTestParser(t, nil)
+	ctx := context.Background()
+	check := func(name string) {
+		t.Helper()
+		if got, err := p.ParseTitle(ctx, name, KindMovie); err == nil || got.Movie != nil {
+			t.Fatalf("%q parsed as %+v", name, got)
+		}
+	}
+	hash := "CRAPPY TEST SEED"
+	for range 100 {
+		sum := md5.Sum([]byte(hash))
+		hash = strings.ToUpper(hex.EncodeToString(sum[:]))
+		check(hash)
+	}
+	const charset = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	rng := rand.New(rand.NewPCG(1, 2))
+	for _, length := range []int{32, 40} {
+		for range 500 {
+			var sb strings.Builder
+			for range length {
+				sb.WriteByte(charset[rng.IntN(len(charset))])
+			}
+			check(sb.String())
 		}
 	}
 }

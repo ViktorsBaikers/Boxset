@@ -104,11 +104,12 @@ type Options struct {
 // Parser is the concurrency-safe release name parser. Its built-in tables are
 // immutable; its one mutable part is the format state, owned by formats.go.
 type Parser struct {
-	now      func() time.Time
-	location *time.Location
-	series   *seriesTable
-	movie    *movieTable
-	formats  formatState
+	now        func() time.Time
+	location   *time.Location
+	series     *seriesTable
+	movie      *movieTable
+	movieTitle *movieTitleTable
+	formats    formatState
 }
 
 // NewParser compiles the fixed attributed pattern tables once. An invalid
@@ -126,6 +127,9 @@ func NewParser(options Options) (*Parser, error) {
 		return nil, err
 	}
 	if p.movie, err = newMovieTable(); err != nil {
+		return nil, err
+	}
+	if p.movieTitle, err = newMovieTitleTable(p.movie); err != nil {
 		return nil, err
 	}
 	return p, nil

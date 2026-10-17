@@ -11,12 +11,15 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/ViktorsBaikers/Boxset/internal/parse/corpus"
+	"github.com/dlclark/regexp2/v2"
 )
 
 // steppingClock is an injected, deterministic clock: every read advances it.
@@ -399,6 +402,7 @@ func TestSharedParserIsConcurrencySafe(t *testing.T) {
 		}
 		subsets = append(subsets, subset{app.name, app.kind, picked})
 	}
+	titles := titleSubset(t, byID)
 
 	var wg sync.WaitGroup
 	errs := make(chan string, 64)
@@ -413,12 +417,41 @@ func TestSharedParserIsConcurrencySafe(t *testing.T) {
 				}
 			}()
 		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := runTitleCorpus(p, titles, nil)
+			if len(r.problems) != 0 || r.failed != 0 || r.passed != len(titles.Cases) {
+				errs <- fmt.Sprintf("movie titles: passed %d of %d, failed %d: %v", r.passed, len(titles.Cases), r.failed, r.problems)
+			}
+		}()
 	}
 	wg.Wait()
 	close(errs)
 	for msg := range errs {
 		t.Errorf("concurrent parse diverged: %s", msg)
 	}
+}
+
+// titleSubset is the bounded subset of the committed movie title cases the
+// concurrency test runs: every 11th case of the whole file, which must reach
+// all three title entry points.
+func titleSubset(t *testing.T, byID map[string]corpus.Disposition) *corpus.Corpus {
+	t.Helper()
+	full, _ := readCorpusFile(t, "movie")
+	picked := &corpus.Corpus{Header: full.Header}
+	owners := map[string]bool{}
+	for i, cs := range full.Cases {
+		if _, disposed := byID[cs.ID]; i%concurrentStride != 0 || cs.Scope != corpus.ScopeTitle || !cs.UpstreamEnabled || disposed {
+			continue
+		}
+		picked.Cases = append(picked.Cases, cs)
+		owners[cs.ScopeOwner] = true
+	}
+	if len(picked.Cases) == 0 || len(owners) != 3 {
+		t.Fatalf("the bounded title subset has %d cases over entry points %v", len(picked.Cases), owners)
+	}
+	return picked
 }
 
 // ---- committed-corpus consumer shared by the full corpus run --------------------
@@ -946,4 +979,488 @@ func TestQualityVocabularyMatchesIndependentMemberTable(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLanguageVocabularyMatchesIndependentMemberTable(t *testing.T) {
+	// Fixed by hand from the source Language members (the names of its static
+	// members, in declaration order), not computed from vocab.go.
+	table := map[string]string{
+		"Unknown": "unknown", "English": "english", "French": "french", "Spanish": "spanish", "German": "german",
+		"Italian": "italian", "Danish": "danish", "Dutch": "dutch", "Japanese": "japanese", "Icelandic": "icelandic",
+		"Chinese": "chinese", "Russian": "russian", "Polish": "polish", "Vietnamese": "vietnamese", "Swedish": "swedish",
+		"Norwegian": "norwegian", "Finnish": "finnish", "Turkish": "turkish", "Portuguese": "portuguese", "Flemish": "flemish",
+		"Greek": "greek", "Korean": "korean", "Hungarian": "hungarian", "Hebrew": "hebrew", "Lithuanian": "lithuanian",
+		"Czech": "czech", "Hindi": "hindi", "Romanian": "romanian", "Thai": "thai", "Bulgarian": "bulgarian",
+		"PortugueseBR": "portuguese-br", "Arabic": "arabic", "Ukrainian": "ukrainian", "Persian": "persian", "Bengali": "bengali",
+		"Slovak": "slovak", "Latvian": "latvian", "SpanishLatino": "spanish-latino", "Catalan": "catalan", "Croatian": "croatian",
+		"Serbian": "serbian", "Bosnian": "bosnian", "Estonian": "estonian", "Tamil": "tamil", "Indonesian": "indonesian",
+		"Telugu": "telugu", "Macedonian": "macedonian", "Slovenian": "slovenian", "Malayalam": "malayalam", "Kannada": "kannada",
+		"Albanian": "albanian", "Afrikaans": "afrikaans", "Marathi": "marathi", "Tagalog": "tagalog", "Urdu": "urdu",
+		"Romansh": "romansh", "Mongolian": "mongolian", "Georgian": "georgian", "Any": "any", "Original": "original",
+	}
+	defs := languageDefs()
+	if len(defs) != len(table) {
+		t.Errorf("%d vocabulary members, independent table has %d", len(defs), len(table))
+	}
+	seen := map[string]bool{}
+	for _, d := range defs {
+		want, ok := table[d.member]
+		if !ok {
+			t.Errorf("vocabulary member %q is not in the independent table", d.member)
+		} else if d.code != want {
+			t.Errorf("member %s = %q, want %q", d.member, d.code, want)
+		}
+		if seen[d.code] {
+			t.Errorf("code %q is used by two members", d.code)
+		}
+		seen[d.code] = true
+	}
+	for member, want := range table {
+		if code, ok := languageCode(member); !ok || code != want {
+			t.Errorf("languageCode(%s) = %q, %v; want %q", member, code, ok, want)
+		}
+	}
+	if code, ok := languageCode("Portuguese (Brazil)"); ok {
+		t.Errorf("the source display name has no mapping, got %q", code)
+	}
+}
+
+// ---- title corpus consumer ----------------------------------------------------------
+
+// Reserved Expected keys of title cases beside the input key: the assertion on
+// the result of an entry point itself, and the isDir argument of ParseMovieTitle.
+const (
+	titleResultKey = "$result"
+	titleDirKey    = "$isDir"
+)
+
+// The title-scope entry points of the committed movie corpus.
+const (
+	ownerMovieTitle   = "Parser.ParseMovieTitle"
+	ownerReleaseGroup = "ReleaseGroupParser.ParseReleaseGroup"
+	ownerLanguages    = "LanguageParser.ParseLanguages"
+	ownerCleanTitle   = "Parser.CleanMovieTitle"
+)
+
+// qualityFixtures are the source files of the quality scope: a title case from
+// one of them would be a quality name substituted for a title assertion.
+var qualityFixtures = map[string]bool{
+	"tests/QualityParserFixture.cs": true, "tests/ExtendedQualityParserRegex.cs": true, "tests/AnimeVersionFixture.cs": true,
+}
+
+// absentValue is observed where the source has nothing to read (a null result
+// or an index past the list): no expectation, null included, equals it.
+var absentValue = corpus.Value{Kind: corpus.KindEnum, Type: "$absent", Str: "no value"}
+
+// titleResult is what one title entry point produced for one input.
+type titleResult struct {
+	movie     *MovieInfo // ParseMovieTitle: nil when the source returns null
+	group     string     // ParseReleaseGroup: empty where the source returns null
+	languages []string   // ParseLanguages
+	clean     string     // CleanMovieTitle
+}
+
+// observeTitle runs the entry point a title case names on one input. A name
+// ParseMovieTitle rejects is the source's null (a nil movie, no error); any
+// other failure is an error.
+func observeTitle(p *Parser, owner string, dir bool, name string) (titleResult, error) {
+	ctx := context.Background()
+	switch owner {
+	case ownerMovieTitle:
+		var (
+			pt  ParsedTitle
+			err error
+		)
+		if dir {
+			pt, err = p.parseTitle(ctx, name, KindMovie, true)
+		} else {
+			pt, err = p.ParseTitle(ctx, name, KindMovie)
+		}
+		var re *ReasonError
+		switch {
+		case errors.As(err, &re) && re.Reason.Code == codeTitleUnrecognized:
+			return titleResult{}, nil
+		case err != nil:
+			return titleResult{}, err
+		case pt.Kind != KindMovie || pt.Movie == nil:
+			return titleResult{}, fmt.Errorf("ParseTitle succeeded without a movie: %+v", pt)
+		}
+		return titleResult{movie: pt.Movie}, nil
+	case ownerCleanTitle:
+		if err := validateName(name); err != nil {
+			return titleResult{}, err
+		}
+		clean, err := cleanMovieTitle(name)
+		return titleResult{clean: clean}, err
+	case ownerReleaseGroup, ownerLanguages:
+		if err := validateName(name); err != nil {
+			return titleResult{}, err
+		}
+		b := newBudget(ctx, p.now)
+		if owner == ownerReleaseGroup {
+			g, err := p.movieTitle.group.parse(b, p.movieTitle, name)
+			return titleResult{group: g}, err
+		}
+		l, err := p.movieTitle.lang.parse(b, name)
+		return titleResult{languages: l}, err
+	}
+	return titleResult{}, fmt.Errorf("unsupported title entry point %q", owner)
+}
+
+// resolveTitle maps one source-asserted property of a title entry point to the
+// native comparison: the source expectation as a Boxset value (language members
+// through the explicit code map; the source's null string is the empty text)
+// and the observed native value. An unknown property, entry point, enum type or
+// member is a hard error, never a skipped assertion.
+func resolveTitle(owner, key string, want corpus.Value, res titleResult) (wantNative, observed corpus.Value, err error) {
+	text := func(got string) (corpus.Value, corpus.Value, error) {
+		switch want.Kind {
+		case corpus.KindString:
+			return want, str(got), nil
+		case corpus.KindNull:
+			return str(""), str(got), nil
+		}
+		return corpus.Value{}, corpus.Value{}, fmt.Errorf("%s: expected a string or null, got %+v", key, want)
+	}
+	number := func(got int) (corpus.Value, corpus.Value, error) {
+		if want.Kind != corpus.KindInt {
+			return corpus.Value{}, corpus.Value{}, fmt.Errorf("%s: expected an int, got %+v", key, want)
+		}
+		return want, corpus.Value{Kind: corpus.KindInt, Int: int64(got)}, nil
+	}
+	language := func(v corpus.Value) (string, error) {
+		if v.Kind != corpus.KindEnum || v.Type != "Language" {
+			return "", fmt.Errorf("%s: expected a Language enum, got %+v", key, v)
+		}
+		code, ok := languageCode(v.Str)
+		if !ok {
+			return "", fmt.Errorf("%s: Language.%s has no explicit code mapping", key, v.Str)
+		}
+		return code, nil
+	}
+	first := func(list []string) string {
+		if len(list) == 0 {
+			return ""
+		}
+		return list[0]
+	}
+	// listProperty resolves the language list assertions of both entry points.
+	listProperty := func(list []string, contain, firstKey string) (corpus.Value, corpus.Value, bool, error) {
+		switch key {
+		case contain:
+			if want.Kind != corpus.KindArray {
+				return corpus.Value{}, corpus.Value{}, true, fmt.Errorf("%s: expected an array, got %+v", key, want)
+			}
+			wanted := corpus.Value{Kind: corpus.KindArray, Items: []corpus.Value{}}
+			got := corpus.Value{Kind: corpus.KindArray, Items: []corpus.Value{}}
+			contained := true
+			for _, item := range want.Items {
+				code, err := language(item)
+				if err != nil {
+					return corpus.Value{}, corpus.Value{}, true, err
+				}
+				wanted.Items = append(wanted.Items, str(code))
+				contained = contained && slices.Contains(list, code)
+			}
+			for _, code := range list {
+				got.Items = append(got.Items, str(code))
+			}
+			if contained {
+				got = wanted
+			}
+			return wanted, got, true, nil
+		case firstKey:
+			code, err := language(want)
+			return str(code), str(first(list)), true, err
+		}
+		return corpus.Value{}, corpus.Value{}, false, nil
+	}
+
+	switch owner {
+	case ownerReleaseGroup:
+		if key == titleResultKey {
+			return text(res.group)
+		}
+	case ownerCleanTitle:
+		if key == titleResultKey {
+			return text(res.clean)
+		}
+	case ownerLanguages:
+		if w, o, ok, err := listProperty(res.languages, titleResultKey+".Contain", "First().Id"); ok {
+			return w, o, err
+		}
+	case ownerMovieTitle:
+		if key == titleResultKey {
+			if want.Kind != corpus.KindNull {
+				return corpus.Value{}, corpus.Value{}, fmt.Errorf("%s: only a null result is asserted, got %+v", key, want)
+			}
+			observed := str("null")
+			if res.movie != nil {
+				observed = str("a movie")
+			}
+			return str("null"), observed, nil
+		}
+		m := res.movie
+		if m == nil {
+			// The source dereferences a null result: every property assertion fails,
+			// whatever it expects. Only an explicit $result null compares as null.
+			return want, absentValue, nil
+		}
+		switch key {
+		case "PrimaryMovieTitle":
+			return text(first(m.MovieTitles))
+		case "ReleaseGroup":
+			return text(m.ReleaseGroup)
+		case "Edition":
+			return text(m.Edition)
+		case "HardcodedSubs":
+			return text(m.HardcodedSubs)
+		case "ImdbId":
+			return text(m.ImdbID)
+		case "Year":
+			return number(m.Year)
+		case "TmdbId":
+			return number(m.TmdbID)
+		case "MovieTitle.CleanMovieTitle":
+			// Both the parsed primary title and the expected title are normalized, as the source asserts.
+			if want.Kind != corpus.KindString {
+				return corpus.Value{}, corpus.Value{}, fmt.Errorf("%s: expected a string, got %+v", key, want)
+			}
+			w, err := cleanMovieTitle(want.Str)
+			if err != nil {
+				return corpus.Value{}, corpus.Value{}, err
+			}
+			o, err := cleanMovieTitle(first(m.MovieTitles))
+			if err != nil {
+				return corpus.Value{}, corpus.Value{}, err
+			}
+			return str(w), str(o), nil
+		case "MovieTitles.Count":
+			return number(len(m.MovieTitles))
+		case "Languages.Count":
+			return number(len(m.Languages))
+		}
+		if w, o, ok, err := listProperty(m.Languages, "Languages.Contain", "Languages.First()"); ok {
+			return w, o, err
+		}
+		var i int
+		if n, scanErr := fmt.Sscanf(key, "MovieTitles[%d]", &i); n == 1 && scanErr == nil && strings.HasSuffix(key, "]") {
+			if i >= len(m.MovieTitles) {
+				// The source indexes past the list and throws: the assertion fails.
+				return want, absentValue, nil
+			}
+			return text(m.MovieTitles[i])
+		}
+	}
+	return corpus.Value{}, corpus.Value{}, fmt.Errorf("unsupported asserted property %q of %s", key, owner)
+}
+
+// cleanMovieTitleRe is the source's NormalizeRegex: the common words (a, an,
+// the, and, or, of) that are neither first, last nor part of an acronym, and
+// every non-word character and underscore.
+var cleanMovieTitleRe = func() *regexp2.Regexp {
+	re, err := regexp2.Compile(`((?:\b|_)(?<!^|[^a-zA-Z0-9_']\w[^a-zA-Z0-9_'])([aà](?!$|[^a-zA-Z0-9_']\w[^a-zA-Z0-9_'])|an|the|and|or|of)(?!$)(?:\b|_))|\W|_`, ic)
+	if err != nil {
+		panic(err)
+	}
+	re.MatchTimeout = matchTimeout
+	return re
+}()
+
+var germanUmlauts = strings.NewReplacer("ä", "ae", "ö", "oe", "ü", "ue", "Ä", "Ae", "Ö", "Oe", "Ü", "Ue", "ß", "ss")
+
+// accentFold maps each lower-case letter of Latin-1 Supplement and Latin
+// Extended-A that has a canonical decomposition to its base letter. Letters
+// without one (ø, æ, œ, ł, đ, ħ, ŋ, ŧ, ı, ĳ, ĸ, ŀ, ŉ, ſ) are deliberately absent:
+// normalization form D leaves them as they are.
+var accentFold = func() *strings.Replacer {
+	var pairs []string
+	for base, accented := range map[string]string{
+		"a": "àáâãåāăą", "c": "çćĉċč", "d": "ď", "e": "èéêëēĕėęě", "g": "ĝğġģ", "h": "ĥ", "i": "ìíîïĩīĭį",
+		"j": "ĵ", "k": "ķ", "l": "ĺļľ", "n": "ñńņň", "o": "òóôõōŏő", "r": "ŕŗř", "s": "śŝşš", "t": "ţť",
+		"u": "ùúûũūŭůűų", "w": "ŵ", "y": "ýÿŷ", "z": "źżž",
+	} {
+		for _, r := range accented {
+			pairs = append(pairs, string(r), base)
+		}
+	}
+	return strings.NewReplacer(pairs...)
+}()
+
+// removeAccent is the source's RemoveAccent (decompose, drop the non-spacing
+// marks, recompose) for lower-case text, with the standard library only: the
+// letters of accentFold lose their accent and a combining mark of already
+// decomposed text is dropped. The standard library has no decomposition table
+// beyond that, so any other non-ASCII letter is an error: it might carry a
+// decomposition, and a silently unfolded title would be wrong.
+func removeAccent(s string) (string, error) {
+	s = strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Mn, r) {
+			return -1
+		}
+		return r
+	}, accentFold.Replace(s))
+	for _, r := range s {
+		if r > unicode.MaxASCII {
+			return "", fmt.Errorf("RemoveAccent(%q): %q is outside the Latin letters whose decomposition is ported", s, r)
+		}
+	}
+	return s, nil
+}
+
+// cleanMovieTitle is the source's CleanMovieTitle: a blank or all-digit title
+// is returned as it is, otherwise the normalized title is lower-cased, its
+// German umlauts spelled out and its accents removed.
+func cleanMovieTitle(title string) (string, error) {
+	if isBlank(title) {
+		return title, nil
+	}
+	if _, err := strconv.ParseInt(strings.Trim(title, " \t\n\v\f\r"), 10, 64); err == nil {
+		return title, nil
+	}
+	out, err := cleanMovieTitleRe.Replace(title, "", -1, -1)
+	if err != nil {
+		return "", err
+	}
+	return removeAccent(germanUmlauts.Replace(strings.ToLower(out)))
+}
+
+// titleRun is the outcome of one corpus through one parser. The selected scope
+// is title: enabled/disabled count its cases by upstream status.
+// otherEnabled/otherDisabled count the quality cases (owned by the quality
+// consumer) and outOfScope the unrelated cases, so the whole inventory
+// reconciles separately from the selected scope.
+type titleRun struct {
+	inputs                      int
+	passed, disposed, failed    int
+	enabled, disabled           int
+	otherEnabled, otherDisabled int
+	outOfScope                  int
+	privateDir                  int // passed or disposed cases proved on the private isDir adapter, not public ParseTitle
+	problems                    []string
+}
+
+func (r *titleRun) problem(format string, args ...any) {
+	r.problems = append(r.problems, fmt.Sprintf(format, args...))
+}
+
+// runTitleCorpus runs every enabled title case of c through p. A case passes
+// only when every source assertion holds for every input; a mismatch needs a
+// disposition (byID) binding every distinct mismatching observation.
+func runTitleCorpus(p *Parser, c *corpus.Corpus, byID map[string]corpus.Disposition) titleRun {
+	var r titleRun
+	// Title names carry no symbolic date; the context is only the shared contract.
+	tc := corpus.TimeContext{Now: time.Now(), Location: time.Local}
+	for _, cs := range c.Cases {
+		switch {
+		case cs.Scope == corpus.ScopeOutOfScope:
+			r.outOfScope++
+		case cs.Scope != corpus.ScopeTitle && cs.UpstreamEnabled:
+			r.otherEnabled++
+		case cs.Scope != corpus.ScopeTitle:
+			r.otherDisabled++
+		case !cs.UpstreamEnabled:
+			r.disabled++
+		case qualityFixtures[cs.File]:
+			r.enabled++
+			r.problem("%s: a title case from the quality fixture %s", cs.ID, cs.File)
+			r.failed++
+		default:
+			r.enabled++
+			r.runCase(p, cs, tc, byID)
+		}
+	}
+	return r
+}
+
+func (r *titleRun) runCase(p *Parser, cs corpus.Case, tc corpus.TimeContext, byID map[string]corpus.Disposition) {
+	names, err := cs.Inputs(tc)
+	if err != nil {
+		r.problem("%s: %v", cs.ID, err)
+		r.failed++
+		return
+	}
+	dir := cs.Expected[titleDirKey].Bool
+	d, has := byID[cs.ID]
+	mismatch := map[string][]corpus.Value{} // property -> distinct observed values
+	bad := false
+	for _, name := range names {
+		r.inputs++
+		res, err := observeTitle(p, cs.ScopeOwner, dir, name)
+		if err != nil {
+			r.problem("%s (%s:%d) %q: %v", cs.ID, cs.File, cs.Line, name, err)
+			bad = true
+			continue
+		}
+		for _, key := range corpus.SortedKeys(cs.Expected) {
+			if key == corpus.InputKey || key == titleDirKey {
+				continue
+			}
+			wantNative, observed, err := resolveTitle(cs.ScopeOwner, key, cs.Expected[key], res)
+			if err != nil {
+				r.problem("%s (%s:%d): %v", cs.ID, cs.File, cs.Line, err)
+				bad = true
+				continue
+			}
+			if corpus.Equal(wantNative, observed) {
+				continue
+			}
+			if !slices.ContainsFunc(mismatch[key], func(v corpus.Value) bool { return corpus.Equal(v, observed) }) {
+				mismatch[key] = append(mismatch[key], observed)
+			}
+			if !has {
+				r.problem("%s (%s:%d) %q: %s = %+v, source expects %+v", cs.ID, cs.File, cs.Line, name, key, observed, wantNative)
+			}
+		}
+	}
+	switch {
+	case bad:
+		r.failed++
+	case len(mismatch) == 0 && !has:
+		r.passed++
+		r.privateDir += b2i(dir)
+	case len(mismatch) == 0:
+		r.problem("%s: disposition is stale, the case passes", cs.ID)
+		r.failed++
+	case !has:
+		r.failed++
+	case !dispositionBinds(d, mismatch):
+		r.problem("%s: disposition does not bind every observed value %v", cs.ID, mismatch)
+		r.failed++
+	default:
+		r.disposed++
+		r.privateDir += b2i(dir)
+	}
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// reconcile compares the run with the header: the whole inventory (all scopes)
+// against the corpus counts, and, separately, the selected title scope.
+func (r titleRun) reconcile(counts map[string]int) []string {
+	var out []string
+	check := func(name string, got, want int) {
+		if got != want {
+			out = append(out, fmt.Sprintf("inventory %s = %d, header %d", name, got, want))
+		}
+	}
+	check("cases", r.enabled+r.disabled+r.otherEnabled+r.otherDisabled+r.outOfScope, counts["cases"])
+	check("enabled", r.enabled+r.otherEnabled, counts["enabled"])
+	check("disabled", r.disabled+r.otherDisabled, counts["disabled"])
+	check("out_of_scope", r.outOfScope, counts["out_of_scope"])
+	if r.enabled == 0 {
+		out = append(out, "selected title scope has no enabled case")
+	}
+	if r.passed+r.disposed+r.failed != r.enabled {
+		out = append(out, fmt.Sprintf("selected scope: passed %d + disposed %d + failed %d != enabled %d", r.passed, r.disposed, r.failed, r.enabled))
+	}
+	if r.failed != 0 || r.passed == 0 {
+		out = append(out, fmt.Sprintf("selected scope: failed=%d passed=%d", r.failed, r.passed))
+	}
+	return out
 }

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -140,6 +141,283 @@ namespace Fixture.ParserTests
 }
 `
 
+// Synthetic title fixtures with the real forms of the movie title tests:
+// ParseMovieTitle cases asserted through property chains, an assertion scope,
+// a loop over the alternative titles with indexers and an isDir argument,
+// membership and count assertions on the languages, a null result, an ignored
+// method, and the out-of-scope tests of the same file (another entry point, a
+// normalization helper, run-time generated names).
+const fixtureTitleParser = `using System.Linq;
+using FluentAssertions;
+using FluentAssertions.Execution;
+using NUnit.Framework;
+
+namespace Fixture.ParserTests
+{
+    [TestFixture]
+    public class ParserFixture
+    {
+        [TestCase("The.Movie.2015.1080p.BluRay.x264-GRP", "The Movie")]
+        [TestCase("Anime Movie (1999)", "Anime Movie")]
+        public void should_parse_movie_title(string postTitle, string title)
+        {
+            Parser.Parser.ParseMovieTitle(postTitle).PrimaryMovieTitle.Should().Be(title);
+        }
+
+        [TestCase("[Group] Some Movie (2016) v2 [97681524].mkv", "Some Movie", "Group", 2016)]
+        public void should_parse_anime_movie_title(string postTitle, string title, string releaseGroup, int year)
+        {
+            var movie = Parser.Parser.ParseMovieTitle(postTitle);
+            using (new AssertionScope())
+            {
+                movie.PrimaryMovieTitle.Should().Be(title);
+                movie.ReleaseGroup.Should().Be(releaseGroup);
+                movie.Year.Should().Be(year);
+            }
+        }
+
+        [TestCase("[www.test.com] - Movie.Title.2023.720p.HDTV.X264-DIMENSION", "Movie Title")]
+        [TestCase("test.net - Movie.Title.2023.720p.HDTV.X264-DIMENSION", "Movie Title")]
+        public void should_not_parse_url_in_name(string postTitle, string title)
+        {
+            var result = Parser.Parser.ParseMovieTitle(postTitle).MovieTitle.CleanMovieTitle();
+            result.Should().Be(title.CleanMovieTitle());
+        }
+
+        [TestCase("Movie.One.AKA.Movie.Two.1965.DVDRip.XviD-KG.avi",
+            new string[]
+            {
+                "Movie One AKA Movie Two",
+                "Movie One",
+                "Movie Two"
+            })]
+        public void should_parse_movie_alternative_titles(string postTitle, string[] parsedTitles)
+        {
+            var movieInfo = Parser.Parser.ParseMovieTitle(postTitle, true);
+
+            movieInfo.MovieTitles.Count.Should().Be(parsedTitles.Length);
+
+            for (var i = 0; i < movieInfo.MovieTitles.Count; i += 1)
+            {
+                movieInfo.MovieTitles[i].Should().Be(parsedTitles[i]);
+            }
+        }
+
+        [TestCase("Movie.Title.1994.French.English.1080p.XviD-LOL")]
+        public void should_parse_language_french_english(string postTitle)
+        {
+            var result = Parser.Parser.ParseMovieTitle(postTitle, true);
+
+            result.Languages.Should().Contain(Language.French);
+            result.Languages.Should().Contain(Language.English);
+            result.Languages.Should().Contain(Language.French);
+        }
+
+        [TestCase("The.German.Doctor.2013.LIMITED.DVDRip.x264-RedBlade")]
+        public void should_not_parse_wrong_language_in_title(string postTitle)
+        {
+            var parsed = Parser.Parser.ParseMovieTitle(postTitle, true);
+            parsed.Languages.Count.Should().Be(1);
+            parsed.Languages.First().Should().Be(Language.Unknown);
+        }
+
+        [TestCase("76El6LcgLzqb426WoVFg1vVVVGx4uCYopQkfjmLe")]
+        public void should_not_parse_crap(string title)
+        {
+            Parser.Parser.ParseMovieTitle(title).Should().BeNull();
+            ExceptionVerification.IgnoreWarns();
+        }
+
+        [Ignore("not run upstream")]
+        [TestCase("Ignored.Movie.2000.720p", "Ignored Movie")]
+        public void ignored_title(string postTitle, string title)
+        {
+            Parser.Parser.ParseMovieTitle(postTitle).PrimaryMovieTitle.Should().Be(title);
+        }
+
+        [TestCase("1234567", "tt1234567")]
+        public void should_normalize_imdbid(string imdbid, string normalized)
+        {
+            Parser.Parser.NormalizeImdbId(imdbid).Should().BeEquivalentTo(normalized);
+        }
+
+        [Test]
+        public void should_remove_accents_from_title()
+        {
+            const string title = "Carniv\u00E0le";
+
+            title.CleanMovieTitle().Should().Be("carnivale");
+        }
+
+        [Test]
+        public void should_not_parse_md5()
+        {
+            var hash = "SEED";
+            var hashAlgo = System.Security.Cryptography.MD5.Create();
+            var success = 0;
+            for (var i = 0; i < 100; i++)
+            {
+                hash = BitConverter.ToString(hashAlgo.ComputeHash(Encoding.Default.GetBytes(hash))).Replace("-", "");
+
+                if (Parser.Parser.ParseMovieTitle(hash) == null)
+                {
+                    success++;
+                }
+            }
+
+            success.Should().Be(100);
+        }
+    }
+}
+`
+
+const fixtureTitleEdition = `using FluentAssertions;
+using NUnit.Framework;
+
+namespace Fixture.ParserTests
+{
+    [TestFixture]
+    public class EditionParserFixture
+    {
+        [TestCase("Movie Title 2012 Directors Cut", "Directors Cut")]
+        public void should_parse_edition(string postTitle, string edition)
+        {
+            var parsed = Parser.Parser.ParseMovieTitle(postTitle);
+            parsed.Edition.Should().Be(edition);
+        }
+    }
+}
+`
+
+const fixtureTitleGroups = `using FluentAssertions;
+using NUnit.Framework;
+
+namespace Fixture.ParserTests
+{
+    [TestFixture]
+    public class ReleaseGroupParserFixture
+    {
+        [TestCase("Movie.Name.2022.1080p.BluRay.x264-VARYG", "VARYG")]
+        [TestCase("Movie.Name.2022.1080p.BluRay.x264", null)]
+        public void should_parse_release_group(string title, string expected)
+        {
+            Parser.ReleaseGroupParser.ParseReleaseGroup(title).Should().Be(expected);
+        }
+
+        [TestCase("Terrible.Anime.Title.2020.DBOX.480p.x264-iKaos [v3] [6AFFEF6B]")]
+        public void should_not_parse_anime_hash_as_release_group(string title)
+        {
+            Parser.ReleaseGroupParser.ParseReleaseGroup(title).Should().BeNull();
+        }
+    }
+}
+`
+
+const fixtureTitleLanguages = `using System.Linq;
+using FluentAssertions;
+using NUnit.Framework;
+
+namespace Fixture.ParserTests
+{
+    [TestFixture]
+    public class LanguageParserFixture
+    {
+        [TestCase("Movie Title 1994 French 1080p")]
+        public void should_parse_language_french(string postTitle)
+        {
+            var result = LanguageParser.ParseLanguages(postTitle);
+            result.Should().Contain(Language.French);
+        }
+
+        [TestCase("Movie title 7x4 audio latino")]
+        public void should_parse_language_spanish_latino(string postTitle)
+        {
+            var result = LanguageParser.ParseLanguages(postTitle);
+            result.First().Id.Should().Be(Language.SpanishLatino.Id);
+        }
+
+        [TestCase("Movie Title - 2022.en.sub")]
+        public void should_parse_subtitle_language_english(string fileName)
+        {
+            var result = LanguageParser.ParseSubtitleLanguage(fileName);
+            result.Should().Be(Language.English);
+        }
+
+        [TestCase("Name (2020) - [AAC 2.0].testtitle.default.eng.forced.ass", new[] { "default", "forced" }, "testtitle", "English")]
+        [TestCase("Name (2020) - [AAC 2.0].ru-something-else.srt", new string[0], "something-else", "Russian")]
+        public void should_parse_title_and_tags(string postTitle, string[] expectedTags, string expectedTitle, string expectedLanguage)
+        {
+            var subtitleTitleInfo = LanguageParser.ParseSubtitleLanguageInformation(postTitle);
+
+            subtitleTitleInfo.LanguageTags.Should().BeEquivalentTo(expectedTags);
+            subtitleTitleInfo.Language.Should().BeEquivalentTo((Language)expectedLanguage);
+        }
+    }
+}
+`
+
+const fixtureTitleHashed = `using FluentAssertions;
+using NUnit.Framework;
+
+namespace Fixture.ParserTests
+{
+    [TestFixture]
+    public class HashedReleaseFixture
+    {
+        public static object[] HashedReleaseParserCases =
+        {
+            new object[]
+            {
+                @"C:\Test\Some.Hashed.Release.2018.720p-Mercury\0e895c37.mkv".AsOsAgnostic(),
+                "Some Hashed Release",
+                Quality.SDTV,
+                "Mercury"
+            },
+            new object[]
+            {
+                @"C:\Test\Movie.2018\abc.mkv".AsOsAgnostic(),
+                "Movie",
+                Quality.Bluray720p,
+                null
+            }
+        };
+
+        [Test]
+        [TestCaseSource(nameof(HashedReleaseParserCases))]
+        public void should_properly_parse_hashed_releases(string path, string title, Quality quality, string releaseGroup)
+        {
+            var result = Parser.Parser.ParseMoviePath(path);
+            result.PrimaryMovieTitle.Should().Be(title);
+        }
+    }
+}
+`
+
+// fixtureTitleEmpty stands in for a title fixture a test does not exercise.
+const fixtureTitleEmpty = "using NUnit.Framework;\n"
+
+const (
+	// modelLanguages names the Language members the parser produces; the
+	// Language declaration itself is not part of the delivered areas.
+	modelLanguages = `namespace Fixture.Parser
+{
+    public static class LanguageParser
+    {
+        public static List<Language> ParseLanguages(string title)
+        {
+            languages.Add(Language.English);
+            languages.Add(Language.French);
+            languages.Add(Language.Unknown);
+            languages.Add(Language.SpanishLatino);
+        }
+    }
+}
+`
+	// provenanceStub is a ported source recorded for attribution only: it holds
+	// a form the lexer rejects, so reading it proves it is never interpreted.
+	provenanceStub = "// ported source\nvar s = $\"{title}\";\n"
+)
+
 const (
 	modelResolution = `namespace Fixture.Parser
 {
@@ -196,16 +474,44 @@ func writeTree(t *testing.T, spec appSpec, quality string) string {
 			t.Fatalf("unexpected model path %s", m)
 		}
 	}
-	for rel, text := range content {
-		path := filepath.Join(root, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
-			t.Fatal(err)
+	for _, rel := range spec.titles {
+		switch rel {
+		case "tests/ParserFixture.cs":
+			content[rel] = fixtureTitleParser
+		case "tests/EditionParserFixture.cs":
+			content[rel] = fixtureTitleEdition
+		case "tests/ReleaseGroupParserFixture.cs":
+			content[rel] = fixtureTitleGroups
+		case "tests/LanguageParserFixture.cs":
+			content[rel] = fixtureTitleLanguages
+		case "tests/HashedReleaseFixture.cs":
+			content[rel] = fixtureTitleHashed
+		default:
+			content[rel] = fixtureTitleEmpty
 		}
 	}
+	if spec.languages != "" {
+		content[spec.languages] = modelLanguages
+	}
+	for _, rel := range spec.provenance {
+		content[rel] = provenanceStub
+	}
+	for rel, text := range content {
+		writeSource(t, root, rel, text)
+	}
 	return root
+}
+
+// writeSource writes one synthetic source file under root.
+func writeSource(t *testing.T, root, rel, text string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func lineOf(t *testing.T, src, needle string) int {
@@ -266,7 +572,12 @@ func TestExtractRecordsEverySourceCase(t *testing.T) {
 			if h.App != spec.name || h.SourceRepository != spec.repository || h.SourceCommit != testCommit || h.License != "GPL-3.0" {
 				t.Errorf("attribution lost: %+v", h)
 			}
+			// The quality fixtures give 15 cases (14 enabled, 1 ignored); the movie side's title
+			// fixtures add 24: 16 enabled title cases, 1 ignored title case and 7 out of scope.
 			wantCounts := map[string]int{"cases": 15, "enabled": 14, "disabled": 1, "out_of_scope": 0}
+			if len(spec.titles) > 0 {
+				wantCounts = map[string]int{"cases": 39, "enabled": 30, "disabled": 2, "out_of_scope": 7}
+			}
 			for k, want := range wantCounts {
 				if h.Counts[k] != want {
 					t.Errorf("counts[%s] = %d, want %d", k, h.Counts[k], want)
@@ -405,7 +716,7 @@ func TestExtractRejectsUnsupportedFormsWithLocation(t *testing.T) {
 	tests := []struct {
 		name, src, needle, reason string
 	}{
-		{"loop statement", body("for (var i = 0; i < 2; i++) { }"), "for (var", "unsupported statement for"},
+		{"loop statement", body("while (true) { }"), "while (true)", "unsupported statement while"},
 		{"unknown attribute", wrap("\n        [Category(\"slow\")]\n        [TestCase(\"x\")]\n        public void m(string title) { QualityParser.ParseQuality(title).Quality.Should().Be(Quality.SDTV); }\n"), "[Category", "unsupported attribute Category"},
 		{"never asserted", body("QualityParser.ParseQuality(title);"), "QualityParser.ParseQuality(title);", "is never asserted"},
 		{"unsupported assertion", body("QualityParser.ParseQuality(title).Quality.Should().NotBe(Quality.SDTV);"), "NotBe", "unsupported method"},
@@ -1023,7 +1334,7 @@ func marshalLen(t *testing.T, v corpus.Value) int {
 	t.Helper()
 	cs := corpus.Case{
 		ID: "id", File: "tests/a.cs", Method: "m", Entry: "Test", Line: 1, UpstreamEnabled: true,
-		Scope: corpus.ScopeQuality, ScopeOwner: scopeOwner, Args: []corpus.Value{v}, Expected: map[string]corpus.Value{},
+		Scope: corpus.ScopeQuality, ScopeOwner: qualityOwner, Args: []corpus.Value{v}, Expected: map[string]corpus.Value{},
 	}
 	c := &corpus.Corpus{
 		Header: corpus.Header{
@@ -1159,5 +1470,330 @@ func TestExtractRejectsSharedArrayThatOnlyEncodedSizeExpands(t *testing.T) {
 	}
 	if got := caseBy(t, c, "m", "TestCase#1").Expected["Quality"]; got.Kind != corpus.KindArray || len(got.Items) != 2 {
 		t.Errorf("control value = %+v", got.Kind)
+	}
+}
+
+func movieSpec() appSpec { return appSpecs()[1] }
+
+// titleCorpus extracts the synthetic movie tree and reads it back through the
+// one canonical reader.
+func titleCorpus(t *testing.T) *corpus.Corpus {
+	t.Helper()
+	spec := movieSpec()
+	c, _, err := extractApp(spec, writeTree(t, spec, fixtureQuality), testCommit)
+	if err != nil {
+		t.Fatalf("extractApp: %v", err)
+	}
+	data, err := corpus.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := corpus.Read(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("corpus.Read: %v", err)
+	}
+	return got
+}
+
+func arr(items ...corpus.Value) corpus.Value {
+	return corpus.Value{Kind: corpus.KindArray, Items: append([]corpus.Value{}, items...)}
+}
+
+var null = corpus.Value{Kind: corpus.KindNull}
+
+// wantKeys asserts the exact set of recorded property keys of a case.
+func wantKeys(t *testing.T, cs corpus.Case, keys ...string) {
+	t.Helper()
+	want := append([]string{}, keys...)
+	slices.Sort(want)
+	if got := corpus.SortedKeys(cs.Expected); !slices.Equal(got, want) {
+		t.Errorf("%s %s: expected keys %v, want %v", cs.Method, cs.Entry, got, want)
+	}
+}
+
+func TestExtractRecordsEveryTitleCaseWithItsAssertedProperties(t *testing.T) {
+	got := titleCorpus(t)
+	input := func(names ...string) corpus.Value {
+		items := make([]corpus.Value, len(names))
+		for i, n := range names {
+			items[i] = str(n)
+		}
+		return arr(items...)
+	}
+	title := func(cs corpus.Case, owner string) {
+		t.Helper()
+		if cs.Scope != corpus.ScopeTitle || cs.ScopeOwner != owner || !cs.UpstreamEnabled {
+			t.Errorf("%s %s: scope %s owner %s enabled %v, want an enabled title case of %s", cs.Method, cs.Entry, cs.Scope, cs.ScopeOwner, cs.UpstreamEnabled, owner)
+		}
+	}
+	const movieTitle, groupParser, languageParser = "Parser.ParseMovieTitle", "ReleaseGroupParser.ParseReleaseGroup", "LanguageParser.ParseLanguages"
+
+	// A property chain through the primary title.
+	cs := caseBy(t, got, "should_parse_movie_title", "TestCase#1")
+	title(cs, movieTitle)
+	wantKeys(t, cs, corpus.InputKey, "PrimaryMovieTitle")
+	wantValue(t, cs.Expected, corpus.InputKey, input("The.Movie.2015.1080p.BluRay.x264-GRP"))
+	wantValue(t, cs.Expected, "PrimaryMovieTitle", str("The Movie"))
+	if len(cs.Args) != 2 || !corpus.Equal(cs.Args[1], str("The Movie")) {
+		t.Errorf("arguments: %+v", cs.Args)
+	}
+
+	// A local result asserted inside an assertion scope: every property is recorded.
+	cs = caseBy(t, got, "should_parse_anime_movie_title", "TestCase#1")
+	title(cs, movieTitle)
+	wantKeys(t, cs, corpus.InputKey, "PrimaryMovieTitle", "ReleaseGroup", "Year")
+	wantValue(t, cs.Expected, "ReleaseGroup", str("Group"))
+	wantValue(t, cs.Expected, "Year", num(2016))
+
+	// A parsed title and its expected title are both normalized by the source; the recorded
+	// value is the title before normalization, under the normalized property path.
+	cs = caseBy(t, got, "should_not_parse_url_in_name", "TestCase#2")
+	title(cs, movieTitle)
+	wantKeys(t, cs, corpus.InputKey, "MovieTitle.CleanMovieTitle")
+	wantValue(t, cs.Expected, corpus.InputKey, input("test.net - Movie.Title.2023.720p.HDTV.X264-DIMENSION"))
+	wantValue(t, cs.Expected, "MovieTitle.CleanMovieTitle", str("Movie Title"))
+	if len(cs.Args) != 2 || !corpus.Equal(cs.Args[0], str("test.net - Movie.Title.2023.720p.HDTV.X264-DIMENSION")) {
+		t.Errorf("arguments: %+v", cs.Args)
+	}
+
+	// The loop over the alternative titles is bounded by the asserted count and indexes the results.
+	cs = caseBy(t, got, "should_parse_movie_alternative_titles", "TestCase#1")
+	title(cs, movieTitle)
+	wantKeys(t, cs, corpus.InputKey, "$isDir", "MovieTitles.Count", "MovieTitles[0]", "MovieTitles[1]", "MovieTitles[2]")
+	wantValue(t, cs.Expected, "$isDir", corpus.Value{Kind: corpus.KindBool, Bool: true})
+	wantValue(t, cs.Expected, "MovieTitles.Count", num(3))
+	for i, want := range []string{"Movie One AKA Movie Two", "Movie One", "Movie Two"} {
+		wantValue(t, cs.Expected, fmt.Sprintf("MovieTitles[%d]", i), str(want))
+	}
+	if len(cs.Args) != 2 || !corpus.Equal(cs.Args[1], arr(str("Movie One AKA Movie Two"), str("Movie One"), str("Movie Two"))) {
+		t.Errorf("array argument: %+v", cs.Args)
+	}
+
+	// Membership assertions collect the members in order, once each.
+	cs = caseBy(t, got, "should_parse_language_french_english", "TestCase#1")
+	title(cs, movieTitle)
+	wantKeys(t, cs, corpus.InputKey, "$isDir", "Languages.Contain")
+	wantValue(t, cs.Expected, "Languages.Contain", arr(enum("Language", "French"), enum("Language", "English")))
+
+	cs = caseBy(t, got, "should_not_parse_wrong_language_in_title", "TestCase#1")
+	wantKeys(t, cs, corpus.InputKey, "$isDir", "Languages.Count", "Languages.First()")
+	wantValue(t, cs.Expected, "Languages.Count", num(1))
+	wantValue(t, cs.Expected, "Languages.First()", enum("Language", "Unknown"))
+
+	// A null result is recorded on the result itself.
+	cs = caseBy(t, got, "should_not_parse_crap", "TestCase#1")
+	title(cs, movieTitle)
+	wantKeys(t, cs, corpus.InputKey, "$result")
+	wantValue(t, cs.Expected, "$result", null)
+
+	// The helper's own test: the string it normalizes is the recorded input, its folded
+	// form the asserted result; there are no arguments (a plain test with a local const).
+	cs = caseBy(t, got, "should_remove_accents_from_title", "Test")
+	title(cs, "Parser.CleanMovieTitle")
+	wantKeys(t, cs, corpus.InputKey, "$result")
+	wantValue(t, cs.Expected, corpus.InputKey, input("Carniv\u00E0le"))
+	wantValue(t, cs.Expected, "$result", str("carnivale"))
+	if len(cs.Args) != 0 {
+		t.Errorf("a plain test has no arguments: %+v", cs.Args)
+	}
+
+	// Upstream-ignored title cases stay retained and disabled.
+	cs = caseBy(t, got, "ignored_title", "TestCase#1")
+	if cs.UpstreamEnabled || cs.Scope != corpus.ScopeTitle {
+		t.Errorf("ignored title case: %+v", cs)
+	}
+	wantValue(t, cs.Expected, "PrimaryMovieTitle", str("Ignored Movie"))
+
+	cs = caseBy(t, got, "should_parse_edition", "TestCase#1")
+	title(cs, movieTitle)
+	wantKeys(t, cs, corpus.InputKey, "Edition")
+	wantValue(t, cs.Expected, "Edition", str("Directors Cut"))
+
+	// The release group and language parsers are entry points of their own.
+	cs = caseBy(t, got, "should_parse_release_group", "TestCase#1")
+	title(cs, groupParser)
+	wantKeys(t, cs, corpus.InputKey, "$result")
+	wantValue(t, cs.Expected, "$result", str("VARYG"))
+	cs = caseBy(t, got, "should_parse_release_group", "TestCase#2")
+	wantValue(t, cs.Expected, "$result", null)
+	cs = caseBy(t, got, "should_not_parse_anime_hash_as_release_group", "TestCase#1")
+	title(cs, groupParser)
+	wantValue(t, cs.Expected, "$result", null)
+
+	cs = caseBy(t, got, "should_parse_language_french", "TestCase#1")
+	title(cs, languageParser)
+	wantKeys(t, cs, corpus.InputKey, "$result.Contain")
+	wantValue(t, cs.Expected, "$result.Contain", arr(enum("Language", "French")))
+	cs = caseBy(t, got, "should_parse_language_spanish_latino", "TestCase#1")
+	title(cs, languageParser)
+	wantKeys(t, cs, corpus.InputKey, "First().Id")
+	wantValue(t, cs.Expected, "First().Id", enum("Language", "SpanishLatino"))
+
+	// Tests of other entry points are retained out of scope with their source arguments and no
+	// recorded input or assertion; their bodies are never interpreted.
+	for _, tc := range []struct {
+		method, entry, owner string
+		args                 []corpus.Value
+	}{
+		{"should_normalize_imdbid", "TestCase#1", "Parser.NormalizeImdbId", []corpus.Value{str("1234567"), str("tt1234567")}},
+		{"should_not_parse_md5", "Test", movieTitle, nil},
+		{"should_parse_subtitle_language_english", "TestCase#1", "LanguageParser.ParseSubtitleLanguage", []corpus.Value{str("Movie Title - 2022.en.sub")}},
+		{"should_parse_title_and_tags", "TestCase#1", "LanguageParser.ParseSubtitleLanguageInformation", []corpus.Value{
+			str("Name (2020) - [AAC 2.0].testtitle.default.eng.forced.ass"), arr(str("default"), str("forced")), str("testtitle"), str("English")}},
+		{"should_parse_title_and_tags", "TestCase#2", "LanguageParser.ParseSubtitleLanguageInformation", []corpus.Value{
+			str("Name (2020) - [AAC 2.0].ru-something-else.srt"), arr(), str("something-else"), str("Russian")}},
+		{"should_properly_parse_hashed_releases", "TestCaseSource:HashedReleaseParserCases#1", "Parser.ParseMoviePath", []corpus.Value{
+			str(`C:\Test\Some.Hashed.Release.2018.720p-Mercury\0e895c37.mkv`), str("Some Hashed Release"), enum("Quality", "SDTV"), str("Mercury")}},
+		{"should_properly_parse_hashed_releases", "TestCaseSource:HashedReleaseParserCases#2", "Parser.ParseMoviePath", []corpus.Value{
+			str(`C:\Test\Movie.2018\abc.mkv`), str("Movie"), enum("Quality", "Bluray720p"), null}},
+	} {
+		cs := caseBy(t, got, tc.method, tc.entry)
+		if cs.Scope != corpus.ScopeOutOfScope || cs.ScopeOwner != tc.owner || !cs.UpstreamEnabled {
+			t.Errorf("%s %s: scope %s owner %s, want out of scope under %s", tc.method, tc.entry, cs.Scope, cs.ScopeOwner, tc.owner)
+		}
+		wantKeys(t, cs, corpus.InputKey)
+		wantValue(t, cs.Expected, corpus.InputKey, arr())
+		if len(cs.Args) != len(tc.args) {
+			t.Errorf("%s %s: arguments %+v, want %+v", tc.method, tc.entry, cs.Args, tc.args)
+			continue
+		}
+		for i, want := range tc.args {
+			if !corpus.Equal(cs.Args[i], want) {
+				t.Errorf("%s %s: argument %d = %+v, want %+v", tc.method, tc.entry, i, cs.Args[i], want)
+			}
+		}
+	}
+
+	// The inventory: every source case of every title fixture is counted, and a plain test (no
+	// TestCase attribute, no source row) is counted as such.
+	h := got.Header
+	for file, want := range map[string]int{
+		"tests/ParserFixture.cs": 13, "tests/EditionParserFixture.cs": 1, "tests/ReleaseGroupParserFixture.cs": 3,
+		"tests/LanguageParserFixture.cs": 5, "tests/HashedReleaseFixture.cs": 2, "tests/CrapParserFixture.cs": 0, "tests/UrlFixture.cs": 0,
+	} {
+		raw := h.Counts["source:testcase_attrs:"+file] + h.Counts["source:source_rows:"+file] + h.Counts["source:plain_tests:"+file]
+		if h.Counts["cases:"+file] != want || raw != want {
+			t.Errorf("%s: %d cases and %d raw rows, want %d", file, h.Counts["cases:"+file], raw, want)
+		}
+	}
+	if h.Counts["source:plain_tests:tests/ParserFixture.cs"] != 2 || h.Counts["source:source_rows:tests/HashedReleaseFixture.cs"] != 2 {
+		t.Errorf("plain test and row counts: %v", h.Counts)
+	}
+	if _, ok := h.Counts["source:plain_tests:tests/EditionParserFixture.cs"]; ok {
+		t.Error("a file without plain tests must not record a plain-test count")
+	}
+	// Attribution covers the title fixtures, the language source and the ported provenance sources.
+	for _, p := range append(append([]string{"parser/LanguageParser.cs"}, movieSpec().titles...), movieSpec().provenance...) {
+		if !slices.Contains(h.SourcePaths, p) {
+			t.Errorf("source path %s is not attributed", p)
+		}
+	}
+	ids := map[string]bool{}
+	for _, cs := range got.Cases {
+		if ids[cs.ID] {
+			t.Errorf("duplicate case identity %s", cs.ID)
+		}
+		ids[cs.ID] = true
+	}
+	again := titleCorpus(t)
+	a, _ := corpus.Marshal(got)
+	b, _ := corpus.Marshal(again)
+	if !bytes.Equal(a, b) {
+		t.Error("repeated title extraction must be byte-identical")
+	}
+}
+
+func TestExtractSeriesSideRecordsNoTitleCases(t *testing.T) {
+	spec := appSpecs()[0]
+	if len(spec.titles) != 0 || spec.languages != "" || len(spec.provenance) != 0 {
+		t.Fatalf("the series side must not extract titles yet: %+v", spec)
+	}
+	for _, cs := range extractSynthetic(t, spec).Cases {
+		if cs.Scope != corpus.ScopeQuality {
+			t.Errorf("series case %s has scope %s", cs.ID, cs.Scope)
+		}
+	}
+}
+
+// titleMethod is a one-method title fixture class: attr is the attribute line of
+// the method and body the statements of its body.
+func titleMethod(attr, body string) string {
+	return "using NUnit.Framework;\n\nnamespace F\n{\n    [TestFixture]\n    public class ParserFixture\n    {\n        " + attr +
+		"\n        public void m(string title)\n        {\n" + body + "\n        }\n    }\n}\n"
+}
+
+// extractTitleRejects extracts the movie tree with ParserFixture replaced by src
+// and returns the located rejection.
+func extractTitleRejects(t *testing.T, src string) *srcError {
+	t.Helper()
+	spec := movieSpec()
+	root := writeTree(t, spec, fixtureQuality)
+	writeSource(t, root, "tests/ParserFixture.cs", src)
+	_, _, err := extractApp(spec, root, testCommit)
+	var se *srcError
+	if !errors.As(err, &se) {
+		t.Fatalf("want *srcError, got %v", err)
+	}
+	if se.file != "tests/ParserFixture.cs" || se.line < 1 || se.col < 1 {
+		t.Errorf("location %s:%d:%d", se.file, se.line, se.col)
+	}
+	return se
+}
+
+func TestExtractRejectsUnsupportedTitleFormsWithLocation(t *testing.T) {
+	const attr = `[TestCase("x")]`
+	const call = "            var info = Parser.Parser.ParseMovieTitle(title);\n"
+	for _, tc := range []struct {
+		name, body, reason, at string
+	}{
+		{"no entry point", "            var x = title;", "no recognized entry point", "void m("},
+		{"unknown language member", "            Parser.Parser.ParseMovieTitle(title).Languages.Should().Contain(Language.Klingon);", "unknown member Language.Klingon", "Klingon"},
+		{"while loop", call + "            while (true) { }", "unsupported statement while", "while"},
+		{"loop bound the source never asserted", call + "            for (var i = 0; i < info.MovieTitles.Count; i++)\n            {\n                info.MovieTitles[i].Should().Be(\"x\");\n            }", "unsupported comparison operands", "info.MovieTitles.Count; i++"},
+		{"other using", "            using (new Other())\n            {\n                Parser.Parser.ParseMovieTitle(title).Year.Should().Be(1);\n            }", "only using (new AssertionScope()) is supported", "Other"},
+		{"conflicting assertions", call + "            info.Year.Should().Be(1);\n            info.Year.Should().Be(2);", "conflicting assertions on Year", "info.Year.Should().Be(2)"},
+		{"result never asserted", call, "the result of Parser.ParseMovieTitle is never asserted", attr},
+		{"entry point never called", "            var ParseMovieTitle = 1;", "the case never calls Parser.ParseMovieTitle", attr},
+		{"unknown assertion form", call + "            info.Year.Should().BeGreaterThan(1);", "unsupported method Should", "BeGreaterThan"},
+		{"normalized title against a plain string", "            var r = Parser.Parser.ParseMovieTitle(title).MovieTitle.CleanMovieTitle();\n            r.Should().Be(\"x\");", "a normalized title is compared only with a normalized title", `r.Should().Be("x")`},
+		{"plain title against a normalized string", "            Parser.Parser.ParseMovieTitle(title).PrimaryMovieTitle.Should().Be(title.CleanMovieTitle());", "a normalized title is compared only with a normalized title", "PrimaryMovieTitle"},
+		{"membership of a normalized title", "            Parser.Parser.ParseMovieTitle(title).MovieTitle.CleanMovieTitle().Should().Contain(\"x\");", "unsupported assertion on a normalized title", "CleanMovieTitle().Should()"},
+		{"const without initializer", call + "            const string x;", "unsupported const declaration", "const string x;"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := titleMethod(attr, tc.body)
+			se := extractTitleRejects(t, src)
+			if !strings.Contains(se.reason, tc.reason) {
+				t.Errorf("reason = %q, want %q", se.reason, tc.reason)
+			}
+			if want := lineOf(t, src, tc.at); se.line != want {
+				t.Errorf("line = %d, want %d (%s)", se.line, want, se)
+			}
+		})
+	}
+}
+
+func TestExtractRunRejectingATitleFixturePublishesNothingAndKeepsPriorOutput(t *testing.T) {
+	specs := appSpecs()
+	sroot := writeTree(t, specs[0], fixtureQuality)
+	rroot := writeTree(t, specs[1], fixtureQuality)
+	bad := titleMethod(`[TestCase("x")]`, "            var x = title;")
+	writeSource(t, rroot, "tests/ParserFixture.cs", bad)
+	out := t.TempDir()
+	prior := map[string]string{"series.jsonl": "prior series\n", "movie.jsonl": "prior movie\n"}
+	for name, text := range prior {
+		if err := os.WriteFile(filepath.Join(out, name), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, stdout, stderr := runExtract(t, out, sroot, rroot)
+	want := fmt.Sprintf("extract: unsupported app=movie file=tests/ParserFixture.cs line=%d col=", lineOf(t, bad, "void m("))
+	if code != 1 || !strings.Contains(stderr, want) || !strings.Contains(stderr, "no recognized entry point") || stdout != "" {
+		t.Errorf("exit %d stdout %q stderr %q, want exit 1 with %q and no summary", code, stdout, stderr, want)
+	}
+	for name, text := range prior {
+		if got, err := os.ReadFile(filepath.Join(out, name)); err != nil || string(got) != text {
+			t.Errorf("%s = %q (%v), want the prior output kept", name, got, err)
+		}
 	}
 }

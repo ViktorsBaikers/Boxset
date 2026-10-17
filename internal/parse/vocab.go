@@ -350,3 +350,154 @@ func movieExtensionQuality(ext string) int {
 	}
 	return rqUnknown
 }
+
+// Source Language members in Language.All order (the members the movie title
+// parser names, plus the rest of the source list). The table below maps each
+// member to a stable Boxset language code; nothing is derived from the source's
+// numeric ids.
+const (
+	lgUnknown = iota
+	lgEnglish
+	lgFrench
+	lgSpanish
+	lgGerman
+	lgItalian
+	lgDanish
+	lgDutch
+	lgJapanese
+	lgIcelandic
+	lgChinese
+	lgRussian
+	lgPolish
+	lgVietnamese
+	lgSwedish
+	lgNorwegian
+	lgFinnish
+	lgTurkish
+	lgPortuguese
+	lgFlemish
+	lgGreek
+	lgKorean
+	lgHungarian
+	lgHebrew
+	lgLithuanian
+	lgCzech
+	lgHindi
+	lgRomanian
+	lgThai
+	lgBulgarian
+	lgPortugueseBR
+	lgArabic
+	lgUkrainian
+	lgPersian
+	lgBengali
+	lgSlovak
+	lgLatvian
+	lgSpanishLatino
+	lgCatalan
+	lgCroatian
+	lgSerbian
+	lgBosnian
+	lgEstonian
+	lgTamil
+	lgIndonesian
+	lgTelugu
+	lgMacedonian
+	lgSlovenian
+	lgMalayalam
+	lgKannada
+	lgAlbanian
+	lgAfrikaans
+	lgMarathi
+	lgTagalog
+	lgUrdu
+	lgRomansh
+	lgMongolian
+	lgGeorgian
+	lgAny
+	lgOriginal
+	lgCount
+)
+
+// languageDef is one source Language member and its Boxset code.
+type languageDef struct {
+	member string
+	code   string
+}
+
+// languageDefs is the explicit source-Language-member to code table.
+func languageDefs() [lgCount]languageDef {
+	return [lgCount]languageDef{
+		lgUnknown:       {"Unknown", "unknown"},
+		lgEnglish:       {"English", "english"},
+		lgFrench:        {"French", "french"},
+		lgSpanish:       {"Spanish", "spanish"},
+		lgGerman:        {"German", "german"},
+		lgItalian:       {"Italian", "italian"},
+		lgDanish:        {"Danish", "danish"},
+		lgDutch:         {"Dutch", "dutch"},
+		lgJapanese:      {"Japanese", "japanese"},
+		lgIcelandic:     {"Icelandic", "icelandic"},
+		lgChinese:       {"Chinese", "chinese"},
+		lgRussian:       {"Russian", "russian"},
+		lgPolish:        {"Polish", "polish"},
+		lgVietnamese:    {"Vietnamese", "vietnamese"},
+		lgSwedish:       {"Swedish", "swedish"},
+		lgNorwegian:     {"Norwegian", "norwegian"},
+		lgFinnish:       {"Finnish", "finnish"},
+		lgTurkish:       {"Turkish", "turkish"},
+		lgPortuguese:    {"Portuguese", "portuguese"},
+		lgFlemish:       {"Flemish", "flemish"},
+		lgGreek:         {"Greek", "greek"},
+		lgKorean:        {"Korean", "korean"},
+		lgHungarian:     {"Hungarian", "hungarian"},
+		lgHebrew:        {"Hebrew", "hebrew"},
+		lgLithuanian:    {"Lithuanian", "lithuanian"},
+		lgCzech:         {"Czech", "czech"},
+		lgHindi:         {"Hindi", "hindi"},
+		lgRomanian:      {"Romanian", "romanian"},
+		lgThai:          {"Thai", "thai"},
+		lgBulgarian:     {"Bulgarian", "bulgarian"},
+		lgPortugueseBR:  {"PortugueseBR", "portuguese-br"},
+		lgArabic:        {"Arabic", "arabic"},
+		lgUkrainian:     {"Ukrainian", "ukrainian"},
+		lgPersian:       {"Persian", "persian"},
+		lgBengali:       {"Bengali", "bengali"},
+		lgSlovak:        {"Slovak", "slovak"},
+		lgLatvian:       {"Latvian", "latvian"},
+		lgSpanishLatino: {"SpanishLatino", "spanish-latino"},
+		lgCatalan:       {"Catalan", "catalan"},
+		lgCroatian:      {"Croatian", "croatian"},
+		lgSerbian:       {"Serbian", "serbian"},
+		lgBosnian:       {"Bosnian", "bosnian"},
+		lgEstonian:      {"Estonian", "estonian"},
+		lgTamil:         {"Tamil", "tamil"},
+		lgIndonesian:    {"Indonesian", "indonesian"},
+		lgTelugu:        {"Telugu", "telugu"},
+		lgMacedonian:    {"Macedonian", "macedonian"},
+		lgSlovenian:     {"Slovenian", "slovenian"},
+		lgMalayalam:     {"Malayalam", "malayalam"},
+		lgKannada:       {"Kannada", "kannada"},
+		lgAlbanian:      {"Albanian", "albanian"},
+		lgAfrikaans:     {"Afrikaans", "afrikaans"},
+		lgMarathi:       {"Marathi", "marathi"},
+		lgTagalog:       {"Tagalog", "tagalog"},
+		lgUrdu:          {"Urdu", "urdu"},
+		lgRomansh:       {"Romansh", "romansh"},
+		lgMongolian:     {"Mongolian", "mongolian"},
+		lgGeorgian:      {"Georgian", "georgian"},
+		lgAny:           {"Any", "any"},
+		lgOriginal:      {"Original", "original"},
+	}
+}
+
+// languageCode maps a source Language member (as it appears in the extracted
+// corpus) to its explicit Boxset code.
+func languageCode(member string) (string, bool) {
+	for _, d := range languageDefs() {
+		if d.member == member {
+			return d.code, true
+		}
+	}
+	return "", false
+}

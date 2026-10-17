@@ -15,25 +15,60 @@ import (
 const testdataDir = "../../../testdata/parser"
 
 // lockedInventory pins the complete committed inventories: the live source
-// commit each corpus was extracted from and its exact per-file case counts
+// commit each corpus was extracted from, its exact per-file case counts
 // (independently counted from the source tests: TestCase attributes plus
-// TestCaseSource rows). A re-extraction at another commit, or any lost or
-// added case, must update this table together with the corpora.
+// TestCaseSource rows plus plain tests), its per-scope counts and the
+// per-owner counts of every scope (quality: QualityParser.ParseQuality; title:
+// the movie title parser and the release group and language parsers it runs;
+// out_of_scope: the other tests of the title fixtures, retained with their
+// arguments). A re-extraction at another commit, or any lost or added case,
+// must update this table together with the corpora.
 var lockedInventory = map[string]struct {
 	commit string
 	cases  int
 	files  map[string]int
+	scopes map[string]int // scope -> cases
+	owners map[string]int // scope|owner -> cases
 }{
 	"series": {"57816c149d02f95543973fefb4780c4495f8121c", 356, map[string]int{
 		"tests/QualityParserFixture.cs":       320,
 		"tests/ExtendedQualityParserRegex.cs": 30,
 		"tests/AnimeVersionFixture.cs":        6,
+	}, map[string]int{
+		ScopeQuality: 356,
+	}, map[string]int{
+		ScopeQuality + "|QualityParser.ParseQuality": 356,
 	}},
-	"movie": {"df2faa64c75e6081556d11232dc46523e7264ea1", 323, map[string]int{
+	"movie": {"df2faa64c75e6081556d11232dc46523e7264ea1", 892, map[string]int{
 		"tests/QualityParserFixture.cs":       287,
 		"tests/ExtendedQualityParserRegex.cs": 30,
 		"tests/AnimeVersionFixture.cs":        6,
+		"tests/ParserFixture.cs":              112,
+		"tests/EditionParserFixture.cs":       49,
+		"tests/LanguageParserFixture.cs":      195,
+		"tests/CrapParserFixture.cs":          26,
+		"tests/HashedReleaseFixture.cs":       11,
+		"tests/ReleaseGroupParserFixture.cs":  154,
+		"tests/UrlFixture.cs":                 22,
+	}, map[string]int{
+		ScopeQuality: 323, ScopeTitle: 513, ScopeOutOfScope: 56,
+	}, map[string]int{
+		ScopeQuality + "|QualityParser.ParseQuality":                         323,
+		ScopeTitle + "|Parser.ParseMovieTitle":                               321,
+		ScopeTitle + "|ReleaseGroupParser.ParseReleaseGroup":                 161,
+		ScopeTitle + "|LanguageParser.ParseLanguages":                        30,
+		ScopeTitle + "|Parser.CleanMovieTitle":                               1,
+		ScopeOutOfScope + "|Parser.ParseMovieTitle":                          3,
+		ScopeOutOfScope + "|Parser.NormalizeImdbId":                          6,
+		ScopeOutOfScope + "|Parser.ParseMoviePath":                           11,
+		ScopeOutOfScope + "|LanguageParser.ParseSubtitleLanguage":            15,
+		ScopeOutOfScope + "|LanguageParser.ParseSubtitleLanguageInformation": 21,
 	}},
+}
+
+// qualityFixtures are the source files of the quality scope.
+var qualityFixtures = map[string]bool{
+	"tests/QualityParserFixture.cs": true, "tests/ExtendedQualityParserRegex.cs": true, "tests/AnimeVersionFixture.cs": true,
 }
 
 // TestCorpusFull reads the committed corpora through the canonical reader and
@@ -69,21 +104,45 @@ func TestCorpusFull(t *testing.T) {
 			if counts["cases:"+file] != n {
 				t.Errorf("%s: %s has %d cases, want %d", app, file, counts["cases:"+file], n)
 			}
-			rawRows += counts["source:testcase_attrs:"+file] + counts["source:source_rows:"+file]
+			rawRows += counts["source:testcase_attrs:"+file] + counts["source:source_rows:"+file] + counts["source:plain_tests:"+file]
 		}
-		// The extractor's independent raw attribute/row tally equals the case count.
+		// The extractor's independent raw attribute/row/plain-test tally equals the case count.
 		if rawRows != want.cases {
-			t.Errorf("%s: raw TestCase attributes plus source rows = %d, want %d", app, rawRows, want.cases)
+			t.Errorf("%s: raw TestCase attributes plus source rows plus plain tests = %d, want %d", app, rawRows, want.cases)
 		}
+		perScope, perOwner := map[string]int{}, map[string]int{}
 		for _, cs := range c.Cases {
+			perScope[cs.Scope]++
+			perOwner[cs.Scope+"|"+cs.ScopeOwner]++
+			// Quality cases come only from the quality fixtures, never a title case from one.
+			if cs.ScopeOwner == "" || (cs.Scope == ScopeQuality) != qualityFixtures[cs.File] {
+				t.Errorf("%s: case %s scope/file: %+v", app, cs.ID, cs)
+			}
 			names, err := cs.Inputs(TimeContext{Location: nil})
-			// Quality names carry no symbolic date, so no location is required.
-			if err != nil || len(names) == 0 {
-				t.Errorf("%s: case %s inputs: %v", app, cs.ID, err)
+			if cs.Scope == ScopeOutOfScope {
+				// Retained with its source arguments and no recorded input or assertion.
+				if err == nil || len(cs.Expected) != 1 || len(cs.Args) == 0 && cs.Entry != "Test" {
+					t.Errorf("%s: out-of-scope case %s: %+v (%v)", app, cs.ID, cs, err)
+				}
+				continue
 			}
-			if cs.Scope != ScopeQuality || cs.ScopeOwner == "" || len(cs.Expected) < 2 {
-				t.Errorf("%s: case %s scope/expectation: %+v", app, cs.ID, cs)
+			// Release names carry no symbolic date, so no location is required.
+			if err != nil || len(names) == 0 || len(cs.Expected) < 2 {
+				t.Errorf("%s: case %s inputs/expectation: %v %+v", app, cs.ID, err, cs)
 			}
+		}
+		for scope, n := range want.scopes {
+			if perScope[scope] != n {
+				t.Errorf("%s: scope %s has %d cases, want %d", app, scope, perScope[scope], n)
+			}
+		}
+		for owner, n := range want.owners {
+			if perOwner[owner] != n {
+				t.Errorf("%s: %s has %d cases, want %d", app, owner, perOwner[owner], n)
+			}
+		}
+		if len(perScope) != len(want.scopes) || len(perOwner) != len(want.owners) {
+			t.Errorf("%s: scopes %v owners %v, want %v %v", app, perScope, perOwner, want.scopes, want.owners)
 		}
 		canonical, err := Marshal(c)
 		if err != nil || !bytes.Equal(canonical, data) {
