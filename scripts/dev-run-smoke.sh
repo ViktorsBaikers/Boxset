@@ -28,7 +28,8 @@
 # that tries to overwrite, unlink and replace the imported records of an earlier run and writes the
 # benchmark package's synthetic control samples, then, as the next runner invocations from images
 # refreshed with the published records, the final judge over the real host-written records (INVALID: one
-# core), a run absent from the image, missing, hostile, oversized, after-state-swapped, identity-
+# core, or date_rollover when a UTC date change falls between their start and end; two synthetic runs
+# assert those two reasons separately), a run absent from the image, missing, hostile, oversized, after-state-swapped, identity-
 # mismatched, link and overlapping records (each INVALID, exit 3) and, with independently valid
 # synthetic records beside the same samples, PASS. `BENCH-EVIDENCE-PASS controls=N` prints only when all hold.
 # Before those, eight controls on private sysfs trees prove the runner's backing-disk NVMe check (md slaves,
@@ -745,7 +746,7 @@ BEPRE=bench-20200101T000000Z
 BE_IMG=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 BE_INP=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 BE_T0=1792232100
-BE_HOSTILE='bench-20200102T000000Z bench-20200103T000000Z bench-20200104T000000Z bench-20200105T000000Z bench-20200106T000000Z bench-20200107T000000Z bench-20200108T000000Z bench-20200109T000000Z bench-20200112T000000Z'
+BE_HOSTILE='bench-20200102T000000Z bench-20200103T000000Z bench-20200104T000000Z bench-20200105T000000Z bench-20200106T000000Z bench-20200107T000000Z bench-20200108T000000Z bench-20200109T000000Z bench-20200112T000000Z bench-20200113T000000Z bench-20200114T000000Z'
 # need DESC CMD...: the condition, or its description and status 1.
 need() {
 	_needd=$1
@@ -873,10 +874,19 @@ be_a() {
 	need 'samples carry this run and image' grep -q "^{\"schema\":1,\"kind\":\"parser-latency-samples\",\"run\":\"$RUNC\",\"inputs_sha256\":\"$BE_INP\"," "$_r/samples/samples.jsonl" || return 1
 	BE_N=$((BE_N + 1))
 }
+# be_reason RUN: `topology` when RUN's before start_unix and after end_unix fall on the same UTC date, else
+# `date_rollover`; status 1 (nothing printed) when either time is absent. The one copy of the date rule.
+be_reason() {
+	_s0=$(sed -n 's/.*"start_unix":\([0-9][0-9]*\),.*/\1/p' "$S/repo/$BED/$1/before.json")
+	_e1=$(sed -n 's/.*"end_unix":\([0-9][0-9]*\),.*/\1/p' "$S/repo/$BED/$1/after.json")
+	[ -n "$_s0" ] && [ -n "$_e1" ] || return 1
+	if [ "$(date -u -d "@$_s0" +%Y%m%d)" = "$(date -u -d "@$_e1" +%Y%m%d)" ]; then echo topology; else echo date_rollover; fi
+}
 # be_b: the next invocation. Its image is refreshed with what the first run published and with the
 # smoke's hostile run directories; the final judge, built as production, reads them from that image.
-# The real host-written records are INVALID only for the physical reason (one core), after their
-# identities matched; every other control is INVALID for its own reason; none is ever a PASS.
+# The real host-written records are INVALID for one core (topology), or date_rollover when their before start and
+# after end fall on different UTC dates; the two synthetic runs 20200113 and 20200114 assert those reasons separately.
+# Every other control is INVALID for its own reason; none is ever a PASS.
 be_b() {
 	_day=$(sed -n '1s/.*"start_date":"\([0-9]*\)".*/\1/p' "$S/repo/$BED/$RUNC/samples/samples.jsonl")
 	need 'samples date' [ "${#_day}" = 8 ] || return 1
@@ -899,6 +909,12 @@ be_b() {
 		sed -i 's/"config_empty":true/"config_empty":false/' "$_d/bench-20200112T000000Z/during.json" &&
 		[ "$(grep -c '"config_empty":false' "$_d/bench-20200112T000000Z/during.json")" = 1 ] &&
 		[ "$(grep -c '"config_empty":true' "$_d/bench-20200112T000000Z/before.json" "$_d/bench-20200112T000000Z/after.json" | tr '\n' ' ' | sed 's/[^ ]*://g')" = '1 1 ' ] || return 1
+	# Same UTC day on one core: topology. After record ends one UTC day later: date_rollover.
+	be_set "$_d/bench-20200113T000000Z" bench-20200113T000000Z &&
+		sed -i 's/"cpus":4,"cores":4,/"cpus":1,"cores":1,/' "$_d/bench-20200113T000000Z/before.json" "$_d/bench-20200113T000000Z/during.json" "$_d/bench-20200113T000000Z/after.json" &&
+		[ "$(grep -l '"cpus":1,"cores":1,' "$_d/bench-20200113T000000Z/before.json" "$_d/bench-20200113T000000Z/during.json" "$_d/bench-20200113T000000Z/after.json" | wc -l | tr -d ' ')" = 3 ] || return 1
+	be_set "$_d/bench-20200114T000000Z" bench-20200114T000000Z &&
+		be_rec after bench-20200114T000000Z $((BE_T0 + 10)) $((BE_T0 + 86400)) 1 >"$_d/bench-20200114T000000Z/after.json" || return 1
 	rr -- sh -c "$BE_JUDGE" sh "$RUNC" $BE_HOSTILE
 	need 'judge child ran' [ "$RC" = 0 ] || return 1
 	_nfiles=$(grep -c '^imported-f ' "$S/out" | tr -d ' ')
@@ -908,7 +924,14 @@ be_b() {
 		need 'imported directories are all root-owned 0555' [ "$(grep -c '^imported-d 555 root ' "$S/out" | tr -d ' ')" = "$_ndirs" ] &&
 		need 'no decoy imported' none -q -e 'notes.txt' -e '[.]bak' -e 'extra.jsonl' -e 'stray.json' "$S/out" &&
 		need 'run samples imported' grep -Fxq "imported-f 444 root docs/spikes/data/$RUNC/samples/samples.jsonl" "$S/out" || return 1
-	be_expect "$RUNC" 3 'PARSER-LATENCY-INVALID reason=topology' &&
+	# Each run's reason word comes from be_reason: topology (one core), or date_rollover when its records cross UTC midnight.
+	_r0=$(be_reason "$RUNC") && _r13=$(be_reason bench-20200113T000000Z) && _r14=$(be_reason bench-20200114T000000Z) || {
+		echo '# not met: record times'
+		return 1
+	}
+	be_expect "$RUNC" 3 "PARSER-LATENCY-INVALID reason=$_r0" &&
+		be_expect bench-20200113T000000Z 3 "PARSER-LATENCY-INVALID reason=$_r13" &&
+		be_expect bench-20200114T000000Z 3 "PARSER-LATENCY-INVALID reason=$_r14" &&
 		be_expect bench-20200102T000000Z 3 'PARSER-LATENCY-INVALID reason=record_missing' &&
 		be_expect bench-20200103T000000Z 3 'PARSER-LATENCY-INVALID reason=record_incomplete' &&
 		be_expect bench-20200104T000000Z 3 'PARSER-LATENCY-INVALID reason=record_oversized' &&
