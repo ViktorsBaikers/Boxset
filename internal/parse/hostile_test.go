@@ -407,11 +407,11 @@ func TestBudgetMovieTitleContextCancellationAndDeadlineFailClosed(t *testing.T) 
 	}
 }
 
-// A name that only the directory form reads: the year-first folder pattern.
+// A name that only the public folder entry reads: the year-first folder pattern.
 func TestMovieTitleDirectoryFormIsTheOnlyReaderOfAYearFirstName(t *testing.T) {
 	p := newTestParser(t, nil)
 	ctx := context.Background()
-	pt, err := p.parseTitle(ctx, "(1995) Movie Name", KindMovie, true)
+	pt, err := p.ParseDirTitle(ctx, "(1995) Movie Name", KindMovie)
 	if err != nil || pt.Movie == nil || pt.Movie.MovieTitles[0] != "Movie Name" || pt.Movie.Year != 1995 {
 		t.Errorf("directory form = %+v, %v", pt, err)
 	}

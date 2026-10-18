@@ -1094,6 +1094,21 @@ if [ "${1:-}" = /proc ]; then
 		echo "find: unexpected diagnostic without a quoted path" >&2
 		exit 1
 		;;
+	diag_ancestor)
+		"$DR_REAL_FIND" "$@" 2>/dev/null
+		echo "find: '/proc/$DR_LIVEPID': Input/output error" >&2
+		exit 1
+		;;
+	diag_ancestor_task)
+		"$DR_REAL_FIND" "$@" 2>/dev/null
+		echo "find: '/proc/$DR_LIVEPID/task': Input/output error" >&2
+		exit 1
+		;;
+	diag_ancestor_tid)
+		"$DR_REAL_FIND" "$@" 2>/dev/null
+		echo "find: '/proc/$DR_LIVEPID/task/$DR_LIVEPID': Input/output error" >&2
+		exit 1
+		;;
 	esac
 fi
 if [ -n "${DR_CFG_FAULT:-}" ] && [ "${1:-}" = "$DR_CFG_FAULT" ]; then
@@ -1208,6 +1223,12 @@ be_d() {
 	be_closed bench_evidence_failed || return 1
 	be_try "$_cfg" "DR_FIND_MODE=diag_text" 1
 	be_closed bench_evidence_failed || return 1
+	# Each live ancestor shape (the process directory, its task directory, and the
+	# live thread directory) is an incomplete enumeration and must fail closed.
+	for _m in diag_ancestor diag_ancestor_task diag_ancestor_tid; do
+		be_try "$_cfg" "DR_FIND_MODE=$_m" 1
+		be_closed bench_evidence_failed || return 1
+	done
 	for _m in diag_sibling diag_gone; do
 		be_try "$_cfg" "DR_FIND_MODE=$_m" 1
 		need "$_m is not a failed read" [ "$RC" = 0 ] &&

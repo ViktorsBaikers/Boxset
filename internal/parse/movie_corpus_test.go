@@ -14,9 +14,9 @@ import (
 )
 
 // TestMovieCorpus runs every title case of the committed movie corpus
-// through the real parser: the movie title cases through ParseTitle (the
-// isDir cases through its directory form) and the release group and language
-// cases through the parsers ParseTitle runs. A case passes only when every
+// through the real parser: file-name movie title cases through ParseTitle,
+// folder-name cases ($isDir) through public ParseDirTitle, and the release
+// group and language cases through the parsers those entries run. A case passes only when every
 // assertion holds for every input; a retained mismatch needs an exact,
 // answered disposition that binds every mismatching input observation, and a
 // stale or ownerless disposition fails. The whole inventory (both scopes)
@@ -50,9 +50,9 @@ func TestMovieCorpus(t *testing.T) {
 	for _, problem := range append(r.problems, r.reconcile(scopeCounts(c))...) {
 		t.Error(problem)
 	}
-	t.Logf("movie-title-corpus cases=%d title=%d (title=%d group=%d languages=%d clean=%d) passed=%d disposed=%d quality=%d inputs=%d private_isDir=%d sha256=%s",
+	t.Logf("movie-title-corpus cases=%d title=%d (title=%d group=%d languages=%d clean=%d) passed=%d disposed=%d quality=%d inputs=%d sha256=%s",
 		len(c.Cases), r.cases, byOwner[ownerMovieTitle], byOwner[ownerReleaseGroup], byOwner[ownerLanguages], byOwner[ownerCleanTitle],
-		r.passed, r.disposed, r.other, r.inputs, r.privateDir, hash)
+		r.passed, r.disposed, r.other, r.inputs, hash)
 }
 
 // titleCase is one synthetic title-corpus case.
@@ -239,11 +239,10 @@ func TestMovieCorpusMissingMovieFailsEveryPropertyAssertion(t *testing.T) {
 	}
 }
 
-// $isDir is the directory argument of the movie title parse; the public ParseTitle has
-// no such argument. A directory case is therefore proved on the private adapter,
-// is counted apart from public coverage, and its year-first name is refused by
-// the public ParseTitle.
-func TestMovieCorpusDirectoryCasesAreProvedOnlyOnThePrivateAdapter(t *testing.T) {
+// $isDir marks a folder-name case. The corpus sends it through public
+// ParseDirTitle. ParseTitle has no directory argument and still rejects the
+// year-first folder name.
+func TestMovieCorpusDirectoryCasesUseThePublicDirectoryEntry(t *testing.T) {
 	p := newTestParser(t, time.Now)
 	const dirName = "(1995) Movie Name"
 	want := map[string]corpus.Value{"PrimaryMovieTitle": str("Movie Name"), "Year": {Kind: corpus.KindInt, Int: 1995}}
@@ -253,20 +252,24 @@ func TestMovieCorpusDirectoryCasesAreProvedOnlyOnThePrivateAdapter(t *testing.T)
 	}
 
 	r := runTitleCorpus(p, mixedCorpus(titleCase("d", ownerMovieTitle, dir, dirName)), nil)
-	if r.passed != 1 || r.failed != 0 || r.privateDir != 1 {
-		t.Errorf("the directory case must pass on the private adapter and be counted as such: %+v", r)
+	if r.passed != 1 || r.failed != 0 {
+		t.Errorf("the folder-name case must pass through ParseDirTitle: %+v", r)
 	}
-	// Without $isDir the same assertions run through the public ParseTitle, which rejects the name.
-	if r := runTitleCorpus(p, mixedCorpus(titleCase("n", ownerMovieTitle, want, dirName)), nil); r.failed != 1 || r.passed != 0 || r.privateDir != 0 {
-		t.Errorf("the public ParseTitle must not read a year-first name: %+v", r)
+	pt, err := p.ParseDirTitle(context.Background(), dirName, KindMovie)
+	if err != nil || pt.Movie == nil || len(pt.Movie.MovieTitles) == 0 || pt.Movie.MovieTitles[0] != "Movie Name" || pt.Movie.Year != 1995 {
+		t.Errorf("ParseDirTitle(%q) = %+v, %v", dirName, pt, err)
 	}
-	_, err := p.ParseTitle(context.Background(), dirName, KindMovie)
+	// Without $isDir the same assertions run through ParseTitle, which rejects the name.
+	if r := runTitleCorpus(p, mixedCorpus(titleCase("n", ownerMovieTitle, want, dirName)), nil); r.failed != 1 || r.passed != 0 {
+		t.Errorf("ParseTitle must not read a year-first folder name: %+v", r)
+	}
+	_, err = p.ParseTitle(context.Background(), dirName, KindMovie)
 	wantReason(t, err, codeTitleUnrecognized, map[string]int64{})
 
-	// An ordinary case without $isDir is public coverage, never private.
+	// An ordinary case without $isDir stays on ParseTitle.
 	plain := titleCase("p", ownerMovieTitle, map[string]corpus.Value{"Year": {Kind: corpus.KindInt, Int: 2015}}, "Movie.Name.2015.1080p.BluRay.x264-GRP")
-	if r := runTitleCorpus(p, mixedCorpus(plain), nil); r.passed != 1 || r.privateDir != 0 {
-		t.Errorf("a case without $isDir is public coverage: %+v", r)
+	if r := runTitleCorpus(p, mixedCorpus(plain), nil); r.passed != 1 {
+		t.Errorf("a case without $isDir is a ParseTitle case: %+v", r)
 	}
 }
 

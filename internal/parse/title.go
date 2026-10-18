@@ -152,6 +152,16 @@ func (p *Parser) ParseTitle(ctx context.Context, name string, kind Kind) (Parsed
 	return p.parseTitle(ctx, name, kind, false)
 }
 
+// ParseDirTitle parses a folder name as a title of kind. It is the public
+// entry for every folder-name case in the fixture tables. The movie parser
+// also tries the year-first folder pattern. KindSeries has no folder pattern;
+// the call still uses the same validation, kind check and release budget as
+// ParseTitle. ParseTitle itself is unchanged and does not read a year-first
+// folder name.
+func (p *Parser) ParseDirTitle(ctx context.Context, name string, kind Kind) (ParsedTitle, error) {
+	return p.parseTitle(ctx, name, kind, true)
+}
+
 // parseTitle is ParseTitle with the movie parser's isDir argument:
 // a directory name also tries the year-first folder pattern.
 func (p *Parser) parseTitle(ctx context.Context, name string, kind Kind, isDir bool) (ParsedTitle, error) {

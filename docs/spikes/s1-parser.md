@@ -123,7 +123,7 @@ title, or whose German tag, is thousands of characters long exceeds the 50 ms ma
 bracketed-alternative pattern (about 290 ms for 4000 characters when it runs without a timeout) or its German-remux quality
 pattern (about 700 ms) and fails closed with `match_timeout`; without a timeout it would return a result.
 
-The decisions are listed in `docs/parity-matrix.md` (null results, the `isDir` directory form, the reversed-title
+The decisions are listed in `docs/parity-matrix.md` (null results, the folder-name entry `ParseDirTitle`, the reversed-title
 marker, the file extension helper, UTF-16 indexes, language members).
 
 ## Custom formats: compile, evaluate, batch
@@ -215,7 +215,7 @@ the release names passed to the scoped entry point (`QualityParser.ParseQuality`
 asserted property path (for example `Quality`, `Quality.Resolution`, `Revision.Version`, `PrimaryMovieTitle`,
 `MovieTitles[1]`, `Languages.Count`, `Languages.First()`). Title cases add three reserved or derived keys: `$result` (an
 assertion on the entry point's own result, `null` for a rejected name), `<list>.Contain` (a membership assertion, the ordered
-array of expected members) and `$isDir` (the directory argument of the movie title parse, present only when true). Values are
+array of expected members) and `$isDir` (marks a folder-name movie case, present only when true; those cases call public `ParseDirTitle`). Values are
 tagged `string|bool|int|decimal|enum|array|null|date`; an unknown tag, field or form rejects the file. One shared validator,
 used by both `Read` and `Marshal`, enforces schema 2, the app, unique non-empty ids, the scope (`quality` or `title`), a
 non-empty `scopeOwner`, every contained value (decimal text, enum type and member identifiers, a date template the

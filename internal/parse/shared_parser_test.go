@@ -11,15 +11,12 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-	"unicode"
 
 	"github.com/ViktorsBaikers/Boxset/internal/parse/corpus"
-	"github.com/dlclark/regexp2/v2"
 )
 
 // steppingClock is an injected, deterministic clock: every read advances it.
@@ -1028,7 +1025,8 @@ func TestLanguageVocabularyMatchesIndependentMemberTable(t *testing.T) {
 // ---- title corpus consumer ----------------------------------------------------------
 
 // Reserved Expected keys of title cases beside the input key: the assertion on
-// the result of an entry point itself, and the isDir argument of ParseMovieTitle.
+// the result of an entry point itself, and the folder-name mark. A true $isDir
+// sends the case through public ParseDirTitle, never the private adapter.
 const (
 	titleResultKey = "$result"
 	titleDirKey    = "$isDir"
@@ -1068,7 +1066,7 @@ func observeTitle(p *Parser, owner string, dir bool, name string) (titleResult, 
 			err error
 		)
 		if dir {
-			pt, err = p.parseTitle(ctx, name, KindMovie, true)
+			pt, err = p.ParseDirTitle(ctx, name, KindMovie)
 		} else {
 			pt, err = p.ParseTitle(ctx, name, KindMovie)
 		}
@@ -1086,7 +1084,7 @@ func observeTitle(p *Parser, owner string, dir bool, name string) (titleResult, 
 		if err := validateName(name); err != nil {
 			return titleResult{}, err
 		}
-		clean, err := cleanMovieTitle(name)
+		clean, err := p.CleanMovieTitle(name)
 		return titleResult{clean: clean}, err
 	case ownerReleaseGroup, ownerLanguages:
 		if err := validateName(name); err != nil {
@@ -1251,78 +1249,6 @@ func resolveTitle(owner, key string, want corpus.Value, res titleResult) (wantNa
 	return corpus.Value{}, corpus.Value{}, fmt.Errorf("unsupported asserted property %q of %s", key, owner)
 }
 
-// cleanMovieTitleRe is the normalization pattern: the common words (a, an,
-// the, and, or, of) that are neither first, last nor part of an acronym, and
-// every non-word character and underscore.
-var cleanMovieTitleRe = func() *regexp2.Regexp {
-	re, err := regexp2.Compile(`((?:\b|_)(?<!^|[^a-zA-Z0-9_']\w[^a-zA-Z0-9_'])([aà](?!$|[^a-zA-Z0-9_']\w[^a-zA-Z0-9_'])|an|the|and|or|of)(?!$)(?:\b|_))|\W|_`, ic)
-	if err != nil {
-		panic(err)
-	}
-	re.MatchTimeout = matchTimeout
-	return re
-}()
-
-var germanUmlauts = strings.NewReplacer("ä", "ae", "ö", "oe", "ü", "ue", "Ä", "Ae", "Ö", "Oe", "Ü", "Ue", "ß", "ss")
-
-// accentFold maps each lower-case letter of Latin-1 Supplement and Latin
-// Extended-A that has a canonical decomposition to its base letter, and ð to d
-// (it has no decomposition, but a fixture asserts that "Ríkið" cleans to
-// "rikid"). The other letters without a decomposition (ø, æ, œ, ł, đ, ħ, ŋ, ŧ,
-// ı, ĳ, ĸ, ŀ, ŉ, ſ) are deliberately absent: normalization form D leaves them
-// as they are.
-var accentFold = func() *strings.Replacer {
-	var pairs []string
-	for base, accented := range map[string]string{
-		"a": "àáâãåāăą", "c": "çćĉċč", "d": "ďð", "e": "èéêëēĕėęě", "g": "ĝğġģ", "h": "ĥ", "i": "ìíîïĩīĭį",
-		"j": "ĵ", "k": "ķ", "l": "ĺļľ", "n": "ñńņň", "o": "òóôõōŏő", "r": "ŕŗř", "s": "śŝşš", "t": "ţť",
-		"u": "ùúûũūŭůűų", "w": "ŵ", "y": "ýÿŷ", "z": "źżž",
-	} {
-		for _, r := range accented {
-			pairs = append(pairs, string(r), base)
-		}
-	}
-	return strings.NewReplacer(pairs...)
-}()
-
-// removeAccent removes accents (decompose, drop the non-spacing
-// marks, recompose) for lower-case text, with the standard library only: the
-// letters of accentFold lose their accent and a combining mark of already
-// decomposed text is dropped. The standard library has no decomposition table
-// beyond that, so any other non-ASCII letter is an error: it might carry a
-// decomposition, and a silently unfolded title would be wrong.
-func removeAccent(s string) (string, error) {
-	s = strings.Map(func(r rune) rune {
-		if unicode.Is(unicode.Mn, r) {
-			return -1
-		}
-		return r
-	}, accentFold.Replace(s))
-	for _, r := range s {
-		if r > unicode.MaxASCII {
-			return "", fmt.Errorf("RemoveAccent(%q): %q is outside the Latin letters whose decomposition is handled", s, r)
-		}
-	}
-	return s, nil
-}
-
-// cleanMovieTitle normalizes a title: a blank or all-digit title
-// is returned as it is, otherwise the normalized title is lower-cased, its
-// German umlauts spelled out and its accents removed.
-func cleanMovieTitle(title string) (string, error) {
-	if isBlank(title) {
-		return title, nil
-	}
-	if _, err := strconv.ParseInt(strings.Trim(title, " \t\n\v\f\r"), 10, 64); err == nil {
-		return title, nil
-	}
-	out, err := cleanMovieTitleRe.Replace(title, "", -1, -1)
-	if err != nil {
-		return "", err
-	}
-	return removeAccent(germanUmlauts.Replace(strings.ToLower(out)))
-}
-
 // titleRun is the outcome of one corpus through one parser. The selected scope
 // is title: cases counts what ran. other counts the quality cases (owned by the
 // quality consumer), so the whole inventory reconciles separately from the
@@ -1331,7 +1257,6 @@ type titleRun struct {
 	inputs                   int
 	passed, disposed, failed int
 	cases, other             int
-	privateDir               int // passed or disposed cases proved on the private isDir adapter, not public ParseTitle
 	problems                 []string
 	observe                  func(p *Parser, owner string, dir bool, name string) (titleResult, error)
 	resolve                  func(owner, key string, want corpus.Value, res titleResult, tc corpus.TimeContext) (corpus.Value, corpus.Value, error)
@@ -1415,7 +1340,6 @@ func (r *titleRun) runCase(p *Parser, cs corpus.Case, tc corpus.TimeContext, byI
 		r.failed++
 	case len(mismatch) == 0 && !has:
 		r.passed++
-		r.privateDir += b2i(dir)
 	case len(mismatch) == 0:
 		r.problem("%s: disposition is stale, the case passes", cs.ID)
 		r.failed++
@@ -1426,15 +1350,7 @@ func (r *titleRun) runCase(p *Parser, cs corpus.Case, tc corpus.TimeContext, byI
 		r.failed++
 	default:
 		r.disposed++
-		r.privateDir += b2i(dir)
 	}
-}
-
-func b2i(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }
 
 // reconcile compares the run with the per-scope case counts of its corpus: the
@@ -1494,43 +1410,6 @@ func newSeriesTestParser(t *testing.T, now time.Time, loc *time.Location) *Parse
 func intValue(n int) corpus.Value   { return corpus.Value{Kind: corpus.KindInt, Int: int64(n)} }
 func boolValue(b bool) corpus.Value { return corpus.Value{Kind: corpus.KindBool, Bool: b} }
 
-// cleanSeriesRe is the normalization pattern of cleanSeriesTitle: the common
-// words (a, an, the, and, or, of) that are neither first nor last, and every
-// non-word character and underscore; percentRe is its percent rule.
-var cleanSeriesRe, percentRe = func() (*regexp2.Regexp, *regexp2.Regexp) {
-	clean, err := regexp2.Compile(`((?:\b|_)(?<!^)([aà](?!$)|an|the|and|or|of)(?!$)(?:\b|_))|\W|_`, ic)
-	if err != nil {
-		panic(err)
-	}
-	percent, err := regexp2.Compile(`(?<=\b\d+)%`, regexp2.None)
-	if err != nil {
-		panic(err)
-	}
-	clean.MatchTimeout, percent.MatchTimeout = matchTimeout, matchTimeout
-	return clean, percent
-}()
-
-// cleanSeriesTitle normalizes a title: a blank or all-digit title
-// is returned as it is, otherwise "%" after digits reads "percent", the
-// normalized title is lower-cased and its accents removed.
-func cleanSeriesTitle(title string) (string, error) {
-	if isBlank(title) {
-		return title, nil
-	}
-	if _, err := strconv.ParseInt(strings.Trim(title, " \t\n\v\f\r"), 10, 64); err == nil {
-		return title, nil
-	}
-	title, err := percentRe.Replace(title, "percent", -1, -1)
-	if err != nil {
-		return "", err
-	}
-	out, err := cleanSeriesRe.Replace(title, "", -1, -1)
-	if err != nil {
-		return "", err
-	}
-	return removeAccent(strings.ToLower(out))
-}
-
 // observeSeriesTitle runs the entry point a series title case names on one
 // input. A name ParseTitle rejects has no episode (a nil episode, no
 // error); any other failure is an error.
@@ -1556,13 +1435,13 @@ func observeSeriesTitle(p *Parser, owner string, _ bool, name string) (titleResu
 		if pt.Episode != nil {
 			return titleResult{name: pt.Episode.SeriesTitle}, nil
 		}
-		cleaned, err := cleanSeriesTitle(name)
+		cleaned, err := p.CleanSeriesTitle(name)
 		return titleResult{name: cleaned}, err
 	case ownerCleanSeries:
 		if err := validateName(name); err != nil {
 			return titleResult{}, err
 		}
-		clean, err := cleanSeriesTitle(name)
+		clean, err := p.CleanSeriesTitle(name)
 		return titleResult{clean: clean}, err
 	case ownerReleaseGroup, ownerLanguages:
 		if err := validateName(name); err != nil {
