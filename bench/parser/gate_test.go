@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -59,8 +60,9 @@ func wantItems(t *testing.T, startDate string) ([]item, int) {
 				t.Fatal(err)
 			}
 			cases++
+			dir := cs.Expected["$isDir"].Bool
 			for n, name := range names {
-				want = append(want, item{App: app, ID: cs.ID, N: n, name: name, kind: kind})
+				want = append(want, item{App: app, ID: cs.ID, N: n, name: name, kind: kind, dir: dir})
 			}
 		}
 	}
@@ -193,6 +195,7 @@ func TestBenchmarkCorpus(t *testing.T) {
 type tracedCall struct {
 	name string
 	kind parse.Kind
+	dir  bool
 	ok   bool // a full production parse result (a title of the asked kind)
 	err  string
 }
@@ -234,16 +237,16 @@ func newTracer(t *testing.T, nWarm int, clock *fakeClock) (*tracer, func() (pars
 	}
 }
 
-func (tr *tracer) call(ctx context.Context, name string, kind parse.Kind) (parse.ParsedTitle, error) {
+func (tr *tracer) call(ctx context.Context, name string, kind parse.Kind, dir bool) (parse.ParsedTitle, error) {
 	n := len(tr.calls)
 	d := time.Duration(n%97+1) * time.Microsecond
 	if n >= tr.nWarm {
 		d += 400 * time.Millisecond
 	}
-	pt, err := tr.real(ctx, name, kind)
+	pt, err := tr.real(ctx, name, kind, dir)
 	tr.clock.advance(d) // after the parser returned: the sample must still hold it
 	tr.advances = append(tr.advances, d)
-	c := tracedCall{name: name, kind: kind}
+	c := tracedCall{name: name, kind: kind, dir: dir}
 	switch {
 	case err != nil:
 		c.err = err.Error()
@@ -283,8 +286,8 @@ func TestBenchmarkMeasuresEveryTimedCall(t *testing.T) {
 		t.Fatalf("%d calls, want %d (one warmup call and %d timed calls per input)", len(tr.calls), n*(1+rounds), rounds)
 	}
 	for i, w := range want {
-		if c := tr.calls[i]; c.name != w.name || c.kind != w.kind {
-			t.Fatalf("warmup call %d is %q kind %d, want %q kind %d", i, c.name, c.kind, w.name, w.kind)
+		if c := tr.calls[i]; c.name != w.name || c.kind != w.kind || c.dir != w.dir {
+			t.Fatalf("warmup call %d is %q kind %d dir %v, want %q kind %d dir %v", i, c.name, c.kind, c.dir, w.name, w.kind, w.dir)
 		}
 	}
 	for r := 1; r <= rounds; r++ {
@@ -292,8 +295,8 @@ func TestBenchmarkMeasuresEveryTimedCall(t *testing.T) {
 		for k, idx := range perm {
 			c := tr.calls[n*r+k]
 			warm := tr.calls[idx]
-			if c.name != want[idx].name || c.kind != want[idx].kind {
-				t.Fatalf("round %d call %d is %q kind %d, want %q kind %d", r, k, c.name, c.kind, want[idx].name, want[idx].kind)
+			if c.name != want[idx].name || c.kind != want[idx].kind || c.dir != want[idx].dir {
+				t.Fatalf("round %d call %d is %q kind %d dir %v, want %q kind %d dir %v", r, k, c.name, c.kind, c.dir, want[idx].name, want[idx].kind, want[idx].dir)
 			}
 			if c.ok != warm.ok || (c.err == "") != (warm.err == "") {
 				t.Fatalf("round %d call %d did not run the same full parse as its warmup: %+v against %+v", r, k, c, warm)
@@ -360,7 +363,7 @@ func TestBenchmarkRejectsTimedCallsThatDoNotRunTheWarmupsParse(t *testing.T) {
 			}
 			calls := 0
 			build := func() (parseCall, error) {
-				return func(context.Context, string, parse.Kind) (parse.ParsedTitle, error) {
+				return func(context.Context, string, parse.Kind, bool) (parse.ParsedTitle, error) {
 					n := calls
 					calls++
 					// Calls 0..len(items)-1 are the warmup (phase 0), the rest the timed calls (phase 1).
@@ -410,5 +413,46 @@ func TestParseTitleClockReadsOfAGuardedParse(t *testing.T) {
 		!slices.Equal(m.Languages, []string{"german", "original"}) || m.ReleaseTitle != name ||
 		m.Quality.Code != "bluray-1080p" || m.Quality.Source != "bluray" || m.Quality.Resolution != 1080 {
 		t.Errorf("movie = %+v", m)
+	}
+}
+
+// Folder-name fixtures, including movie:0403, are measured through ParseDirTitle.
+// The same name through ParseTitle stays unrecognized, so dropping the directory
+// mark fails this test.
+func TestBenchmarkFolderNameUsesParseDirTitle(t *testing.T) {
+	ref, err := loadReference(testRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := ref.items(corpus.TimeContext{Now: time.Now(), Location: time.Local})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found item
+	var n int
+	for _, it := range items {
+		if it.dir {
+			n++
+		}
+		if it.ID == "movie:0403" {
+			found = it
+		}
+	}
+	if n == 0 || found.ID != "movie:0403" || !found.dir || found.name != "(1995) Movie Name" {
+		t.Fatalf("movie:0403 dir entry = %+v, marked folder names = %d", found, n)
+	}
+	call, err := newProductionParser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	pt, err := call(ctx, found.name, found.kind, true)
+	if err != nil || pt.Movie == nil || len(pt.Movie.MovieTitles) == 0 || pt.Movie.MovieTitles[0] != "Movie Name" || pt.Movie.Year != 1995 {
+		t.Fatalf("ParseDirTitle(%q) = %+v, %v", found.name, pt, err)
+	}
+	pt, err = call(ctx, found.name, found.kind, false)
+	var re *parse.ReasonError
+	if err == nil || !errors.As(err, &re) || re.Reason.Code != "title_unrecognized" || pt.Movie != nil {
+		t.Fatalf("ParseTitle(%q) = %+v, %v, want title_unrecognized", found.name, pt, err)
 	}
 }

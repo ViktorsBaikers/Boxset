@@ -102,6 +102,7 @@ type item struct {
 	Out  string `json:"o"`
 	name string
 	kind parse.Kind
+	dir  bool // folder-name fixture: call ParseDirTitle, not ParseTitle
 }
 
 // round is one shuffled pass: Order lists the item indexes in call order and NS
@@ -192,8 +193,9 @@ func orDefault(s, def string) string {
 	return s
 }
 
-// parseCall is one full production title parse.
-type parseCall func(ctx context.Context, name string, kind parse.Kind) (parse.ParsedTitle, error)
+// parseCall is one full production title parse. dir selects ParseDirTitle for a
+// folder-name fixture and ParseTitle otherwise.
+type parseCall func(ctx context.Context, name string, kind parse.Kind, dir bool) (parse.ParsedTitle, error)
 
 // newProductionParser constructs the production parser, compiling its fixed pattern tables once.
 func newProductionParser() (parseCall, error) {
@@ -201,7 +203,12 @@ func newProductionParser() (parseCall, error) {
 	if err != nil {
 		return nil, err
 	}
-	return p.ParseTitle, nil
+	return func(ctx context.Context, name string, kind parse.Kind, dir bool) (parse.ParsedTitle, error) {
+		if dir {
+			return p.ParseDirTitle(ctx, name, kind)
+		}
+		return p.ParseTitle(ctx, name, kind)
+	}, nil
 }
 
 // measure runs the warmup and the shuffled rounds over every title input.
@@ -242,7 +249,7 @@ func measure(root, inputs, run string, rounds int, seed int64, build func() (par
 
 	// One discarded warmup pass in corpus order; it also classifies each input.
 	for i := range items {
-		_, err := call(ctx, items[i].name, items[i].kind)
+		_, err := call(ctx, items[i].name, items[i].kind, items[i].dir)
 		out, cerr := classify(err)
 		if cerr != nil {
 			return nil, cerr
@@ -265,7 +272,7 @@ func measure(root, inputs, run string, rounds int, seed int64, build func() (par
 		for k, idx := range order {
 			it := &items[idx]
 			t0 := now()
-			_, err := call(ctx, it.name, it.kind)
+			_, err := call(ctx, it.name, it.kind, it.dir)
 			ns[k] = max(now().Sub(t0).Nanoseconds(), 1)
 			if out, cerr := classify(err); cerr != nil || out != it.Out {
 				return nil, errors.New("outcome_changed")
@@ -444,8 +451,9 @@ func (r *reference) items(tc corpus.TimeContext) ([]item, int, error) {
 				return nil, 0, err
 			}
 			cases++
+			dir := cs.Expected["$isDir"].Bool
 			for n, name := range names {
-				items = append(items, item{App: side.app, ID: cs.ID, N: n, name: name, kind: side.kind})
+				items = append(items, item{App: side.app, ID: cs.ID, N: n, name: name, kind: side.kind, dir: dir})
 			}
 		}
 	}
@@ -459,7 +467,7 @@ func (r *reference) items(tc corpus.TimeContext) ([]item, int, error) {
 func namesHash(items []item) string {
 	h := sha256.New()
 	for _, it := range items {
-		_, _ = fmt.Fprintf(h, "%s\x00%s\x00%d\x00%s\n", it.App, it.ID, it.N, it.name)
+		_, _ = fmt.Fprintf(h, "%s\x00%s\x00%d\x00%s\x00%t\n", it.App, it.ID, it.N, it.name, it.dir)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
