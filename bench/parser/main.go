@@ -1,5 +1,5 @@
 // Command parserbench measures the production per-call latency of
-// parse.ParseTitle over every enabled title case of both corpora, and judges a
+// parse.ParseTitle over every title case of both corpora, and judges a
 // recorded run against the accepted budgets.
 //
 //	parserbench [-rounds 30 -seed 1] -out DIR       measure: writes DIR/samples.jsonl only
@@ -92,7 +92,7 @@ type header struct {
 	EndDate      string `json:"end_date"`
 }
 
-// item is one materialized title input: the enabled title case it belongs to and
+// item is one materialized title input: the title case it belongs to and
 // the input's position in that case. Out is the outcome class of the discarded
 // warmup call, never of a timed one.
 type item struct {
@@ -204,7 +204,7 @@ func newProductionParser() (parseCall, error) {
 	return p.ParseTitle, nil
 }
 
-// measure runs the warmup and the shuffled rounds over every enabled title input.
+// measure runs the warmup and the shuffled rounds over every title input.
 // A fixed token error means no usable measurement. Construction (compilation) is
 // timed and reported on its own; the one discarded warmup pass classifies each
 // input; every timed call must then reach the same outcome class as its warmup.
@@ -424,9 +424,9 @@ func loadReference(root string) (*reference, error) {
 	return ref, nil
 }
 
-// items materializes every input of every enabled title case, series first, in
+// items materializes every input of every title case, series first, in
 // corpus order, through the shared reader and calendar materializer, and counts
-// the enabled title cases.
+// the title cases.
 func (r *reference) items(tc corpus.TimeContext) ([]item, int, error) {
 	var items []item
 	cases := 0
@@ -436,7 +436,7 @@ func (r *reference) items(tc corpus.TimeContext) ([]item, int, error) {
 		kind parse.Kind
 	}{{"series", r.series, parse.KindSeries}, {"movie", r.movie, parse.KindMovie}} {
 		for _, cs := range side.c.Cases {
-			if cs.Scope != corpus.ScopeTitle || !cs.UpstreamEnabled {
+			if cs.Scope != corpus.ScopeTitle {
 				continue
 			}
 			names, err := cs.Inputs(tc)

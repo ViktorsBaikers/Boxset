@@ -2,24 +2,22 @@
 
 package parse
 
-// Movie title parsing, ported from the movie reference parser (parser/Parser.cs
-// ParseMovieTitle and the parser/ParserCommon.cs and parser/RegexReplace.cs
-// members it uses, located by BOXSET_REF_MOVIE) at commit
-// df2faa64c75e6081556d11232dc46523e7264ea1. Control flow, pattern order and
-// pattern text follow the source; the parity corpus testdata/parser/movie.jsonl
-// is extracted from its tests.
+// Movie title parsing: the preparation of the name, the movie title patterns
+// in the order they are tried and the assembly of the result. Control flow,
+// pattern order and pattern text are semantic; the fixture table
+// testdata/parser/movie.jsonl asserts them.
 //
-// Faithful-adapter notes:
+// Implementation notes:
 //   - Every pattern is compiled once with the table and all matching goes
 //     through the shared budget of the public operation (regex.go): the
-//     quality, language and release group parsing ParseMovieTitle runs share
-//     that one budget and never get a fresh one.
-//   - The source's exception handler turns any failure into "unable to parse";
-//     here only the one reachable case (a replacement range outside the
-//     string) is that, while a budget, timeout or cancellation failure is an
-//     error and never a quiet no-match.
-//   - String indexes of the source are UTF-16 code units: the title group's
-//     index is converted from bytes and applied in UTF-16 units.
+//     quality, language and release group parsing the movie title parse runs
+//     share that one budget and never get a fresh one.
+//   - Any failure while parsing a name is "unable to parse"; here only the
+//     one reachable case (a replacement range outside the string) is that,
+//     while a budget, timeout or cancellation failure is an error and never
+//     a quiet no-match.
+//   - String indexes are UTF-16 code units: the title group's index is
+//     converted from bytes and applied in UTF-16 units.
 
 import (
 	"strings"
@@ -27,8 +25,8 @@ import (
 	"github.com/dlclark/regexp2/v2"
 )
 
-// movieEditionPattern is the source's EditionRegex; several title patterns
-// embed it by concatenation.
+// movieEditionPattern is the edition pattern; several title patterns embed it
+// by concatenation.
 const movieEditionPattern = `\(?\b(?<edition>(((Recut.|Extended.|Ultimate.)?(Director.?s|Collector.?s|Theatrical|Ultimate|Extended|Despecialized|(Special|Rouge|Final|Assembly|Imperial|Diamond|Signature|Hunter|Rekall)(?=(.(Cut|Edition|Version)))|\d{2,3}(th)?.Anniversary)(?:.(Cut|Edition|Version))?(.(Extended|Uncensored|Remastered|Unrated|Uncut|Open.?Matte|IMAX|Fan.?Edit))?|((Uncensored|Remastered|Unrated|Uncut|Open?.Matte|IMAX|Fan.?Edit|Restored|((2|3|4)in1))))))\b\)?`
 
 // movieTitleTable is the immutable set of compiled patterns of the movie title
@@ -58,7 +56,7 @@ type movieTitleTable struct {
 	common        commonTable
 }
 
-// commonTable is ParserCommon: the website and torrent suffix cleanup shared by
+// commonTable is the website and torrent suffix cleanup shared by
 // the title and release group parsers.
 type commonTable struct {
 	websitePrefix  *regexp2.Regexp
@@ -149,8 +147,8 @@ func newMovieTitleTable(q *movieTable) (*movieTitleTable, error) {
 	return t, nil
 }
 
-// removeFileExtension is FileExtensions.RemoveFileExtension: a trailing dot
-// and two to four letters or digits are dropped only when they are a known
+// removeFileExtension drops a trailing dot
+// and two to four letters or digits only when they are a known
 // media file extension (or .par2 / .nzb); any other tail is part of the name.
 func (t *movieTitleTable) removeFileExtension(b *budget, title string) (string, error) {
 	var evalErr error
@@ -163,8 +161,8 @@ func (t *movieTitleTable) removeFileExtension(b *budget, title string) (string, 
 	})
 }
 
-// parse is ParseMovieTitle: nil with a nil error is the source's null (the name
-// was rejected or no pattern produced a title).
+// parse is the movie title parse: nil with a nil error means the name
+// was rejected or no pattern produced a title.
 func (t *movieTitleTable) parse(b *budget, title string, isDir bool) (*MovieInfo, error) {
 	originalTitle := title
 	if !t.validateBeforeParsing(title) {
@@ -184,8 +182,8 @@ func (t *movieTitleTable) parse(b *budget, title string, isDir bool) (*MovieInfo
 		if err != nil {
 			return nil, err
 		}
-		// The source interpolates the reversed character array into the title,
-		// which formats as the array's type name; the untouched tail follows.
+		// The reversed character array is interpolated into the title, which
+		// formats as the array's type name; the untouched tail follows.
 		title = "System.Char[]" + utf16Suffix(title, utf16Len(withoutExtension))
 	}
 
@@ -250,10 +248,10 @@ func (t *movieTitleTable) parse(b *budget, title string, isDir bool) (*MovieInfo
 	return nil, nil
 }
 
-// complete runs the part of ParseMovieTitle after a pattern produced a title:
+// complete runs the part of the movie title parse after a pattern produced a title:
 // the simple release title, release group, hardcoded subs, languages, quality,
-// edition, hash and IDs. A nil result is the source's exception on an
-// out-of-range replacement, which it reports as unable to parse.
+// edition, hash and IDs. A nil result is an out-of-range replacement,
+// which is reported as unable to parse.
 func (t *movieTitleTable) complete(b *budget, result *MovieInfo, match *regexp2.Match, originalTitle, title, releaseTitle, simpleTitle string) (*MovieInfo, error) {
 	simpleReleaseTitle, err := b.replace(t.simpleRelease, releaseTitle, "")
 	if err != nil {
@@ -327,7 +325,7 @@ func (t *movieTitleTable) complete(b *budget, result *MovieInfo, match *regexp2.
 	return result, nil
 }
 
-// validateBeforeParsing is the source's ValidateBeforeParsing without the
+// validateBeforeParsing is the pre-parse validation without the
 // hashed-release rejection, which needs the budget (rejectedHashed).
 func (t *movieTitleTable) validateBeforeParsing(title string) bool {
 	lower := strings.ToLower(title)
@@ -337,7 +335,7 @@ func (t *movieTitleTable) validateBeforeParsing(title string) bool {
 	return hasLetterOrDigit(title)
 }
 
-// rejectedHashed is the hashed-release rejection of ValidateBeforeParsing.
+// rejectedHashed is the hashed-release rejection of the pre-parse validation.
 func (t *movieTitleTable) rejectedHashed(b *budget, title string) (bool, error) {
 	withoutExtension, err := t.removeFileExtension(b, title)
 	if err != nil {
@@ -352,7 +350,7 @@ func (t *movieTitleTable) rejectedHashed(b *budget, title string) (bool, error) 
 	return false, nil
 }
 
-// parseMatch is ParseMovieMatchCollection for the first match of a title
+// parseMatch assembles the result for the first match of a title
 // pattern: nil when the match has no usable title.
 func (t *movieTitleTable) parseMatch(b *budget, match *regexp2.Match) (*MovieInfo, error) {
 	if !groupOK(match, "title") || groupText(match, "title") == "(" {
@@ -427,7 +425,7 @@ func (t *movieTitleTable) parseMatch(b *budget, match *regexp2.Match) (*MovieInf
 	return result, nil
 }
 
-// parseHardcodedSubs is ParseHardcodeSubs: the last hardcoded-subtitle token of
+// parseHardcodedSubs is the last hardcoded-subtitle token of
 // the title, or empty.
 func (t *movieTitleTable) parseHardcodedSubs(b *budget, title string) (string, error) {
 	m, err := b.last(t.hardcodedSubs, title)
@@ -443,7 +441,7 @@ func (t *movieTitleTable) parseHardcodedSubs(b *budget, title string) (string, e
 	return "", nil
 }
 
-// parseEdition is ParseEdition: the edition named after the first characters of
+// parseEdition is the edition named after the first characters of
 // the language title, dots read as spaces.
 func (t *movieTitleTable) parseEdition(b *budget, languageTitle string) (string, error) {
 	m, err := b.first(t.reportEdition, languageTitle)
@@ -456,7 +454,7 @@ func (t *movieTitleTable) parseEdition(b *budget, languageTitle string) (string,
 	return "", nil
 }
 
-// parseImdbID is ParseImdbId: the first tt-number of nine or ten UTF-16 units.
+// parseImdbID is the first tt-number of nine or ten UTF-16 units.
 func (t *movieTitleTable) parseImdbID(b *budget, title string) (string, error) {
 	m, err := b.first(t.imdbID, title)
 	if err != nil || m == nil {
@@ -469,7 +467,7 @@ func (t *movieTitleTable) parseImdbID(b *budget, title string) (string, error) {
 	return "", nil
 }
 
-// parseTmdbID is ParseTmdbId: the first tmdb(id)-number, 0 when it is not an int.
+// parseTmdbID is the first tmdb(id)-number, 0 when it is not an int.
 func (t *movieTitleTable) parseTmdbID(b *budget, title string) (int, error) {
 	m, err := b.first(t.tmdbID, title)
 	if err != nil || m == nil {

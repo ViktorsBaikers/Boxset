@@ -1,14 +1,8 @@
-// Package corpus owns the canonical attributed source-corpus schema: the
-// tagged Value model, the bounded streaming JSONL reader and writer, the
-// per-file count reconciliation, the disposition records and the shared
-// local-calendar materializer. Corpus files are derived from GPL-3.0 test
-// sources of the two reference checkouts; every file carries the neutral
-// provenance (side, locator, commit, source paths and licence) in its header
-// record.
-//
-// The extractor (internal/parse/corpus/extract) is the only provider; the
-// native parser tests and benchmark are consumers that decode exclusively
-// through Read.
+// Package corpus owns the canonical parser fixture schema: the tagged Value
+// model, the bounded streaming JSONL reader and writer, the disposition
+// records and the shared local-calendar materializer. A fixture file is a
+// header record (schema 2 and the application) followed by one record per
+// asserted case, written by Marshal and decoded exclusively through Read.
 package corpus
 
 import (
@@ -27,24 +21,23 @@ import (
 
 // Schema limits. A corpus file is rejected, never truncated, beyond them.
 const (
-	SchemaVersion  = 1
+	SchemaVersion  = 2
 	MaxFileBytes   = 32 << 20
 	MaxRecordBytes = 256 << 10
 	MaxNesting     = 32
 
-	// License is the exact licence header of every corpus: the reference
-	// sources are GPL-3.0 and so are the files derived from them.
-	License = "GPL-3.0"
+	// DispositionsVersion is the format version of testdata/parser/dispositions.json,
+	// independent of the fixture SchemaVersion.
+	DispositionsVersion = 1
 
 	// InputKey is the reserved Expected key that holds the release names (as
 	// string or symbolic date values) passed to the scoped entry point, in call
-	// order. Every other Expected key is the exact source property path that
-	// the source test asserts on the entry point's result.
+	// order. Every other Expected key is the property path asserted on the entry
+	// point's result.
 	InputKey = "$input"
 
-	ScopeQuality    = "quality"
-	ScopeTitle      = "title"
-	ScopeOutOfScope = "out_of_scope"
+	ScopeQuality = "quality"
+	ScopeTitle   = "title"
 
 	maxDispositionBytes = 1 << 20
 	maxDateOffset       = 36500
@@ -84,10 +77,10 @@ type Value struct {
 	Bool     bool    // bool
 	Items    []Value // array
 	Offset   int     // date: calendar days after the TimeContext day
-	Template string  // date: exact source format template, e.g. "A.{0:yyyy.MM.dd}"
+	Template string  // date: exact format template, e.g. "A.{0:yyyy.MM.dd}"
 }
 
-// Argument is a source test argument.
+// Argument is a test argument.
 type Argument = Value
 
 type wireValue struct {
@@ -336,27 +329,17 @@ func isIdent(s string) bool {
 
 // Header is the first record of every corpus file.
 type Header struct {
-	Schema           int            `json:"schema"`
-	App              string         `json:"app"`
-	SourceRepository string         `json:"sourceRepository"`
-	SourceCommit     string         `json:"sourceCommit"`
-	SourcePaths      []string       `json:"sourcePaths"`
-	License          string         `json:"license"`
-	Counts           map[string]int `json:"counts"`
+	Schema int    `json:"schema"`
+	App    string `json:"app"`
 }
 
-// Case is one retained source test case.
+// Case is one asserted fixture case.
 type Case struct {
-	ID              string           `json:"id"`
-	File            string           `json:"file"`
-	Method          string           `json:"method"`
-	Entry           string           `json:"entry"`
-	Line            int              `json:"line"`
-	UpstreamEnabled bool             `json:"upstreamEnabled"`
-	Scope           string           `json:"scope"`
-	ScopeOwner      string           `json:"scopeOwner"`
-	Args            []Argument       `json:"args"`
-	Expected        map[string]Value `json:"expected"`
+	ID         string           `json:"id"`
+	Scope      string           `json:"scope"`
+	ScopeOwner string           `json:"scopeOwner"`
+	Args       []Argument       `json:"args"`
+	Expected   map[string]Value `json:"expected"`
 }
 
 // Corpus is a fully validated corpus file.
@@ -365,76 +348,19 @@ type Corpus struct {
 	Cases  []Case
 }
 
-// CountKey names a reconciliation count: kind is cases, enabled, disabled or
-// out_of_scope; an empty file names the corpus total.
-func CountKey(kind, file string) string {
-	if file == "" {
-		return kind
-	}
-	return kind + ":" + file
-}
-
-var countKinds = [...]string{"cases", "enabled", "disabled", "out_of_scope"}
-
-// Tally returns the canonical count map for cases: the four totals plus the
-// four per-file counts of every file that carries at least one case. Enabled
-// and disabled count in-scope cases by upstream status; out_of_scope counts
-// every case whose scope is out_of_scope, whatever its upstream status.
-func Tally(cases []Case) map[string]int {
-	t := map[string]int{}
-	for _, k := range countKinds {
-		t[CountKey(k, "")] = 0
-	}
-	for _, c := range cases {
-		kind := "enabled"
-		switch {
-		case c.Scope == ScopeOutOfScope:
-			kind = "out_of_scope"
-		case !c.UpstreamEnabled:
-			kind = "disabled"
-		}
-		for _, k := range countKinds {
-			if _, ok := t[CountKey(k, c.File)]; !ok {
-				t[CountKey(k, c.File)] = 0
-			}
-		}
-		for _, f := range [2]string{"", c.File} {
-			t[CountKey("cases", f)]++
-			t[CountKey(kind, f)]++
-		}
-	}
-	return t
-}
-
 // Validate checks the schema invariants of a whole corpus.
 func (c *Corpus) Validate() error {
 	h := c.Header
-	switch {
-	case h.Schema != SchemaVersion:
+	if h.Schema != SchemaVersion || (h.App != "series" && h.App != "movie") {
 		return &Error{"header_invalid", 1}
-	case h.App != "series" && h.App != "movie":
-		return &Error{"header_invalid", 1}
-	case h.SourceRepository != "env:BOXSET_REF_"+strings.ToUpper(h.App) || h.License != License || len(h.SourcePaths) == 0 || h.Counts == nil:
-		return &Error{"header_invalid", 1}
-	case !validCommit(h.SourceCommit):
-		return &Error{"header_invalid", 1}
-	}
-	paths := map[string]bool{}
-	for _, p := range h.SourcePaths {
-		if !canonicalPath(p) || paths[p] {
-			return &Error{"header_invalid", 1}
-		}
-		paths[p] = true
 	}
 	ids := map[string]bool{}
 	for i, cs := range c.Cases {
 		rec := i + 2
 		switch {
-		case cs.ID == "" || cs.Method == "" || cs.Entry == "" || cs.Line < 1 || cs.ScopeOwner == "":
+		case cs.ID == "" || cs.ScopeOwner == "":
 			return &Error{"case_invalid", rec}
-		case !paths[cs.File]:
-			return &Error{"case_invalid", rec}
-		case cs.Scope != ScopeQuality && cs.Scope != ScopeTitle && cs.Scope != ScopeOutOfScope:
+		case cs.Scope != ScopeQuality && cs.Scope != ScopeTitle:
 			return &Error{"case_invalid", rec}
 		case cs.Args == nil || cs.Expected == nil:
 			return &Error{"case_invalid", rec}
@@ -444,50 +370,7 @@ func (c *Corpus) Validate() error {
 		}
 		ids[cs.ID] = true
 	}
-	want := Tally(c.Cases)
-	for k, v := range want {
-		if got, ok := h.Counts[k]; !ok || got != v {
-			return &Error{"count_mismatch", 1}
-		}
-	}
-	for k, v := range h.Counts {
-		if _, ok := want[k]; ok {
-			continue
-		}
-		// Any other key is a recorded source count, source:<name>:<area>/<file>.
-		parts := strings.SplitN(k, ":", 3)
-		if len(parts) != 3 || parts[0] != "source" || parts[1] == "" || v < 0 || !canonicalPath(parts[2]) {
-			return &Error{"header_invalid", 1}
-		}
-	}
 	return nil
-}
-
-// canonicalPath reports whether p is <area>/<file> under a known source area,
-// with non-empty components other than . and ..
-func canonicalPath(p string) bool {
-	area, rest, ok := strings.Cut(p, "/")
-	if !ok || (area != "tests" && area != "parser" && area != "qualities") {
-		return false
-	}
-	for comp := range strings.SplitSeq(rest, "/") {
-		if comp == "" || comp == "." || comp == ".." {
-			return false
-		}
-	}
-	return true
-}
-
-func validCommit(s string) bool {
-	if len(s) != 40 {
-		return false
-	}
-	for i := range len(s) {
-		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
 }
 
 // escCase is a Case whose argument and expected Values marshal as escValue.
@@ -557,8 +440,8 @@ func ReadFile(path string) (*Corpus, error) {
 
 // Read decodes a corpus: at most MaxFileBytes, at most MaxRecordBytes per
 // record, nesting at most MaxNesting, streaming. A file that is oversize,
-// partial (an unterminated record or counts that do not reconcile),
-// malformed or carries an unknown tag yields (nil, *Error): no usable case.
+// partial (an unterminated record), malformed or carries an unknown tag
+// yields (nil, *Error): no usable case.
 func Read(r io.Reader) (*Corpus, error) {
 	lr := &io.LimitedReader{R: r, N: MaxFileBytes + 1}
 	br := bufio.NewReaderSize(lr, 64<<10)
@@ -671,8 +554,8 @@ func decodeStrictRecord(line []byte, into any, rec int) error {
 
 // ---- dispositions ----------------------------------------------------------
 
-// Disposition binds one retained source case whose native result differs from
-// its source expectation to exact values, a rationale and an answered human
+// Disposition binds one fixture case whose native result differs from its
+// recorded expectation to exact values, a rationale and an answered human
 // question. It never removes or relabels the case.
 type Disposition struct {
 	CaseID     string           `json:"caseId"`
@@ -711,14 +594,14 @@ func ReadDispositions(r io.Reader) (*Dispositions, error) {
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, &Error{"malformed_record", 0}
 	}
-	if d.Schema != SchemaVersion || d.Dispositions == nil {
+	if d.Schema != DispositionsVersion || d.Dispositions == nil {
 		return nil, &Error{"header_invalid", 0}
 	}
 	return &d, nil
 }
 
 // Validate rejects a stale or ownerless disposition: each must name a unique
-// enabled in-scope case of c, carry a non-empty rationale, question, answer
+// case of c, carry a non-empty rationale, question, answer
 // and answering owner, and bind expected values that still equal that case's
 // recorded expectation exactly (same keys on both sides, none for the input).
 func (d *Dispositions) Validate(c *Corpus) error {
@@ -737,8 +620,6 @@ func (d *Dispositions) Validate(c *Corpus) error {
 			return fail("unknown case")
 		case seen[disp.CaseID]:
 			return fail("duplicate")
-		case !cs.UpstreamEnabled || cs.Scope == ScopeOutOfScope:
-			return fail("case is not an enabled in-scope case")
 		case disp.Rationale == "" || disp.Question == "" || disp.Answer == "" || disp.AnsweredBy == "":
 			return fail("ownerless or unanswered")
 		case len(disp.Expected) == 0 || len(disp.Expected) != len(disp.Observed):
@@ -753,7 +634,7 @@ func (d *Dispositions) Validate(c *Corpus) error {
 				return fail("observed key missing")
 			}
 			if got, ok := cs.Expected[k]; !ok || !Equal(got, want) {
-				return fail("expected value no longer equals the source case")
+				return fail("expected value no longer equals the recorded case")
 			}
 		}
 	}
@@ -777,16 +658,16 @@ func Equal(a, b Value) bool {
 // ---- shared temporal contract ----------------------------------------------
 
 // TimeContext is the evaluation clock of one corpus run: Now is the instant
-// and Location the local calendar that source "today" means.
+// and Location the local calendar that "today" means.
 type TimeContext struct {
 	Now      time.Time
 	Location *time.Location
 }
 
 // Materialize returns the release name of v. A string is itself. A symbolic
-// date is source-native local-calendar DateTime.Today.AddDays(Offset) in
-// Location (calendar arithmetic, never a 24-hour duration), formatted with
-// the exact source template.
+// date is the local calendar day of Now in Location plus Offset days
+// (calendar arithmetic, never a 24-hour duration), formatted with the
+// recorded template.
 func (tc TimeContext) Materialize(v Value) (string, error) {
 	switch v.Kind {
 	case KindString:
@@ -818,7 +699,7 @@ func (c Case) Inputs(tc TimeContext) ([]string, error) {
 	return names, nil
 }
 
-// formatTemplate expands a .NET composite format string whose only argument
+// formatTemplate expands a composite format string whose only argument
 // is one date: {0:spec} placeholders and {{ }} escapes. A bare {0} (culture
 // dependent) and every other placeholder are rejected.
 func formatTemplate(tmpl string, t time.Time) (string, error) {
@@ -852,7 +733,7 @@ func formatTemplate(tmpl string, t time.Time) (string, error) {
 	return sb.String(), nil
 }
 
-// formatSpec formats a .NET custom date specifier restricted to yyyy, yy, MM,
+// formatSpec formats a custom date specifier restricted to yyyy, yy, MM,
 // M, dd, d, the separators . - _ space , : / and quoted literals.
 func formatSpec(spec string, t time.Time) (string, error) {
 	var sb strings.Builder

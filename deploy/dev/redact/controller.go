@@ -2,7 +2,7 @@ package main
 
 // controller.go is the private native lifecycle controller of scripts/dev-run.sh:
 //
-//	redact -run REPO RUNID TMPD TIMEOUT REF WRITE CAPTURE -- COMMAND [ARG...]
+//	redact -run REPO RUNID TMPD TIMEOUT WRITE CAPTURE -- COMMAND [ARG...]
 //
 // The bootstrap parses and preflights, builds this binary, then execs it with the
 // runner's PID, environment, cwd, umask and stdio. The controller is the sole
@@ -58,30 +58,6 @@ const (
 )
 
 var captureNames = []string{"dev-desktop", "dev-mobile", "preview-desktop", "preview-mobile"}
-
-// refAreas is the one map between the neutral container areas under /ref/<side>
-// and the upstream directories of a reference checkout.
-var refAreas = []struct{ area, dir string }{
-	{"tests", "src/NzbDrone.Core.Test/ParserTests"},
-	{"test-languages", "src/NzbDrone.Core.Test/Languages"},
-	{"parser", "src/NzbDrone.Core/Parser"},
-	{"qualities", "src/NzbDrone.Core/Qualities"},
-	{"languages", "src/NzbDrone.Core/Languages"},
-}
-
-// refSides names each side and the owner environment value that locates its
-// reference checkout; no checkout location is written into a tracked file.
-var refSides = [2]struct{ name, env string }{{"series", "BOXSET_REF_SERIES"}, {"movie", "BOXSET_REF_MOVIE"}}
-
-// envValue is the value of name in environ, or "".
-func envValue(environ []string, name string) string {
-	for _, kv := range environ {
-		if v, ok := strings.CutPrefix(kv, name+"="); ok {
-			return v
-		}
-	}
-	return ""
-}
 
 // In-container scripts, byte for byte as the host runner has always passed them.
 
@@ -220,7 +196,6 @@ func clockGettime() (sec, nsec int64, err error) {
 type ctl struct {
 	repo, runid, tmpd string
 	timeout           int
-	ref               bool
 	write, capture    string
 	argv              []string
 
@@ -420,12 +395,12 @@ func newCtl(stderr io.Writer) *ctl {
 // cleaned for a rejected argument.
 func (c *ctl) bind(args, environ []string, stdout io.Writer) error {
 	bad := errors.New("private argv rejected")
-	if len(args) < 11 || args[1] != "-run" || args[9] != "--" {
+	if len(args) < 10 || args[1] != "-run" || args[8] != "--" {
 		return bad
 	}
 	c.repo, c.runid, c.tmpd = args[2], args[3], args[4]
 	c.env = append([]string(nil), environ...)
-	c.argv = args[10:]
+	c.argv = args[9:]
 	c.out = &outWriter{w: stdout}
 	if !cleanAbs(c.repo) || strings.ContainsAny(c.repo, ",:\" ") {
 		return bad
@@ -473,18 +448,11 @@ func (c *ctl) bind(args, environ []string, stdout io.Writer) error {
 		return bad
 	}
 	switch args[6] {
-	case "0":
-	case "1":
-		c.ref = true
-	default:
-		return bad
-	}
-	switch args[7] {
 	case "-":
 	case "testdata/parser":
-		c.write, c.mapNames = args[7], []string{"series.jsonl", "movie.jsonl"}
+		c.write, c.mapNames = args[6], []string{"series.jsonl", "movie.jsonl"}
 	case "docs/spikes/issue-drafts":
-		c.write, c.mapNames = args[7], []string{"s5-admission.md", "s5-tools.md"}
+		c.write, c.mapNames = args[6], []string{"s5-admission.md", "s5-tools.md"}
 	default:
 		return bad
 	}
@@ -497,8 +465,8 @@ func (c *ctl) bind(args, environ []string, stdout io.Writer) error {
 			p += "/" + comp
 		}
 	}
-	if args[8] != "-" {
-		c.capture = args[8]
+	if args[7] != "-" {
+		c.capture = args[7]
 		if c.slug, c.leaf, ok = parseCapture(c.capture); !ok {
 			return bad
 		}
@@ -1412,17 +1380,6 @@ func (c *ctl) startContainer() bool {
 	}
 	if c.write != "" {
 		args = append(args, "--tmpfs", "/src/"+c.write+writeTmpfsOpts)
-	}
-	if c.ref {
-		for _, side := range refSides {
-			root := envValue(c.env, side.env)
-			if !cleanAbs(root) || strings.ContainsAny(root, ",:\"") {
-				return c.stepDie("container_start_failed")
-			}
-			for _, a := range refAreas {
-				args = append(args, "--mount", "type=bind,source="+root+"/"+a.dir+",target=/ref/"+side.name+"/"+a.area+",readonly")
-			}
-		}
 	}
 	args = append(args, c.img, "/usr/bin/sleep", strconv.Itoa(c.timeout+60))
 	r := c.do(&callSpec{

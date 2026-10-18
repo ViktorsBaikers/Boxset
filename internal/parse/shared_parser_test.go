@@ -224,7 +224,7 @@ func TestQualitySourceSpecificBehavior(t *testing.T) {
 		t.Errorf("telesync without resolution: %+v", ts)
 	}
 
-	// A name with no quality still reports extension detection, as the source does.
+	// A name with no quality still reports extension detection.
 	s := parse("The.Series.S02E15", KindSeries)
 	if s.Code != "unknown" || s.SourceDetection != detectionExtension || s.ResolutionDetection != detectionExtension {
 		t.Errorf("unknown quality from extension: %+v", s)
@@ -245,7 +245,7 @@ func TestQualitySourceSpecificBehavior(t *testing.T) {
 		t.Errorf("movie .mkv: %+v", q)
 	}
 
-	// A non-ASCII digit satisfies \d but the source's Convert.ToInt32 throws:
+	// A non-ASCII digit satisfies \d but does not parse as an integer:
 	// there is no value, so the parse is rejected.
 	_, err := p.ParseQuality(ctx, "Anime 1v\u0663 (720p)", KindSeries)
 	wantReason(t, err, "title_unrecognized", map[string]int64{})
@@ -275,7 +275,7 @@ func TestQualityFinderFallbacks(t *testing.T) {
 		t.Errorf("movie remux 1080 = %d, want Remux1080p", got)
 	}
 	if got := s.movie.find(rsDVD, 480, ""); got != rqDVD {
-		t.Errorf("movie dvd 480 = %d, want DVD (unknown-resolution quality of the source)", got)
+		t.Errorf("movie dvd 480 = %d, want DVD (unknown-resolution quality of that source)", got)
 	}
 	if got := s.movie.find(rsWebDL, 480, ""); got != rqWEBDL480p {
 		t.Errorf("movie webdl 480 = %d, want WEBDL480p", got)
@@ -336,7 +336,7 @@ func TestVocabularyIsExplicitAndConsistent(t *testing.T) {
 		}
 	}
 	if _, ok := movieModifierCode("Remux"); ok {
-		t.Error("modifier members are case-sensitive source names")
+		t.Error("modifier members are case-sensitive names")
 	}
 }
 
@@ -369,7 +369,7 @@ func TestSourceStringHelpers(t *testing.T) {
 }
 
 // concurrentStride picks the bounded subset of each committed corpus the
-// concurrency test runs: every 11th case, spread over every source file.
+// concurrency test runs: every 11th case, spread over every scope.
 const concurrentStride = 11
 
 func TestSharedParserIsConcurrencySafe(t *testing.T) {
@@ -389,7 +389,7 @@ func TestSharedParserIsConcurrencySafe(t *testing.T) {
 		full, _ := readCorpusFile(t, app.name)
 		picked := &corpus.Corpus{Header: full.Header}
 		for i, cs := range full.Cases {
-			if _, disposed := byID[cs.ID]; i%concurrentStride != 0 || cs.Scope != corpus.ScopeQuality || !cs.UpstreamEnabled || disposed {
+			if _, disposed := byID[cs.ID]; i%concurrentStride != 0 || cs.Scope != corpus.ScopeQuality || disposed {
 				continue
 			}
 			if _, err := cs.Inputs(tc); err != nil {
@@ -454,7 +454,7 @@ func titleSubset(t *testing.T, byID map[string]corpus.Disposition) *corpus.Corpu
 	picked := &corpus.Corpus{Header: full.Header}
 	owners := map[string]bool{}
 	for i, cs := range full.Cases {
-		if _, disposed := byID[cs.ID]; i%concurrentStride != 0 || cs.Scope != corpus.ScopeTitle || !cs.UpstreamEnabled || disposed {
+		if _, disposed := byID[cs.ID]; i%concurrentStride != 0 || cs.Scope != corpus.ScopeTitle || disposed {
 			continue
 		}
 		picked.Cases = append(picked.Cases, cs)
@@ -508,8 +508,8 @@ func dispositionsByID(d *corpus.Dispositions) map[string]corpus.Disposition {
 
 func str(s string) corpus.Value { return corpus.Value{Kind: corpus.KindString, Str: s} }
 
-// resolve maps one source-asserted property to the native comparison: the
-// source expectation expressed as a Boxset value (enum members through the
+// resolve maps one asserted property to the native comparison: the
+// expectation expressed as a Boxset value (enum members through the
 // explicit code maps) and the observed native value. An unknown property, enum
 // type or member is a hard error, never a skipped assertion.
 func resolve(app, key string, want corpus.Value, q Quality) (wantNative, observed corpus.Value, err error) {
@@ -572,42 +572,33 @@ func resolve(app, key string, want corpus.Value, q Quality) (wantNative, observe
 }
 
 // qualityRun is the outcome of one corpus through one parser. The selected
-// scope is quality: enabled/disabled count its cases by upstream status.
-// otherEnabled/otherDisabled count the cases of other in-scope work (title)
-// that a later consumer owns, and outOfScope the unrelated cases, so the whole
-// inventory reconciles separately from the selected scope.
+// scope is quality: cases counts what ran. other counts the title cases that a
+// later consumer owns, so the whole inventory reconciles separately from the
+// selected scope.
 type qualityRun struct {
-	inputs                      int
-	passed, disposed, failed    int
-	enabled, disabled           int
-	otherEnabled, otherDisabled int
-	outOfScope                  int
-	problems                    []string
+	inputs                   int
+	passed, disposed, failed int
+	cases, other             int
+	problems                 []string
 }
 
 func (r *qualityRun) problem(format string, args ...any) {
 	r.problems = append(r.problems, fmt.Sprintf(format, args...))
 }
 
-// runQualityCorpus runs every enabled quality case of c through p. A case
-// passes only when every source assertion holds for every input; a mismatch
-// needs a disposition (byID) binding every distinct mismatching observation.
+// runQualityCorpus runs every quality case of c through p. A case passes only
+// when every assertion holds for every input; a mismatch needs a disposition
+// (byID) binding every distinct mismatching observation.
 func runQualityCorpus(p *Parser, kind Kind, app string, c *corpus.Corpus, byID map[string]corpus.Disposition) qualityRun {
 	var r qualityRun
 	// Quality names carry no symbolic date; the context is only the shared contract.
 	tc := corpus.TimeContext{Now: time.Now(), Location: time.Local}
 	for _, cs := range c.Cases {
 		switch {
-		case cs.Scope == corpus.ScopeOutOfScope:
-			r.outOfScope++
-		case cs.Scope != corpus.ScopeQuality && cs.UpstreamEnabled:
-			r.otherEnabled++
 		case cs.Scope != corpus.ScopeQuality:
-			r.otherDisabled++
-		case !cs.UpstreamEnabled:
-			r.disabled++
+			r.other++
 		default:
-			r.enabled++
+			r.cases++
 			r.runCase(p, kind, app, cs, tc, byID)
 		}
 	}
@@ -628,7 +619,7 @@ func (r *qualityRun) runCase(p *Parser, kind Kind, app string, cs corpus.Case, t
 		r.inputs++
 		q, err := p.ParseQuality(context.Background(), name, kind)
 		if err != nil {
-			r.problem("%s (%s:%d) %q: %v", cs.ID, cs.File, cs.Line, name, err)
+			r.problem("%s %q: %v", cs.ID, name, err)
 			bad = true
 			continue
 		}
@@ -638,7 +629,7 @@ func (r *qualityRun) runCase(p *Parser, kind Kind, app string, cs corpus.Case, t
 			}
 			wantNative, observed, err := resolve(app, key, cs.Expected[key], q)
 			if err != nil {
-				r.problem("%s (%s:%d): %v", cs.ID, cs.File, cs.Line, err)
+				r.problem("%s: %v", cs.ID, err)
 				bad = true
 				continue
 			}
@@ -649,7 +640,7 @@ func (r *qualityRun) runCase(p *Parser, kind Kind, app string, cs corpus.Case, t
 				mismatch[key] = append(mismatch[key], observed)
 			}
 			if !has {
-				r.problem("%s (%s:%d) %q: %s = %+v, source expects %+v", cs.ID, cs.File, cs.Line, name, key, observed, wantNative)
+				r.problem("%s %q: %s = %+v, expects %+v", cs.ID, name, key, observed, wantNative)
 			}
 		}
 	}
@@ -691,24 +682,31 @@ func dispositionBinds(d corpus.Disposition, mismatch map[string][]corpus.Value) 
 	return true
 }
 
-// reconcile compares the run with the header: the whole inventory (all scopes)
-// against the corpus counts, and, separately, the selected quality scope.
+// scopeCounts is the number of cases of c per scope.
+func scopeCounts(c *corpus.Corpus) map[string]int {
+	counts := map[string]int{}
+	for _, cs := range c.Cases {
+		counts[cs.Scope]++
+	}
+	return counts
+}
+
+// reconcile compares the run with the per-scope case counts of its corpus: the
+// whole inventory (both scopes), and, separately, the selected quality scope.
 func (r qualityRun) reconcile(counts map[string]int) []string {
 	var out []string
 	check := func(name string, got, want int) {
 		if got != want {
-			out = append(out, fmt.Sprintf("inventory %s = %d, header %d", name, got, want))
+			out = append(out, fmt.Sprintf("inventory %s = %d, corpus %d", name, got, want))
 		}
 	}
-	check("cases", r.enabled+r.disabled+r.otherEnabled+r.otherDisabled+r.outOfScope, counts["cases"])
-	check("enabled", r.enabled+r.otherEnabled, counts["enabled"])
-	check("disabled", r.disabled+r.otherDisabled, counts["disabled"])
-	check("out_of_scope", r.outOfScope, counts["out_of_scope"])
-	if r.enabled == 0 {
-		out = append(out, "selected quality scope has no enabled case")
+	check(corpus.ScopeQuality, r.cases, counts[corpus.ScopeQuality])
+	check(corpus.ScopeTitle, r.other, counts[corpus.ScopeTitle])
+	if r.cases == 0 {
+		out = append(out, "selected quality scope has no case")
 	}
-	if r.passed+r.disposed+r.failed != r.enabled {
-		out = append(out, fmt.Sprintf("selected scope: passed %d + disposed %d + failed %d != enabled %d", r.passed, r.disposed, r.failed, r.enabled))
+	if r.passed+r.disposed+r.failed != r.cases {
+		out = append(out, fmt.Sprintf("selected scope: passed %d + disposed %d + failed %d != cases %d", r.passed, r.disposed, r.failed, r.cases))
 	}
 	if r.failed != 0 || r.passed == 0 {
 		out = append(out, fmt.Sprintf("selected scope: failed=%d passed=%d", r.failed, r.passed))
@@ -716,8 +714,8 @@ func (r qualityRun) reconcile(counts map[string]int) []string {
 	return out
 }
 
-// mixedCase is one synthetic quality-corpus case over the series fixture file.
-func mixedCase(id, scope string, enabled bool, want map[string]corpus.Value, inputs ...string) corpus.Case {
+// mixedCase is one synthetic quality-corpus case.
+func mixedCase(id, scope string, want map[string]corpus.Value, inputs ...string) corpus.Case {
 	items := make([]corpus.Value, len(inputs))
 	for i, in := range inputs {
 		items[i] = str(in)
@@ -725,8 +723,7 @@ func mixedCase(id, scope string, enabled bool, want map[string]corpus.Value, inp
 	expected := map[string]corpus.Value{corpus.InputKey: {Kind: corpus.KindArray, Items: items}}
 	maps.Copy(expected, want)
 	return corpus.Case{
-		ID: id, File: "tests/QualityParserFixture.cs", Method: "m", Entry: "TestCase#1", Line: 1,
-		UpstreamEnabled: enabled, Scope: scope, ScopeOwner: "QualityParser.ParseQuality",
+		ID: id, Scope: scope, ScopeOwner: "QualityParser.ParseQuality",
 		Args: []corpus.Argument{str(inputs[0])}, Expected: expected,
 	}
 }
@@ -736,26 +733,16 @@ func qualityEnum(member string) corpus.Value {
 }
 
 func mixedCorpus(cases ...corpus.Case) *corpus.Corpus {
-	return &corpus.Corpus{
-		Header: corpus.Header{
-			Schema: corpus.SchemaVersion, App: "series", SourceRepository: "env:BOXSET_REF_SERIES",
-			SourceCommit: "0123456789abcdef0123456789abcdef01234567", SourcePaths: []string{"tests/QualityParserFixture.cs"},
-			License: corpus.License, Counts: corpus.Tally(cases),
-		},
-		Cases: cases,
-	}
+	return &corpus.Corpus{Header: corpus.Header{Schema: corpus.SchemaVersion, App: "series"}, Cases: cases}
 }
 
 func TestQualityConsumerReconcilesInventoryAndSelectedScopeSeparately(t *testing.T) {
 	const sdtvName = "The.Series.S01E13.x264-CtrlSD"
 	cases := []corpus.Case{
-		mixedCase("pass", corpus.ScopeQuality, true, map[string]corpus.Value{"Quality": qualityEnum("SDTV")}, sdtvName),
-		mixedCase("mismatch", corpus.ScopeQuality, true, map[string]corpus.Value{"Quality": qualityEnum("DVD")}, sdtvName),
-		mixedCase("quality-disabled", corpus.ScopeQuality, false, map[string]corpus.Value{"Quality": qualityEnum("DVD")}, sdtvName),
-		mixedCase("title-enabled", corpus.ScopeTitle, true, map[string]corpus.Value{"Title": str("x")}, sdtvName),
-		mixedCase("title-disabled", corpus.ScopeTitle, false, map[string]corpus.Value{"Title": str("x")}, sdtvName),
-		mixedCase("outside", corpus.ScopeOutOfScope, true, map[string]corpus.Value{"Other": str("x")}, sdtvName),
-		mixedCase("outside-disabled", corpus.ScopeOutOfScope, false, map[string]corpus.Value{"Other": str("x")}, sdtvName),
+		mixedCase("pass", corpus.ScopeQuality, map[string]corpus.Value{"Quality": qualityEnum("SDTV")}, sdtvName),
+		mixedCase("mismatch", corpus.ScopeQuality, map[string]corpus.Value{"Quality": qualityEnum("DVD")}, sdtvName),
+		mixedCase("title-1", corpus.ScopeTitle, map[string]corpus.Value{"Title": str("x")}, sdtvName),
+		mixedCase("title-2", corpus.ScopeTitle, map[string]corpus.Value{"Title": str("x")}, sdtvName),
 	}
 	c := mixedCorpus(cases...)
 	if err := c.Validate(); err != nil {
@@ -766,32 +753,28 @@ func TestQualityConsumerReconcilesInventoryAndSelectedScopeSeparately(t *testing
 		Observed: map[string]corpus.Value{"Quality": str("sdtv")},
 	}}
 	r := runQualityCorpus(newTestParser(t, time.Now), KindSeries, "series", c, byID)
-	want := qualityRun{
-		inputs: 2, passed: 1, disposed: 1, enabled: 2, disabled: 1,
-		otherEnabled: 1, otherDisabled: 1, outOfScope: 2,
-	}
-	if r.inputs != want.inputs || r.passed != want.passed || r.disposed != want.disposed || r.failed != 0 || r.enabled != want.enabled ||
-		r.disabled != want.disabled || r.otherEnabled != want.otherEnabled || r.otherDisabled != want.otherDisabled || r.outOfScope != want.outOfScope {
+	want := qualityRun{inputs: 2, passed: 1, disposed: 1, cases: 2, other: 2}
+	if r.inputs != want.inputs || r.passed != want.passed || r.disposed != want.disposed || r.failed != 0 || r.cases != want.cases || r.other != want.other {
 		t.Fatalf("run = %+v, want %+v", r, want)
 	}
-	if problems := append(r.problems, r.reconcile(c.Header.Counts)...); len(problems) != 0 {
-		t.Fatalf("a mixed enabled/disabled/title/out-of-scope inventory must reconcile: %v", problems)
+	if problems := append(r.problems, r.reconcile(scopeCounts(c))...); len(problems) != 0 {
+		t.Fatalf("a mixed quality/title inventory must reconcile: %v", problems)
 	}
 
-	// Every header count is checked against the whole inventory, not the selected scope.
-	for _, key := range []string{"cases", "enabled", "disabled", "out_of_scope"} {
-		counts := maps.Clone(c.Header.Counts)
-		counts[key]++
+	// Every scope count is checked against the whole inventory, not the selected scope.
+	for _, scope := range []string{corpus.ScopeQuality, corpus.ScopeTitle} {
+		counts := maps.Clone(scopeCounts(c))
+		counts[scope]++
 		if len(r.reconcile(counts)) == 0 {
-			t.Errorf("a header %s count off by one must fail reconciliation", key)
+			t.Errorf("a %s count off by one must fail reconciliation", scope)
 		}
 	}
 
-	// A selected scope with no enabled case fails even when the inventory reconciles.
-	titleOnly := mixedCorpus(cases[3], cases[4])
+	// A selected scope with no case fails even when the inventory reconciles.
+	titleOnly := mixedCorpus(cases[2], cases[3])
 	tr := runQualityCorpus(newTestParser(t, time.Now), KindSeries, "series", titleOnly, nil)
-	if len(tr.reconcile(titleOnly.Header.Counts)) == 0 {
-		t.Error("a corpus with no enabled selected-scope case must fail")
+	if len(tr.reconcile(scopeCounts(titleOnly))) == 0 {
+		t.Error("a corpus with no selected-scope case must fail")
 	}
 }
 
@@ -803,7 +786,7 @@ func TestQualityDispositionBindsEveryMismatchingInput(t *testing.T) {
 		Observed: map[string]corpus.Value{"Quality": str("sdtv")},
 	}
 	run := func(inputs ...string) qualityRun {
-		c := mixedCorpus(mixedCase("c", corpus.ScopeQuality, true, map[string]corpus.Value{"Quality": qualityEnum("DVD")}, inputs...))
+		c := mixedCorpus(mixedCase("c", corpus.ScopeQuality, map[string]corpus.Value{"Quality": qualityEnum("DVD")}, inputs...))
 		return runQualityCorpus(newTestParser(t, time.Now), KindSeries, "series", c, map[string]corpus.Disposition{"c": bind})
 	}
 	if r := run(sdtvA, sdtvB); r.disposed != 1 || r.failed != 0 || len(r.problems) != 0 {
@@ -899,7 +882,7 @@ func TestQualityFinalBudgetCheckCoversEveryTerminalPath(t *testing.T) {
 }
 
 func TestQualityVocabularyMatchesIndependentMemberTable(t *testing.T) {
-	// Fixed by hand from the source Quality enums, not computed from vocab.go.
+	// Fixed by hand from the Quality member names, not computed from vocab.go.
 	series := map[string]string{
 		"Unknown": "unknown", "SDTV": "sdtv", "DVD": "dvd", "WEBRip480p": "webrip-480p", "WEBDL480p": "webdl-480p",
 		"Bluray480p": "bluray-480p", "Bluray576p": "bluray-576p", "HDTV720p": "hdtv-720p", "WEBRip720p": "webrip-720p",
@@ -961,7 +944,7 @@ func TestQualityVocabularyMatchesIndependentMemberTable(t *testing.T) {
 	for _, side := range sides {
 		t.Run(side.name, func(t *testing.T) {
 			if len(side.defs) != len(side.table) {
-				t.Errorf("%d source members, independent table has %d", len(side.defs), len(side.table))
+				t.Errorf("%d members, independent table has %d", len(side.defs), len(side.table))
 			}
 			for member, code := range side.table {
 				d, ok := side.lookup(member)
@@ -994,8 +977,8 @@ func TestQualityVocabularyMatchesIndependentMemberTable(t *testing.T) {
 }
 
 func TestLanguageVocabularyMatchesIndependentMemberTable(t *testing.T) {
-	// Fixed by hand from the source Language members (the names of its static
-	// members, in declaration order), not computed from vocab.go.
+	// Fixed by hand from the Language member names (in declaration order),
+	// not computed from vocab.go.
 	table := map[string]string{
 		"Unknown": "unknown", "English": "english", "French": "french", "Spanish": "spanish", "German": "german",
 		"Italian": "italian", "Danish": "danish", "Dutch": "dutch", "Japanese": "japanese", "Icelandic": "icelandic",
@@ -1033,12 +1016,12 @@ func TestLanguageVocabularyMatchesIndependentMemberTable(t *testing.T) {
 			t.Errorf("languageCode(%s) = %q, %v; want %q", member, code, ok, want)
 		}
 	}
-	// The series source names the Brazilian Portuguese member PortugueseBrazil.
+	// The series fixtures name the Brazilian Portuguese member PortugueseBrazil.
 	if code, ok := languageCode("PortugueseBrazil"); !ok || code != "portuguese-br" {
 		t.Errorf("languageCode(PortugueseBrazil) = %q, %v; want portuguese-br", code, ok)
 	}
 	if code, ok := languageCode("Portuguese (Brazil)"); ok {
-		t.Errorf("the source display name has no mapping, got %q", code)
+		t.Errorf("the display name has no mapping, got %q", code)
 	}
 }
 
@@ -1059,28 +1042,22 @@ const (
 	ownerCleanTitle   = "Parser.CleanMovieTitle"
 )
 
-// qualityFixtures are the source files of the quality scope: a title case from
-// one of them would be a quality name substituted for a title assertion.
-var qualityFixtures = map[string]bool{
-	"tests/QualityParserFixture.cs": true, "tests/ExtendedQualityParserRegex.cs": true, "tests/AnimeVersionFixture.cs": true,
-}
-
-// absentValue is observed where the source has nothing to read (a null result
+// absentValue is observed where there is nothing to read (a null result
 // or an index past the list): no expectation, null included, equals it.
 var absentValue = corpus.Value{Kind: corpus.KindEnum, Type: "$absent", Str: "no value"}
 
 // titleResult is what one title entry point produced for one input.
 type titleResult struct {
-	movie     *MovieInfo   // ParseMovieTitle: nil when the source returns null
-	episode   *EpisodeInfo // series ParseTitle: nil when the source returns null
-	group     string       // ParseReleaseGroup: empty where the source returns null
+	movie     *MovieInfo   // ParseMovieTitle: nil when the name has no movie title
+	episode   *EpisodeInfo // series ParseTitle: nil when the name has no episode
+	group     string       // ParseReleaseGroup: empty where there is no group
 	languages []string     // ParseLanguages
 	clean     string       // CleanMovieTitle, CleanSeriesTitle
 	name      string       // ParseSeriesName
 }
 
 // observeTitle runs the entry point a title case names on one input. A name
-// ParseMovieTitle rejects is the source's null (a nil movie, no error); any
+// ParseMovieTitle rejects has no movie (a nil movie, no error); any
 // other failure is an error.
 func observeTitle(p *Parser, owner string, dir bool, name string) (titleResult, error) {
 	ctx := context.Background()
@@ -1126,9 +1103,9 @@ func observeTitle(p *Parser, owner string, dir bool, name string) (titleResult, 
 	return titleResult{}, fmt.Errorf("unsupported title entry point %q", owner)
 }
 
-// resolveTitle maps one source-asserted property of a title entry point to the
-// native comparison: the source expectation as a Boxset value (language members
-// through the explicit code map; the source's null string is the empty text)
+// resolveTitle maps one asserted property of a title entry point to the
+// native comparison: the expectation as a Boxset value (language members
+// through the explicit code map; a null string is the empty text)
 // and the observed native value. An unknown property, entry point, enum type or
 // member is a hard error, never a skipped assertion.
 func resolveTitle(owner, key string, want corpus.Value, res titleResult) (wantNative, observed corpus.Value, err error) {
@@ -1221,7 +1198,7 @@ func resolveTitle(owner, key string, want corpus.Value, res titleResult) (wantNa
 		}
 		m := res.movie
 		if m == nil {
-			// The source dereferences a null result: every property assertion fails,
+			// A null result is dereferenced: every property assertion fails,
 			// whatever it expects. Only an explicit $result null compares as null.
 			return want, absentValue, nil
 		}
@@ -1241,7 +1218,7 @@ func resolveTitle(owner, key string, want corpus.Value, res titleResult) (wantNa
 		case "TmdbId":
 			return number(m.TmdbID)
 		case "MovieTitle.CleanMovieTitle":
-			// Both the parsed primary title and the expected title are normalized, as the source asserts.
+			// Both the parsed primary title and the expected title are normalized.
 			if want.Kind != corpus.KindString {
 				return corpus.Value{}, corpus.Value{}, fmt.Errorf("%s: expected a string, got %+v", key, want)
 			}
@@ -1265,7 +1242,7 @@ func resolveTitle(owner, key string, want corpus.Value, res titleResult) (wantNa
 		var i int
 		if n, scanErr := fmt.Sscanf(key, "MovieTitles[%d]", &i); n == 1 && scanErr == nil && strings.HasSuffix(key, "]") {
 			if i >= len(m.MovieTitles) {
-				// The source indexes past the list and throws: the assertion fails.
+				// An index past the list fails the assertion.
 				return want, absentValue, nil
 			}
 			return text(m.MovieTitles[i])
@@ -1274,7 +1251,7 @@ func resolveTitle(owner, key string, want corpus.Value, res titleResult) (wantNa
 	return corpus.Value{}, corpus.Value{}, fmt.Errorf("unsupported asserted property %q of %s", key, owner)
 }
 
-// cleanMovieTitleRe is the source's NormalizeRegex: the common words (a, an,
+// cleanMovieTitleRe is the normalization pattern: the common words (a, an,
 // the, and, or, of) that are neither first, last nor part of an acronym, and
 // every non-word character and underscore.
 var cleanMovieTitleRe = func() *regexp2.Regexp {
@@ -1290,7 +1267,7 @@ var germanUmlauts = strings.NewReplacer("ä", "ae", "ö", "oe", "ü", "ue", "Ä"
 
 // accentFold maps each lower-case letter of Latin-1 Supplement and Latin
 // Extended-A that has a canonical decomposition to its base letter, and ð to d
-// (it has no decomposition, but the source asserts that "Ríkið" cleans to
+// (it has no decomposition, but a fixture asserts that "Ríkið" cleans to
 // "rikid"). The other letters without a decomposition (ø, æ, œ, ł, đ, ħ, ŋ, ŧ,
 // ı, ĳ, ĸ, ŀ, ŉ, ſ) are deliberately absent: normalization form D leaves them
 // as they are.
@@ -1308,7 +1285,7 @@ var accentFold = func() *strings.Replacer {
 	return strings.NewReplacer(pairs...)
 }()
 
-// removeAccent is the source's RemoveAccent (decompose, drop the non-spacing
+// removeAccent removes accents (decompose, drop the non-spacing
 // marks, recompose) for lower-case text, with the standard library only: the
 // letters of accentFold lose their accent and a combining mark of already
 // decomposed text is dropped. The standard library has no decomposition table
@@ -1323,13 +1300,13 @@ func removeAccent(s string) (string, error) {
 	}, accentFold.Replace(s))
 	for _, r := range s {
 		if r > unicode.MaxASCII {
-			return "", fmt.Errorf("RemoveAccent(%q): %q is outside the Latin letters whose decomposition is ported", s, r)
+			return "", fmt.Errorf("RemoveAccent(%q): %q is outside the Latin letters whose decomposition is handled", s, r)
 		}
 	}
 	return s, nil
 }
 
-// cleanMovieTitle is the source's CleanMovieTitle: a blank or all-digit title
+// cleanMovieTitle normalizes a title: a blank or all-digit title
 // is returned as it is, otherwise the normalized title is lower-cased, its
 // German umlauts spelled out and its accents removed.
 func cleanMovieTitle(title string) (string, error) {
@@ -1347,29 +1324,26 @@ func cleanMovieTitle(title string) (string, error) {
 }
 
 // titleRun is the outcome of one corpus through one parser. The selected scope
-// is title: enabled/disabled count its cases by upstream status.
-// otherEnabled/otherDisabled count the quality cases (owned by the quality
-// consumer) and outOfScope the unrelated cases, so the whole inventory
-// reconciles separately from the selected scope.
+// is title: cases counts what ran. other counts the quality cases (owned by the
+// quality consumer), so the whole inventory reconciles separately from the
+// selected scope.
 type titleRun struct {
-	inputs                      int
-	passed, disposed, failed    int
-	enabled, disabled           int
-	otherEnabled, otherDisabled int
-	outOfScope                  int
-	privateDir                  int // passed or disposed cases proved on the private isDir adapter, not public ParseTitle
-	problems                    []string
-	observe                     func(p *Parser, owner string, dir bool, name string) (titleResult, error)
-	resolve                     func(owner, key string, want corpus.Value, res titleResult, tc corpus.TimeContext) (corpus.Value, corpus.Value, error)
+	inputs                   int
+	passed, disposed, failed int
+	cases, other             int
+	privateDir               int // passed or disposed cases proved on the private isDir adapter, not public ParseTitle
+	problems                 []string
+	observe                  func(p *Parser, owner string, dir bool, name string) (titleResult, error)
+	resolve                  func(owner, key string, want corpus.Value, res titleResult, tc corpus.TimeContext) (corpus.Value, corpus.Value, error)
 }
 
 func (r *titleRun) problem(format string, args ...any) {
 	r.problems = append(r.problems, fmt.Sprintf(format, args...))
 }
 
-// runTitleCorpus runs every enabled movie title case of c through p. A case
-// passes only when every source assertion holds for every input; a mismatch needs
-// a disposition (byID) binding every distinct mismatching observation.
+// runTitleCorpus runs every movie title case of c through p. A case passes only
+// when every assertion holds for every input; a mismatch needs a disposition
+// (byID) binding every distinct mismatching observation.
 func runTitleCorpus(p *Parser, c *corpus.Corpus, byID map[string]corpus.Disposition) titleRun {
 	// Movie title names carry no symbolic date; the context is only the shared contract.
 	tc := corpus.TimeContext{Now: time.Now(), Location: time.Local}
@@ -1386,20 +1360,10 @@ func runSeriesCorpus(p *Parser, c *corpus.Corpus, byID map[string]corpus.Disposi
 func runTitleScope(r titleRun, p *Parser, c *corpus.Corpus, byID map[string]corpus.Disposition, tc corpus.TimeContext) titleRun {
 	for _, cs := range c.Cases {
 		switch {
-		case cs.Scope == corpus.ScopeOutOfScope:
-			r.outOfScope++
-		case cs.Scope != corpus.ScopeTitle && cs.UpstreamEnabled:
-			r.otherEnabled++
 		case cs.Scope != corpus.ScopeTitle:
-			r.otherDisabled++
-		case !cs.UpstreamEnabled:
-			r.disabled++
-		case qualityFixtures[cs.File]:
-			r.enabled++
-			r.problem("%s: a title case from the quality fixture %s", cs.ID, cs.File)
-			r.failed++
+			r.other++
 		default:
-			r.enabled++
+			r.cases++
 			r.runCase(p, cs, tc, byID)
 		}
 	}
@@ -1421,7 +1385,7 @@ func (r *titleRun) runCase(p *Parser, cs corpus.Case, tc corpus.TimeContext, byI
 		r.inputs++
 		res, err := r.observe(p, cs.ScopeOwner, dir, name)
 		if err != nil {
-			r.problem("%s (%s:%d) %q: %v", cs.ID, cs.File, cs.Line, name, err)
+			r.problem("%s %q: %v", cs.ID, name, err)
 			bad = true
 			continue
 		}
@@ -1431,7 +1395,7 @@ func (r *titleRun) runCase(p *Parser, cs corpus.Case, tc corpus.TimeContext, byI
 			}
 			wantNative, observed, err := r.resolve(cs.ScopeOwner, key, cs.Expected[key], res, tc)
 			if err != nil {
-				r.problem("%s (%s:%d): %v", cs.ID, cs.File, cs.Line, err)
+				r.problem("%s: %v", cs.ID, err)
 				bad = true
 				continue
 			}
@@ -1442,7 +1406,7 @@ func (r *titleRun) runCase(p *Parser, cs corpus.Case, tc corpus.TimeContext, byI
 				mismatch[key] = append(mismatch[key], observed)
 			}
 			if !has {
-				r.problem("%s (%s:%d) %q: %s = %+v, source expects %+v", cs.ID, cs.File, cs.Line, name, key, observed, wantNative)
+				r.problem("%s %q: %s = %+v, expects %+v", cs.ID, name, key, observed, wantNative)
 			}
 		}
 	}
@@ -1473,24 +1437,22 @@ func b2i(b bool) int {
 	return 0
 }
 
-// reconcile compares the run with the header: the whole inventory (all scopes)
-// against the corpus counts, and, separately, the selected title scope.
+// reconcile compares the run with the per-scope case counts of its corpus: the
+// whole inventory (both scopes), and, separately, the selected title scope.
 func (r titleRun) reconcile(counts map[string]int) []string {
 	var out []string
 	check := func(name string, got, want int) {
 		if got != want {
-			out = append(out, fmt.Sprintf("inventory %s = %d, header %d", name, got, want))
+			out = append(out, fmt.Sprintf("inventory %s = %d, corpus %d", name, got, want))
 		}
 	}
-	check("cases", r.enabled+r.disabled+r.otherEnabled+r.otherDisabled+r.outOfScope, counts["cases"])
-	check("enabled", r.enabled+r.otherEnabled, counts["enabled"])
-	check("disabled", r.disabled+r.otherDisabled, counts["disabled"])
-	check("out_of_scope", r.outOfScope, counts["out_of_scope"])
-	if r.enabled == 0 {
-		out = append(out, "selected title scope has no enabled case")
+	check(corpus.ScopeTitle, r.cases, counts[corpus.ScopeTitle])
+	check(corpus.ScopeQuality, r.other, counts[corpus.ScopeQuality])
+	if r.cases == 0 {
+		out = append(out, "selected title scope has no case")
 	}
-	if r.passed+r.disposed+r.failed != r.enabled {
-		out = append(out, fmt.Sprintf("selected scope: passed %d + disposed %d + failed %d != enabled %d", r.passed, r.disposed, r.failed, r.enabled))
+	if r.passed+r.disposed+r.failed != r.cases {
+		out = append(out, fmt.Sprintf("selected scope: passed %d + disposed %d + failed %d != cases %d", r.passed, r.disposed, r.failed, r.cases))
 	}
 	if r.failed != 0 || r.passed == 0 {
 		out = append(out, fmt.Sprintf("selected scope: failed=%d passed=%d", r.failed, r.passed))
@@ -1532,7 +1494,7 @@ func newSeriesTestParser(t *testing.T, now time.Time, loc *time.Location) *Parse
 func intValue(n int) corpus.Value   { return corpus.Value{Kind: corpus.KindInt, Int: int64(n)} }
 func boolValue(b bool) corpus.Value { return corpus.Value{Kind: corpus.KindBool, Bool: b} }
 
-// cleanSeriesRe is the source's NormalizeRegex of CleanSeriesTitle: the common
+// cleanSeriesRe is the normalization pattern of cleanSeriesTitle: the common
 // words (a, an, the, and, or, of) that are neither first nor last, and every
 // non-word character and underscore; percentRe is its percent rule.
 var cleanSeriesRe, percentRe = func() (*regexp2.Regexp, *regexp2.Regexp) {
@@ -1548,7 +1510,7 @@ var cleanSeriesRe, percentRe = func() (*regexp2.Regexp, *regexp2.Regexp) {
 	return clean, percent
 }()
 
-// cleanSeriesTitle is the source's CleanSeriesTitle: a blank or all-digit title
+// cleanSeriesTitle normalizes a title: a blank or all-digit title
 // is returned as it is, otherwise "%" after digits reads "percent", the
 // normalized title is lower-cased and its accents removed.
 func cleanSeriesTitle(title string) (string, error) {
@@ -1570,7 +1532,7 @@ func cleanSeriesTitle(title string) (string, error) {
 }
 
 // observeSeriesTitle runs the entry point a series title case names on one
-// input. A name ParseTitle rejects is the source's null (a nil episode, no
+// input. A name ParseTitle rejects has no episode (a nil episode, no
 // error); any other failure is an error.
 func observeSeriesTitle(p *Parser, owner string, _ bool, name string) (titleResult, error) {
 	ctx := context.Background()
@@ -1580,7 +1542,7 @@ func observeSeriesTitle(p *Parser, owner string, _ bool, name string) (titleResu
 		var re *ReasonError
 		switch {
 		case errors.As(err, &re) && re.Reason.Code == codeTitleUnrecognized:
-			// The source's null: there is no episode.
+			// No episode: the name has no title.
 		case err != nil:
 			return titleResult{}, err
 		case pt.Kind != KindSeries || pt.Episode == nil || pt.Movie != nil:
@@ -1619,7 +1581,7 @@ func observeSeriesTitle(p *Parser, owner string, _ bool, name string) (titleResu
 
 // canonicalDecimal is the exact value of a decimal text: no leading zeros of the
 // integer part and no trailing zeros of the fraction, so 5.50 and 5.5 are one
-// number as they are to the source's decimal comparison.
+// number as they are to a decimal comparison.
 func canonicalDecimal(s string) string {
 	whole, frac, _ := strings.Cut(s, ".")
 	if whole = strings.TrimLeft(whole, "0"); whole == "" {
@@ -1695,10 +1657,10 @@ func languageContain(key string, want corpus.Value, list []string) (corpus.Value
 	return wanted, got, nil
 }
 
-// resolveSeriesTitle maps one source-asserted property of a series title entry
-// point to the native comparison: the source expectation as a Boxset value
+// resolveSeriesTitle maps one asserted property of a series title entry
+// point to the native comparison: the expectation as a Boxset value
 // (language members through the explicit code map, a symbolic date through tc,
-// the source's null string as the empty text) and the observed native value. An
+// a null string as the empty text) and the observed native value. An
 // unknown property, entry point, enum type or member is a hard error, never a
 // skipped assertion.
 func resolveSeriesTitle(owner, key string, want corpus.Value, res titleResult, tc corpus.TimeContext) (corpus.Value, corpus.Value, error) {
@@ -1708,8 +1670,8 @@ func resolveSeriesTitle(owner, key string, want corpus.Value, res titleResult, t
 			got := res.group
 			if owner == ownerCleanSeries {
 				got = res.clean
-				// The extractor replaced the release group token of a lower-case expected
-				// title by the cased substituted group; the normalized title is lower case.
+				// The fixture holds the substituted group in a lower-case expected
+				// title; the normalized title is lower case.
 				if want.Kind == corpus.KindString {
 					want.Str = strings.ReplaceAll(want.Str, substitutedGroup, strings.ToLower(substitutedGroup))
 				}
@@ -1718,7 +1680,7 @@ func resolveSeriesTitle(owner, key string, want corpus.Value, res titleResult, t
 		}
 	case ownerSeriesName:
 		if key == "SeriesName.CleanSeriesTitle" {
-			// Both the parsed series title and the expected title are normalized, as the source asserts.
+			// Both the parsed series title and the expected title are normalized.
 			if want.Kind != corpus.KindString {
 				return corpus.Value{}, corpus.Value{}, fmt.Errorf("%s: expected a string, got %+v", key, want)
 			}
@@ -1745,11 +1707,11 @@ func resolveSeriesTitle(owner, key string, want corpus.Value, res titleResult, t
 	return corpus.Value{}, corpus.Value{}, fmt.Errorf("unsupported asserted property %q of %s", key, owner)
 }
 
-// substitutedGroup is the release group the series corpus extraction records
-// wherever the reference tests name the upstream products.
+// substitutedGroup is the neutral release group the series fixtures hold wherever
+// a group name would name an upstream product.
 const substitutedGroup = "Neutral"
 
-// seriesText compares a text property: the source's null string is the empty text.
+// seriesText compares a text property: a null string is the empty text.
 func seriesText(key string, want corpus.Value, got string) (corpus.Value, corpus.Value, error) {
 	switch want.Kind {
 	case corpus.KindString:
@@ -1761,7 +1723,7 @@ func seriesText(key string, want corpus.Value, got string) (corpus.Value, corpus
 }
 
 // resolveEpisode resolves one property assertion on the result of the series
-// ParseTitle. A missing episode (the source's null) fails every property
+// ParseTitle. A missing episode fails every property
 // assertion, whatever it expects: only the explicit null result, the not-null
 // assertion and the no-throw requirement are about the result itself.
 func resolveEpisode(key string, want corpus.Value, ep *EpisodeInfo, tc corpus.TimeContext) (corpus.Value, corpus.Value, error) {
@@ -1788,7 +1750,7 @@ func resolveEpisode(key string, want corpus.Value, ep *EpisodeInfo, tc corpus.Ti
 		return want, want, nil
 	}
 	if ep == nil {
-		// The source dereferences a null result: the assertion fails, whatever it expects.
+		// A null result is dereferenced: the assertion fails, whatever it expects.
 		return want, absentValue, nil
 	}
 
@@ -1805,7 +1767,7 @@ func resolveEpisode(key string, want corpus.Value, ep *EpisodeInfo, tc corpus.Ti
 		}
 		return want, boolValue(got), nil
 	}
-	// optional is a nullable int: the source's null equals a null expectation only.
+	// optional is a nullable int: a null equals a null expectation only.
 	optional := func(got int, ok bool) (corpus.Value, corpus.Value, error) {
 		switch {
 		case want.Kind == corpus.KindNull && !ok:
@@ -1856,7 +1818,7 @@ func resolveEpisode(key string, want corpus.Value, ep *EpisodeInfo, tc corpus.Ti
 		}
 		return corpus.Value{Kind: corpus.KindDecimal, Str: canonicalDecimal(v.Str)}, nil
 	}
-	// first and single read an element the way the source's First, Single and
+	// first and single read an element the way First, Single and
 	// SingleOrDefault do: where it throws, the assertion fails.
 	first := func(list []int) (corpus.Value, corpus.Value, error) {
 		if len(list) == 0 {
@@ -2018,7 +1980,7 @@ func seriesTitleSubset(t *testing.T, byID map[string]corpus.Disposition) *corpus
 	owners := map[string]bool{}
 	var missed []corpus.Case
 	for i, cs := range full.Cases {
-		if _, disposed := byID[cs.ID]; cs.Scope != corpus.ScopeTitle || !cs.UpstreamEnabled || disposed {
+		if _, disposed := byID[cs.ID]; cs.Scope != corpus.ScopeTitle || disposed {
 			continue
 		}
 		switch {

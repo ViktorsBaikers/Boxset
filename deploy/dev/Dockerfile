@@ -203,7 +203,7 @@ RUN set -eu; \
     chown root:root /usr/local/share/boxset/inputs.sha256; \
     chmod 0644 /usr/local/share/boxset/inputs.sha256; \
     chown -R boxset:boxset /src /go /var/cache/go-build /home/boxset; \
-    for d in /src /src/testdata /src/docs /src/docs/spikes /src/docs/spikes/data; do \
+    for d in /src /src/docs /src/docs/spikes /src/docs/spikes/data; do \
       if [ -d "$d" ]; then chown root:root "$d"; chmod 1777 "$d"; fi; \
     done; \
     if [ -d /src/docs/spikes/data ]; then \
@@ -214,7 +214,3 @@ RUN set -eu; \
     install -d -o 1000 -g 1000 -m 0700 /capture; \
     find /usr /etc -xtype l -delete; \
     find /usr /etc ! -type l -perm /022 -exec chmod go-w {} +
-# Empty destinations of the runner's `--ref` delivery of pinned Git-object reference text: six
-# root-owned read-only directories, filled only by `docker cp` into the created container, never
-# from the build context and never by a mount.
-RUN for s in series movie; do for a in tests parser qualities; do install -d -o root -g root -m 0555 "/ref/$s/$a"; done; done

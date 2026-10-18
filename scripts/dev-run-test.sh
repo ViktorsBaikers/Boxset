@@ -3045,38 +3045,6 @@ gvariant fault-start controller.go '"--tmpfs", scratchTmpfs}' '"--tmpfs", scratc
 gvariant mut-start-bypass controller.go '"--tmpfs", scratchTmpfs}' '"--tmpfs", scratchTmpfs, "--memory", "https://u:p@h.example/x"}' 'stderr: c.tailFn(4096),' 'stderr: func(r io.Reader) any { var b bytes.Buffer; _, _ = io.Copy(&b, r); return tailRes{b.Bytes(), 0} },'
 redgreen "start-failure diagnostics redacted (bypass mutant)" a_start_diag "$MUT/mut-start-bypass.sh" "$MUT/fault-start.sh"
 
-# ===== 7. reference mounts ================================================================================
-# The reference checkouts are located only by the owner values BOXSET_REF_SERIES and BOXSET_REF_MOVIE; the driver copies their
-# text into the isolated checkout, points both values there for these controls and restores them afterwards.
-if [ -d "${BOXSET_REF_SERIES:-}" ] && [ -d "${BOXSET_REF_MOVIE:-}" ]; then
-	REF_S0=$BOXSET_REF_SERIES
-	REF_M0=$BOXSET_REF_MOVIE
-	for side in series movie; do
-		case $side in series) _rsrc=$REF_S0 ;; *) _rsrc=$REF_M0 ;; esac
-		for rel in src/NzbDrone.Core.Test/ParserTests src/NzbDrone.Core.Test/Languages src/NzbDrone.Core/Parser src/NzbDrone.Core/Qualities src/NzbDrone.Core/Languages; do
-			mkdir -p "$ISO/ref/$side/$rel"
-			cp -R "$_rsrc/$rel/." "$ISO/ref/$side/$rel/" 2>/dev/null || true
-		done
-	done
-	BOXSET_REF_SERIES=$ISO/ref/series
-	BOXSET_REF_MOVIE=$ISO/ref/movie
-	export BOXSET_REF_SERIES BOXSET_REF_MOVIE
-	rr --ref -- sh -c 'test -r /ref/series/parser && test -r /ref/movie/qualities && ! touch /ref/series/parser/x 2>/dev/null && test ! -e /ref/series/decoy.sh'
-	expect "reference text mounts read-only and nothing else" "$RS" 0
-	decoy=$ISO/ref/series/src/NzbDrone.Core/Parser/bad.sh
-	printf '#!/bin/sh\n' >"$decoy"
-	chmod +x "$decoy"
-	rr -w reference_input_invalid --ref -- true
-	if [ "$RS" = 125 ] && grep -Fq 'dev-run: reference_input_invalid' "$TMP/rerr"; then pass "reference executable / non-text file is refused"; else fail "reference audit" "status $RS"; fi
-	rm -f "$decoy"
-	BOXSET_REF_SERIES=$REF_S0
-	BOXSET_REF_MOVIE=$REF_M0
-else
-	fail "reference mounts" "BOXSET_REF_SERIES and BOXSET_REF_MOVIE do not name reference checkouts on this host: required for the --ref controls"
-fi
-rr -- sh -c 'test ! -e /ref'
-expect "no reference mount without --ref" "$RS" 0
-
 # ===== 8. destination and flag refusals =========================================================================
 mkdir -p "$ISO/.devrites/work/boxset-test"
 before=$(tree_hash)
@@ -5923,7 +5891,7 @@ a_rejpriv() { # a_rejpriv: a malformed private cleanup path is refused with the 
 	rm -rf "$_rd"
 	mkdir -p "$_rd/keep" || { SETUP=1; return 1; }
 	printf 'foreign\n' >"$_rd/keep/canary"
-	(cd "$ISO" && PATH=/nonexistent "$CLOCK" -run "$ISO" 0123456789abcdef "$_rd/keep" 5 0 - - -- true) >"$TMP/rout" 2>"$TMP/xerr"
+	(cd "$ISO" && PATH=/nonexistent "$CLOCK" -run "$ISO" 0123456789abcdef "$_rd/keep" 5 - - -- true) >"$TMP/rout" 2>"$TMP/xerr"
 	RS=$?
 	intended_refusal redact_unavailable "$TMP/xerr" && reached
 	OBS="status $RS, stderr '$(cat "$TMP/xerr")', canary '$(cat "$_rd/keep/canary" 2>/dev/null)'"

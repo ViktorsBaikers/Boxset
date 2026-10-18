@@ -2,11 +2,9 @@
 
 package parse
 
-// Release group parsing for the movie title parser, ported from the movie
-// reference parser (parser/ReleaseGroupParser.cs, located by
-// BOXSET_REF_MOVIE) at commit df2faa64c75e6081556d11232dc46523e7264ea1. Control
-// flow, pattern order and pattern text follow the source. The parser runs
-// under the budget of the title parse that calls it and never starts its own.
+// Release group parsing for the movie title parser. Control flow, pattern
+// order and pattern text are semantic. The parser runs under the budget of
+// the title parse that calls it and never starts its own.
 
 import (
 	"github.com/dlclark/regexp2/v2"
@@ -40,9 +38,9 @@ func newReleaseGroupTable() (*releaseGroupTable, error) {
 	return t, nil
 }
 
-// parse is ReleaseGroupParser.ParseReleaseGroup: the release group of a title,
-// empty where the source returns null. t supplies the extension removal and the
-// website and torrent suffix cleanup the two parsers share.
+// parse returns the release group of a title, empty where there is none. t
+// supplies the extension removal and the website and torrent suffix cleanup
+// the two parsers share.
 func (g *releaseGroupTable) parse(b *budget, t *movieTitleTable, title string) (string, error) {
 	title, err := t.removeFileExtension(b, trimWhite(title))
 	if err != nil {

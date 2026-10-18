@@ -4,6 +4,7 @@ package parse
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -12,16 +13,16 @@ import (
 	"github.com/ViktorsBaikers/Boxset/internal/parse/corpus"
 )
 
-// TestEpisodeCorpus runs every enabled title case of the committed series corpus
+// TestEpisodeCorpus runs every title case of the committed series corpus
 // through the real parser: the series title cases through ParseTitle (and the
-// ParseSeriesName and CleanSeriesTitle helpers the source normalizes through)
+// ParseSeriesName and CleanSeriesTitle helpers it normalizes through)
 // and the release group and language cases through the parsers ParseTitle runs.
-// A case passes only when every source assertion holds for every input; a
+// A case passes only when every assertion holds for every input; a
 // retained mismatch needs an exact, answered disposition that binds every
 // mismatching input observation, and a stale or ownerless disposition fails. The
-// whole inventory (all scopes) reconciles against the header separately from the
-// selected title scope, whose count must be positive for every entry point and
-// come only from the title fixtures.
+// whole inventory (both scopes) reconciles against the corpus's per-scope counts
+// separately from the selected title scope, whose count must be positive for
+// every entry point.
 func TestEpisodeCorpus(t *testing.T) {
 	disp := readDispositions(t)
 	var all []corpus.Case
@@ -48,16 +49,15 @@ func TestEpisodeCorpus(t *testing.T) {
 
 	now, loc := seriesRunClock(t)
 	r := runSeriesCorpus(newSeriesTestParser(t, now, loc), c, dispositionsByID(disp), corpus.TimeContext{Now: now, Location: loc})
-	for _, problem := range append(r.problems, r.reconcile(c.Header.Counts)...) {
+	for _, problem := range append(r.problems, r.reconcile(scopeCounts(c))...) {
 		t.Error(problem)
 	}
-	t.Logf("series-title-corpus cases=%d title=%d (title=%d name=%d clean=%d group=%d languages=%d) enabled=%d passed=%d disposed=%d disabled=%d quality=%d out_of_scope=%d inputs=%d sha256=%s",
-		len(c.Cases), r.enabled+r.disabled, byOwner[ownerSeriesTitle], byOwner[ownerSeriesName], byOwner[ownerCleanSeries],
-		byOwner[ownerReleaseGroup], byOwner[ownerLanguages], r.enabled, r.passed, r.disposed, r.disabled,
-		r.otherEnabled+r.otherDisabled, r.outOfScope, r.inputs, hash)
+	t.Logf("series-title-corpus cases=%d title=%d (title=%d name=%d clean=%d group=%d languages=%d) passed=%d disposed=%d quality=%d inputs=%d sha256=%s",
+		len(c.Cases), r.cases, byOwner[ownerSeriesTitle], byOwner[ownerSeriesName], byOwner[ownerCleanSeries],
+		byOwner[ownerReleaseGroup], byOwner[ownerLanguages], r.passed, r.disposed, r.other, r.inputs, hash)
 }
 
-// seriesCase is one synthetic series title-corpus case over a title fixture file.
+// seriesCase is one synthetic series title-corpus case.
 func seriesCase(id, owner string, want map[string]corpus.Value, inputs ...corpus.Value) corpus.Case {
 	items := inputs
 	expected := map[string]corpus.Value{corpus.InputKey: {Kind: corpus.KindArray, Items: items}}
@@ -65,27 +65,20 @@ func seriesCase(id, owner string, want map[string]corpus.Value, inputs ...corpus
 		expected[k] = v
 	}
 	return corpus.Case{
-		ID: id, File: "tests/SingleEpisodeParserFixture.cs", Method: "m", Entry: "TestCase#1", Line: 1,
-		UpstreamEnabled: true, Scope: corpus.ScopeTitle, ScopeOwner: owner,
+		ID: id, Scope: corpus.ScopeTitle, ScopeOwner: owner,
 		Args: []corpus.Argument{items[0]}, Expected: expected,
 	}
-}
-
-func seriesCorpus(cases ...corpus.Case) *corpus.Corpus {
-	c := mixedCorpus(cases...)
-	c.Header.SourcePaths = []string{"tests/SingleEpisodeParserFixture.cs"}
-	return c
 }
 
 // runSeries runs one synthetic case on the real parser at the committed run clock.
 func runSeries(t *testing.T, cs corpus.Case, byID map[string]corpus.Disposition) titleRun {
 	t.Helper()
 	now, loc := seriesRunClock(t)
-	return runSeriesCorpus(newSeriesTestParser(t, now, loc), seriesCorpus(cs), byID, corpus.TimeContext{Now: now, Location: loc})
+	return runSeriesCorpus(newSeriesTestParser(t, now, loc), mixedCorpus(cs), byID, corpus.TimeContext{Now: now, Location: loc})
 }
 
 // A synthetic case per property family proves the consumer resolves real parser
-// results, with the expected values worked out by hand from the source.
+// results, with the expected values worked out by hand.
 func TestEpisodeCorpusConsumerResolvesEveryPropertyFamily(t *testing.T) {
 	null := corpus.Value{Kind: corpus.KindNull}
 	truth := boolValue(true)
@@ -217,7 +210,7 @@ func TestEpisodeCorpusConsumerResolvesEveryEntryPoint(t *testing.T) {
 	}
 }
 
-// A rejected title is the source's null: every property assertion dereferences
+// A rejected title has no episode: every property assertion dereferences
 // it and fails, whatever it expects. Only the explicit $result null, the
 // not-null assertion and the no-throw requirement are about the result itself.
 func TestEpisodeCorpusMissingEpisodeFailsEveryPropertyAssertion(t *testing.T) {
@@ -251,7 +244,7 @@ func TestEpisodeCorpusMissingEpisodeFailsEveryPropertyAssertion(t *testing.T) {
 	}
 }
 
-// A single call or an index past the list throws in the source, so the assertion
+// A single call or an index past the list fails, so the assertion
 // fails rather than reading a default.
 func TestEpisodeCorpusElementReadsThatThrowFailTheAssertion(t *testing.T) {
 	const multi = "Series.S03E01-06.DUAL.BDRip.XviD.AC3.-HELLYWOOD" // six episodes, no absolute number
@@ -297,42 +290,31 @@ func TestEpisodeCorpusDispositionBindsEveryMismatchingInput(t *testing.T) {
 	}
 }
 
-// The consumer reconciles the whole inventory (all scopes) separately from the
-// selected title scope and refuses a title case taken from a quality fixture.
+// The consumer reconciles the whole inventory (both scopes) separately from the
+// selected title scope.
 func TestEpisodeCorpusConsumerReconcilesInventoryAndSelectedScopeSeparately(t *testing.T) {
 	const name = "Series.Title.S03E06.DVDRip.XviD-WiDE"
 	pass := map[string]corpus.Value{"SeasonNumber": intValue(3)}
-	quality := mixedCase("q", corpus.ScopeQuality, true, map[string]corpus.Value{"Quality": qualityEnum("DVD")}, name)
-	outside := mixedCase("o", corpus.ScopeOutOfScope, true, nil, name)
-	disabled := seriesCase("t2", ownerSeriesTitle, pass, str(name))
-	disabled.UpstreamEnabled = false
-	c := seriesCorpus(seriesCase("t1", ownerSeriesTitle, pass, str(name)), disabled, quality, outside)
+	quality := mixedCase("q", corpus.ScopeQuality, map[string]corpus.Value{"Quality": qualityEnum("DVD")}, name)
+	c := mixedCorpus(seriesCase("t1", ownerSeriesTitle, pass, str(name)), seriesCase("t2", ownerSeriesTitle, pass, str(name)), quality)
 	now, loc := seriesRunClock(t)
 	p := newSeriesTestParser(t, now, loc)
 	tc := corpus.TimeContext{Now: now, Location: loc}
 	r := runSeriesCorpus(p, c, nil, tc)
-	if len(r.problems) != 0 || r.enabled != 1 || r.disabled != 1 || r.passed != 1 || r.otherEnabled != 1 || r.outOfScope != 1 {
+	if len(r.problems) != 0 || r.cases != 2 || r.passed != 2 || r.other != 1 {
 		t.Fatalf("run = %+v", r)
 	}
-	if problems := r.reconcile(c.Header.Counts); len(problems) != 0 {
+	if problems := r.reconcile(scopeCounts(c)); len(problems) != 0 {
 		t.Errorf("a consistent mixed inventory must reconcile: %v", problems)
 	}
-	counts := map[string]int{}
-	for k, v := range c.Header.Counts {
-		counts[k] = v
-	}
-	counts["cases"]++
+	counts := maps.Clone(scopeCounts(c))
+	counts[corpus.ScopeQuality]++
 	if problems := r.reconcile(counts); len(problems) == 0 {
 		t.Error("a miscounted inventory must be reported")
 	}
-	none := seriesCorpus(quality, outside)
-	if problems := runSeriesCorpus(p, none, nil, tc).reconcile(none.Header.Counts); len(problems) == 0 {
-		t.Error("a corpus without an enabled title case must fail: quality names do not stand in")
-	}
-	subst := seriesCase("t3", ownerSeriesTitle, pass, str(name))
-	subst.File = "tests/QualityParserFixture.cs"
-	if r := runSeriesCorpus(p, seriesCorpus(subst), nil, tc); r.failed != 1 || len(r.problems) == 0 {
-		t.Errorf("a title case from a quality fixture must fail: %+v", r)
+	none := mixedCorpus(quality)
+	if problems := runSeriesCorpus(p, none, nil, tc).reconcile(scopeCounts(none)); len(problems) == 0 {
+		t.Error("a corpus without a title case must fail: quality names do not stand in")
 	}
 }
 
@@ -361,7 +343,7 @@ func TestEpisodeBoundsLegitimate4096ByteNameParses(t *testing.T) {
 	}
 }
 
-// The symbolic dates of the source's daily tests, on the two adjacent local dates
+// The symbolic dates of the daily cases, on the two adjacent local dates
 // of an independent control: America/New_York, where on 2026-10-25 at 00:30 local
 // the UTC date is already 2026-10-25 but DST ends a week later (2026-11-01).
 // Expected names are worked out by hand: +14 is 2026-11-08 and +15 is 2026-11-09;
@@ -433,7 +415,7 @@ func TestEpisodeBoundsRejectsDatesOffTheCalendar(t *testing.T) {
 }
 
 // The derived methods of a parsed episode, asserted through the public
-// ParseTitle with every expectation worked out by hand from the source's
+// ParseTitle with every expectation worked out by hand from the
 // definitions: a daily release has an air date and no episode numbers (unknown
 // release type); an absolute release has absolute numbers; episode 0 of a
 // season other than 0 is a scene season special; a release without a season

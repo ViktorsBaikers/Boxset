@@ -1,6 +1,6 @@
 #!/bin/sh
 # Canonical Boxset dev runner (host, repository root only):
-#   scripts/dev-run.sh [--ref] [--write PATH] [--capture DIR] [--bench CPUSET] [--timeout SECONDS] -- COMMAND [ARG...]
+#   scripts/dev-run.sh [--write PATH] [--capture DIR] [--bench CPUSET] [--timeout SECONDS] -- COMMAND [ARG...]
 #
 # Rebuilds the `work` image from the current allowlisted inputs (frozen
 # dependencies, no lock regeneration) and starts it as a labelled, network-less,
@@ -14,7 +14,7 @@
 # producer is quiescent, the container is checked closed and the staged parts
 # are published by rename. Exit status: the child's, or 124 on deadline, or 125
 # with a fixed reason word on stderr. No host environment, Docker socket, .env,
-# workspace, reference text (other than --ref) or port reaches the child.
+# workspace or port reaches the child.
 #
 # This script is only the bootstrap. It parses and validates the arguments,
 # audits what it can without touching anything, builds the runner-private host
@@ -29,9 +29,6 @@ LC_ALL=C
 export LC_ALL
 umask 022
 
-REF_DIRS='src/NzbDrone.Core.Test/ParserTests src/NzbDrone.Core.Test/Languages src/NzbDrone.Core/Parser src/NzbDrone.Core/Qualities src/NzbDrone.Core/Languages'
-
-REF=0
 WRITE=
 HAVE_WRITE=0
 CAPTURE=
@@ -55,7 +52,7 @@ die() {
 }
 
 usage() {
-	printf '%s\n' 'usage: scripts/dev-run.sh [--ref] [--write PATH] [--capture DIR] [--bench CPUSET] [--timeout SECONDS] -- COMMAND [ARG...]' >&2
+	printf '%s\n' 'usage: scripts/dev-run.sh [--write PATH] [--capture DIR] [--bench CPUSET] [--timeout SECONDS] -- COMMAND [ARG...]' >&2
 	die usage
 }
 
@@ -88,10 +85,6 @@ chain_ok() {
 while [ $# -gt 0 ]; do
 	case $1 in
 	--) break ;;
-	--ref)
-		[ "$REF" = 0 ] || usage
-		REF=1
-		;;
 	--write)
 		[ $# -ge 2 ] && [ "$HAVE_WRITE" = 0 ] || usage
 		HAVE_WRITE=1
@@ -172,26 +165,6 @@ if [ "$HAVE_WRITE" = 1 ]; then
 	done
 fi
 
-# --- reference text audit ----------------------------------------------------
-# The two reference checkouts are located only by the owner values BOXSET_REF_SERIES
-# and BOXSET_REF_MOVIE (absolute, link-free directory paths).
-audit_references() {
-	for _side in series movie; do
-		case $_side in series) _root=${BOXSET_REF_SERIES:-} ;; *) _root=${BOXSET_REF_MOVIE:-} ;; esac
-		case $_root in /?*) ;; *) die reference_input_invalid ;; esac
-		case $_root in *[,:\"]* | */) die reference_input_invalid ;; esac
-		for _rel in $REF_DIRS; do
-			_d=$_root/$_rel
-			(cd / && chain_ok "${_d#/}") || die reference_input_invalid
-			[ -z "$(find "$_d" ! -type f ! -type d -print -quit)" ] || die reference_input_invalid
-			[ -z "$(find "$_d" -type f \( ! -name '*.cs' -o -perm /111 \) -print -quit)" ] || die reference_input_invalid
-			[ -z "$(find "$_d" -type f ! -perm -o=r -print -quit)" ] || die reference_input_invalid
-			[ -z "$(find "$_d" -type d ! -perm -o=rx -print -quit)" ] || die reference_input_invalid
-		done
-	done
-}
-[ "$REF" = 0 ] || audit_references
-
 # --- host tools ----------------------------------------------------------------
 for _t in sh docker id mkdir rmdir ln rm mv head tail wc od tr cat sha256sum timeout date grep find sleep; do
 	command -v "$_t" >/dev/null 2>&1 || {
@@ -247,4 +220,4 @@ timeout --kill-after=10s 1800s docker build --file deploy/dev/Dockerfile --targe
 # From here the controller is the runner: same PID, environment, cwd, umask and
 # stdio; its exit status is the runner's. Caught traps reset on exec, ignored
 # signals stay ignored.
-exec "$REDACT" -run "$REPO" "$RUNID" "$TMPD" "$TIMEOUT" "$REF" "${WRITE:--}" "${CAPTURE:--}" -- "$@"
+exec "$REDACT" -run "$REPO" "$RUNID" "$TMPD" "$TIMEOUT" "${WRITE:--}" "${CAPTURE:--}" -- "$@"

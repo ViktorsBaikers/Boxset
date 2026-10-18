@@ -1,5 +1,5 @@
-// Package parse is the native, bounded port of the series and movie release
-// name parsers. A Parser owns its immutable attributed pattern tables, built
+// Package parse is the native, bounded series and movie release name
+// parsers. A Parser owns its immutable attributed pattern tables, built
 // once per instance with the fixed 50 ms regexp2 match timeout, and is safe
 // for concurrent use. Every public operation validates the name first and then
 // runs under one shared elapsed-work budget, checked before and after every
@@ -11,9 +11,8 @@
 // budget applies: an incomplete evaluation is an error, never a passed
 // condition.
 //
-// Quality parsing ports the GPL-3.0 QualityParser of the series reference
-// (kind KindSeries) and of the movie reference (kind KindMovie); see
-// quality_series.go and quality_movie.go for the exact source commits.
+// Quality parsing serves both applications (kind KindSeries and kind
+// KindMovie); see quality_series.go and quality_movie.go.
 package parse
 
 import (
@@ -24,13 +23,13 @@ import (
 	"time"
 )
 
-// Kind selects the source application's parser.
+// Kind selects the application's parser.
 type Kind uint8
 
 const (
-	// KindMovie ports the movie reference parser.
+	// KindMovie selects the movie parser.
 	KindMovie Kind = 1
-	// KindSeries ports the series reference parser.
+	// KindSeries selects the series parser.
 	KindSeries Kind = 2
 )
 
@@ -75,9 +74,9 @@ type Revision struct {
 
 // Quality is a parsed quality. Code, Source and Modifier are stable Boxset
 // codes from explicit per-application maps (vocab.go); Resolution is the
-// source-native pixel height (0 unknown). The Detection fields name where the
+// pixel height (0 unknown). The Detection fields name where the
 // facts came from: unknown, name, extension or mediainfo; empty means the
-// source application has no such concept (the series side has no modifier).
+// application has no such concept (the series side has no modifier).
 type Quality struct {
 	Code                string
 	Source              string

@@ -2,29 +2,27 @@
 
 package parse
 
-// Series title parsing, ported from the series reference parser (parser/Parser.cs
-// ParseTitle and the parser/ParserCommon.cs and parser/RegexReplace.cs members it
-// uses, located by BOXSET_REF_SERIES) at commit
-// 57816c149d02f95543973fefb4780c4495f8121c. Control flow, pattern order and
-// pattern text follow the source: the first pattern in source order that matches
-// and yields a result decides, so the order of the tables is semantic.
+// Series title parsing: the preparation of the name, the series title
+// patterns in the order they are tried and the assembly of the result. The
+// first pattern in table order that matches and yields a result decides, so
+// the order of the tables is semantic; the fixture table
+// testdata/parser/series.jsonl asserts it.
 //
-// Faithful-adapter notes:
+// Implementation notes:
 //   - Every pattern is compiled once with the table and all matching goes
 //     through the shared budget of the public operation (regex.go): the quality,
-//     language and release group parsing ParseTitle runs share that one budget
-//     and never get a fresh one.
-//   - The source's exception handler turns any exception into "unable to
-//     parse". The exceptions its code can raise (a number that does not parse, an
-//     invalid or too distant air date) are errUnparseable here and end the parse
-//     as the source's null, while a budget, timeout or cancellation failure is an
-//     error and never a quiet no-match.
-//   - Group indexes of the source are UTF-16 code units: byte offsets are
-//     converted before they index the release title.
+//     language and release group parsing the series title parse runs share that
+//     one budget and never get a fresh one.
+//   - Any exception while parsing a name is "unable to parse". The failures
+//     the code can hit (a number that does not parse, an invalid or too
+//     distant air date) are errUnparseable here and end the parse with no
+//     result, while a budget, timeout or cancellation failure is an error
+//     and never a quiet no-match.
+//   - Group indexes are UTF-16 code units: byte offsets are converted before
+//     they index the release title.
 //   - Numbers are text until they are integers or exact decimals: a special
 //     absolute episode number is kept as its decimal text, never a float.
-//   - The source reads its clock as DateTime.Now: the budget clock and the
-//     calendar of Options.Location stand in for it.
+//   - The clock is the budget clock and the calendar of Options.Location.
 
 import (
 	"errors"
@@ -38,11 +36,10 @@ import (
 	"github.com/dlclark/regexp2/v2"
 )
 
-// errUnparseable is an exception of the source's ParseTitle: the whole parse is
-// the source's null.
+// errUnparseable is a failure that ends the whole parse with no result.
 var errUnparseable = errors.New("parse: unparseable release name")
 
-// substitution is one RegexReplace of the source's ParserCommon: a pattern and
+// substitution is one regex replacement of the common cleanup: a pattern and
 // its replacement format.
 type substitution struct {
 	re          *regexp2.Regexp
@@ -386,7 +383,7 @@ func newSeriesTitleTable(q *seriesTable) (*seriesTitleTable, error) {
 	return t, nil
 }
 
-// all is Regex.Matches: every successive match of re in s.
+// all is every successive match of re in s.
 func (b *budget) all(re *regexp2.Regexp, s string) ([]*regexp2.Match, error) {
 	var out []*regexp2.Match
 	m, err := b.first(re, s)
@@ -397,9 +394,9 @@ func (b *budget) all(re *regexp2.Regexp, s string) ([]*regexp2.Match, error) {
 	return out, err
 }
 
-// removeFileExtension is FileExtensions.RemoveFileExtension: a trailing dot
-// and two to four letters or digits are dropped only when they are a known
-// media file extension (or .par2 / .nzb); any other tail is part of the name.
+// removeFileExtension drops a trailing dot and two to four letters or digits
+// only when they are a known media file extension (or .par2 / .nzb); any
+// other tail is part of the name.
 func (t *seriesTitleTable) removeFileExtension(b *budget, title string) (string, error) {
 	var evalErr error
 	return b.replaceFunc(t.fileExtension, title, &evalErr, func(m regexp2.Match) string {
@@ -411,7 +408,7 @@ func (t *seriesTitleTable) removeFileExtension(b *budget, title string) (string,
 	})
 }
 
-// reverseUTF16 is Array.Reverse over the UTF-16 code units of s. A reversed
+// reverseUTF16 reverses the UTF-16 code units of s. A reversed
 // surrogate pair has no text form and decodes to the replacement character.
 func reverseUTF16(s string) string {
 	units := utf16.Encode([]rune(s))
@@ -419,17 +416,17 @@ func reverseUTF16(s string) string {
 	return string(utf16.Decode(units))
 }
 
-// shortMonths is the source's ShortMonths dictionary.
+// shortMonths maps a three-letter month name to its number.
 var shortMonths = map[string]int{
 	"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
 	"jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
 }
 
-// numberWords is the source's Numbers array: the word of each digit.
+// numberWords is the word of each digit.
 var numberWords = [...]string{"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"}
 
-// parse is ParseTitle: nil with a nil error is the source's null (the name was
-// rejected or no pattern produced a result). loc is the local calendar of the
+// parse is the series title parse: nil with a nil error means the name was
+// rejected or no pattern produced a result. loc is the local calendar of the
 // air date limit.
 func (t *seriesTitleTable) parse(b *budget, loc *time.Location, title string) (*EpisodeInfo, error) {
 	valid, err := t.validateBeforeParsing(b, title)
@@ -530,7 +527,7 @@ func (t *seriesTitleTable) fixSixDigitAirDate(b *budget, simpleTitle string) (st
 	return strings.ReplaceAll(simpleTitle, groupText(m, "airdate"), fixed), nil
 }
 
-// validateBeforeParsing is the source's ValidateBeforeParsing.
+// validateBeforeParsing is the pre-parse validation of a name.
 func (t *seriesTitleTable) validateBeforeParsing(b *budget, title string) (bool, error) {
 	lower := strings.ToLower(title)
 	if strings.Contains(lower, "password") && strings.Contains(lower, "yenc") {
@@ -553,7 +550,7 @@ func (t *seriesTitleTable) validateBeforeParsing(b *budget, title string) (bool,
 	return !folder && err == nil, err
 }
 
-// complete runs the part of ParseTitle after a pattern produced a result: the
+// complete runs the part of the series title parse after a pattern produced a result: the
 // special-season fix, languages, quality, release group and hash.
 func (t *seriesTitleTable) complete(b *budget, result *EpisodeInfo, match *regexp2.Match, title, releaseTitle string) (*EpisodeInfo, error) {
 	if result.FullSeason && containsFold(result.ReleaseTokens, "special") {
@@ -582,7 +579,7 @@ func (t *seriesTitleTable) complete(b *budget, result *EpisodeInfo, match *regex
 	return result, nil
 }
 
-// endIndex is Group.EndIndex(): the end, in UTF-16 units of s, of the group's
+// endIndex is the end, in UTF-16 units of s, of the group's
 // last capture, 0 for a group that took no part.
 func endIndex(s string, m *regexp2.Match, name string) int {
 	if !groupOK(m, name) {
@@ -591,7 +588,7 @@ func endIndex(s string, m *regexp2.Match, name string) int {
 	return captureEnd(s, m.GroupByName(name).Capture)
 }
 
-// captureEnd is Capture.EndIndex(): the end of c, in UTF-16 units of s.
+// captureEnd is the end of c, in UTF-16 units of s.
 func captureEnd(s string, c regexp2.Capture) int {
 	at, n := c.ByteRange()
 	return utf16Len(s[:at+n])
@@ -610,10 +607,10 @@ func captures(s string, m *regexp2.Match, name string) (values []string, ends []
 	return values, ends
 }
 
-// numerals is ConvertToNumerals(value.Normalize(FormKC)) over the characters a
-// number pattern can capture (decimal digits): the compatibility digits fold to
+// numerals normalizes the characters a number pattern can capture (decimal
+// digits): the compatibility digits fold to
 // ASCII, then every decimal digit of the Basic Multilingual Plane becomes its
-// ASCII digit. A digit outside it is two UTF-16 units to the source, which are
+// ASCII digit. A digit outside it is two UTF-16 units, which are
 // not numbers, so it stays and the number does not parse.
 func numerals(value string) string {
 	var sb strings.Builder
@@ -636,7 +633,7 @@ func numerals(value string) string {
 	return sb.String()
 }
 
-// parseNumber is the source's ParseNumber: an integer, or the word of a digit.
+// parseNumber parses an integer, or the word of a digit.
 func parseNumber(value string) (int, error) {
 	if n, ok := tryParseInt(numerals(value)); ok {
 		return n, nil
@@ -654,7 +651,7 @@ type decimal struct {
 	frac  string
 }
 
-// parseDecimal is the source's ParseDecimal for the numbers a pattern captures:
+// parseDecimal parses the numbers a pattern captures:
 // digits with an optional dot and fraction digits.
 func parseDecimal(value string) (decimal, error) {
 	whole, frac, hasFrac := strings.Cut(numerals(value), ".")
@@ -688,7 +685,7 @@ func (d decimal) text() string {
 	return strconv.FormatInt(d.whole, 10) + "." + d.frac
 }
 
-// intRange is Enumerable.Range(start, count).ToArray().
+// intRange is the ints start, start+1, ... of length count.
 func intRange(start, count int) []int {
 	out := make([]int, count)
 	for i := range out {
@@ -697,8 +694,8 @@ func intRange(start, count int) []int {
 	return out
 }
 
-// parseMatches is ParseMatchCollection: nil with a nil error is the source's
-// null (the matches name no usable result).
+// parseMatches assembles the result from the matches: nil with a nil error
+// means the matches name no usable result.
 func (t *seriesTitleTable) parseMatches(b *budget, loc *time.Location, simple string, matches []*regexp2.Match, releaseTitle string) (*EpisodeInfo, error) {
 	first := matches[0]
 	seriesName := strings.ReplaceAll(strings.ReplaceAll(groupText(first, "title"), ".", " "), "_", " ")
@@ -733,7 +730,7 @@ func (t *seriesTitleTable) parseMatches(b *budget, loc *time.Location, simple st
 	return result, nil
 }
 
-// episodic is the part of ParseMatchCollection for a result without an air date:
+// episodic is the part of the result assembly for a result without an air date:
 // season, episode and absolute episode numbers and the release type flags.
 func (t *seriesTitleTable) episodic(simple string, matches []*regexp2.Match, releaseTitle string, lastIndex *int) (*EpisodeInfo, error) {
 	first := matches[0]
@@ -850,7 +847,7 @@ func (t *seriesTitleTable) episodic(simple string, matches []*regexp2.Match, rel
 	return result, nil
 }
 
-// daily is the part of ParseMatchCollection for a result with an air date. An
+// daily is the part of the result assembly for a result with an air date. An
 // ambiguous, impossible, too distant or too old date is errUnparseable.
 func (t *seriesTitleTable) daily(b *budget, loc *time.Location, simple string, m *regexp2.Match, airYear int, releaseTitle string, lastIndex *int) (*EpisodeInfo, error) {
 	number := func(name string) (int, error) {
@@ -930,7 +927,7 @@ func (t *seriesTitleTable) daily(b *budget, loc *time.Location, simple string, m
 	return result, nil
 }
 
-// seriesTitleInfo is GetSeriesTitleInfo: the title, the title without its year,
+// seriesTitleInfo is the title, the title without its year,
 // the year and every alternative title.
 func (t *seriesTitleTable) seriesTitleInfo(b *budget, title string, first *regexp2.Match) (SeriesTitleInfo, error) {
 	info := SeriesTitleInfo{Title: title}

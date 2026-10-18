@@ -10,28 +10,19 @@ import (
 	"time"
 )
 
-const commit = "0123456789abcdef0123456789abcdef01234567"
-
-func testCase(id string, enabled bool, expected map[string]Value) Case {
+func testCase(id string, expected map[string]Value) Case {
 	if expected == nil {
 		expected = map[string]Value{"Quality": {Kind: KindEnum, Type: "Quality", Str: "SDTV"}}
 	}
 	return Case{
-		ID: id, File: "tests/a.cs", Method: "m", Entry: "TestCase#1", Line: 3, UpstreamEnabled: enabled,
-		Scope: ScopeQuality, ScopeOwner: "QualityParser.ParseQuality",
+		ID: id, Scope: ScopeQuality, ScopeOwner: "QualityParser.ParseQuality",
 		Args:     []Argument{{Kind: KindString, Str: "name"}},
 		Expected: expected,
 	}
 }
 
 func newCorpus(cases ...Case) *Corpus {
-	return &Corpus{
-		Header: Header{
-			Schema: SchemaVersion, App: "series", SourceRepository: "env:BOXSET_REF_SERIES",
-			SourceCommit: commit, SourcePaths: []string{"tests/a.cs"}, License: "GPL-3.0", Counts: Tally(cases),
-		},
-		Cases: cases,
-	}
+	return &Corpus{Header: Header{Schema: SchemaVersion, App: "series"}, Cases: cases}
 }
 
 func mustMarshal(t *testing.T, c *Corpus) []byte {
@@ -62,14 +53,14 @@ func TestCorpusRoundTripPreservesEveryValueKind(t *testing.T) {
 		"dt":  {Kind: KindDate, Offset: -3, Template: "x.{0:yyyy-MM-dd}.{{y}}"},
 		"nil": {Kind: KindNull},
 	}
-	c := newCorpus(testCase("series:a.cs:m:00:0", true, all), testCase("series:a.cs:m:01:0", false, nil))
+	c := newCorpus(testCase("series:0001", all), testCase("series:0002", nil))
 	data := mustMarshal(t, c)
 	got, err := Read(bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if len(got.Cases) != 2 || got.Header.Counts["enabled"] != 1 || got.Header.Counts["disabled"] != 1 || got.Header.Counts["out_of_scope"] != 0 {
-		t.Fatalf("counts/cases: %+v", got.Header.Counts)
+	if len(got.Cases) != 2 || got.Header != (Header{Schema: 2, App: "series"}) {
+		t.Fatalf("header/cases: %+v", got)
 	}
 	for k, want := range all {
 		if !Equal(got.Cases[0].Expected[k], want) {
@@ -80,9 +71,6 @@ func TestCorpusRoundTripPreservesEveryValueKind(t *testing.T) {
 	if !bytes.Equal(data, again) {
 		t.Error("encoding must be canonical: decode then encode changed the bytes")
 	}
-	if got.Header.SourceRepository == "" || got.Header.SourceCommit != commit || got.Header.License != "GPL-3.0" {
-		t.Errorf("attribution lost: %+v", got.Header)
-	}
 }
 
 func TestCorpusMarshalEscapesNameLettersLosslessly(t *testing.T) {
@@ -91,7 +79,7 @@ func TestCorpusMarshalEscapesNameLettersLosslessly(t *testing.T) {
 	if err != nil || string(plain) != `{"t":"string","v":"Xarr.xARR.arRx.\u001arr.a\"rr"}` {
 		t.Fatalf("Value.MarshalJSON must stay unescaped so input hashes are unchanged: %s %v", plain, err)
 	}
-	c := newCorpus(testCase("series:a.cs:m:00:0", true, map[string]Value{
+	c := newCorpus(testCase("series:0001", map[string]Value{
 		"s": in, "a": {Kind: KindArray, Items: []Value{in}}, "e": {Kind: KindEnum, Type: "Quality", Str: "Xarr"},
 	}))
 	c.Cases[0].Args = []Argument{in}
@@ -117,22 +105,22 @@ func TestCorpusMarshalEscapesNameLettersLosslessly(t *testing.T) {
 }
 
 func TestCorpusRejectsMalformedPartialAndUnknown(t *testing.T) {
-	valid := mustMarshal(t, newCorpus(testCase("id-1", true, nil), testCase("id-2", true, nil)))
+	valid := mustMarshal(t, newCorpus(testCase("id-1", nil), testCase("id-2", nil)))
 	lines := strings.SplitAfter(string(valid), "\n")
-	decimal := string(mustMarshal(t, newCorpus(testCase("id-1", true, map[string]Value{"d": {Kind: KindDecimal, Str: "1.5"}}))))
+	decimal := string(mustMarshal(t, newCorpus(testCase("id-1", map[string]Value{"d": {Kind: KindDecimal, Str: "1.5"}}))))
 	tests := []struct {
 		name, code string
 		data       string
 	}{
 		{"empty file", "header_missing", ""},
 		{"unterminated final record", "partial_record", string(valid[:len(valid)-1])},
-		{"missing trailing case", "count_mismatch", lines[0] + lines[1]},
 		{"malformed record", "malformed_record", lines[0] + "{not json}\n"},
 		{"unknown value tag", "unknown_tag", strings.Replace(string(valid), `"t":"enum"`, `"t":"mystery"`, 1)},
-		{"unknown field", "malformed_record", strings.Replace(string(valid), `"line":3`, `"line":3,"extra":1`, 1)},
+		{"unknown field", "malformed_record", strings.Replace(string(valid), `"scope":"quality"`, `"scope":"quality","extra":1`, 1)},
 		{"trailing data", "malformed_record", lines[0] + strings.TrimSuffix(lines[1], "\n") + " {}\n" + lines[2]},
 		{"duplicate id", "duplicate_id", lines[0] + lines[1] + lines[1]},
-		{"bad commit", "header_invalid", strings.Replace(string(valid), commit, "ABC", 1)},
+		{"unsupported schema", "header_invalid", strings.Replace(string(valid), `"schema":2`, `"schema":1`, 1)},
+		{"header provenance field", "malformed_record", strings.Replace(string(valid), `"app":"series"`, `"app":"series","sourceCommit":"0123456789abcdef0123456789abcdef01234567"`, 1)},
 		{"decimal not exact", "malformed_record", strings.Replace(decimal, `"1.5"`, `"1.5e3"`, 1)},
 		{"blank record", "malformed_record", lines[0] + "\n" + lines[1] + lines[2]},
 	}
@@ -147,24 +135,12 @@ func TestCorpusRejectsMalformedPartialAndUnknown(t *testing.T) {
 	}
 }
 
-func TestCorpusRejectsMismatchedCounts(t *testing.T) {
-	c := newCorpus(testCase("id-1", true, nil))
-	c.Header.Counts["enabled"] = 5
-	if _, err := Marshal(c); err == nil {
-		t.Fatal("Marshal must reject non-reconciling counts")
-	}
-	good := mustMarshal(t, newCorpus(testCase("id-1", true, nil)))
-	bad := strings.Replace(string(good), `"disabled":0`, `"disabled":1`, 1)
-	_, err := Read(strings.NewReader(bad))
-	wantCode(t, err, "count_mismatch")
-}
-
 // padded returns a corpus with one case per size, each carrying a string
 // argument of that many bytes.
 func padded(sizes ...int) *Corpus {
 	cs := make([]Case, len(sizes))
 	for i, n := range sizes {
-		cs[i] = testCase("id-"+strconv.Itoa(i), true, nil)
+		cs[i] = testCase("id-"+strconv.Itoa(i), nil)
 		cs[i].Args = []Argument{{Kind: KindString, Str: strings.Repeat("a", n)}}
 	}
 	return newCorpus(cs...)
@@ -267,14 +243,14 @@ func TestCorpusNestingBoundary(t *testing.T) {
 	// Record depth: case object 1, expected object 2, each nested array value is an
 	// object plus an array (2 levels each), the innermost null value one object.
 	const admitted = (MaxNesting - 3) / 2
-	ok := newCorpus(testCase("id-1", true, map[string]Value{"n": nested(admitted)}))
+	ok := newCorpus(testCase("id-1", map[string]Value{"n": nested(admitted)}))
 	data := mustMarshal(t, ok)
 	if got, err := Read(bytes.NewReader(data)); err != nil || len(got.Cases) != 1 {
 		t.Fatalf("nesting %d (depth %d) must be admitted: %v", admitted, 3+2*admitted, err)
 	}
 
 	// Marshal rejects what Read would reject, with the record's number.
-	deep := newCorpus(testCase("id-1", true, map[string]Value{"n": nested(admitted + 1)}))
+	deep := newCorpus(testCase("id-1", map[string]Value{"n": nested(admitted + 1)}))
 	out, err := Marshal(deep)
 	if out != nil {
 		t.Error("an over-deep record must not be emitted")
@@ -304,7 +280,7 @@ func TestCorpusAdmitsRecordDepth32AndRejectsDeeper(t *testing.T) {
 	// level 14 is depth 31; an empty array at level 14 is an object and an array, so exactly depth 32.
 	for _, where := range []string{"expected", "args"} {
 		place := func(v Value) *Corpus {
-			c := newCorpus(testCase("id-1", true, nil))
+			c := newCorpus(testCase("id-1", nil))
 			if where == "expected" {
 				c.Cases[0].Expected = map[string]Value{"n": v}
 			} else {
@@ -367,21 +343,20 @@ func TestCorpusAdmitsRecordDepth32AndRejectsDeeper(t *testing.T) {
 }
 
 func TestCorpusDispositionsRejectStaleAndOwnerless(t *testing.T) {
-	c := newCorpus(testCase("id-1", true, map[string]Value{"Quality": {Kind: KindEnum, Type: "Quality", Str: "SDTV"}}), testCase("id-2", false, nil))
+	c := newCorpus(testCase("id-1", map[string]Value{"Quality": {Kind: KindEnum, Type: "Quality", Str: "SDTV"}}), testCase("id-2", nil))
 	valid := Disposition{
 		CaseID:    "id-1",
 		Expected:  map[string]Value{"Quality": {Kind: KindEnum, Type: "Quality", Str: "SDTV"}},
 		Observed:  map[string]Value{"Quality": {Kind: KindEnum, Type: "Quality", Str: "DVD"}},
 		Rationale: "r", Question: "q", Answer: "a", AnsweredBy: "owner",
 	}
-	if err := (&Dispositions{Schema: 1, Dispositions: []Disposition{valid}}).Validate(c); err != nil {
+	if err := (&Dispositions{Schema: DispositionsVersion, Dispositions: []Disposition{valid}}).Validate(c); err != nil {
 		t.Fatalf("valid disposition rejected: %v", err)
 	}
 	mutate := map[string]func(d *Disposition){
-		"unknown case":  func(d *Disposition) { d.CaseID = "nope" },
-		"disabled case": func(d *Disposition) { d.CaseID = "id-2" },
-		"ownerless":     func(d *Disposition) { d.AnsweredBy = "" },
-		"unanswered":    func(d *Disposition) { d.Answer = "" },
+		"unknown case": func(d *Disposition) { d.CaseID = "nope" },
+		"ownerless":    func(d *Disposition) { d.AnsweredBy = "" },
+		"unanswered":   func(d *Disposition) { d.Answer = "" },
 		"stale expectation": func(d *Disposition) {
 			d.Expected = map[string]Value{"Quality": {Kind: KindEnum, Type: "Quality", Str: "DVD"}}
 		},
@@ -394,11 +369,11 @@ func TestCorpusDispositionsRejectStaleAndOwnerless(t *testing.T) {
 	for name, m := range mutate {
 		d := valid
 		m(&d)
-		if err := (&Dispositions{Schema: 1, Dispositions: []Disposition{d}}).Validate(c); err == nil {
+		if err := (&Dispositions{Schema: DispositionsVersion, Dispositions: []Disposition{d}}).Validate(c); err == nil {
 			t.Errorf("%s must be rejected", name)
 		}
 	}
-	dup := &Dispositions{Schema: 1, Dispositions: []Disposition{valid, valid}}
+	dup := &Dispositions{Schema: DispositionsVersion, Dispositions: []Disposition{valid, valid}}
 	if dup.Validate(c) == nil {
 		t.Error("duplicate dispositions must be rejected")
 	}
@@ -406,7 +381,11 @@ func TestCorpusDispositionsRejectStaleAndOwnerless(t *testing.T) {
 		t.Error("unknown disposition fields must be rejected")
 	}
 	if d, err := ReadDispositions(strings.NewReader(`{"schema":1,"dispositions":[]}`)); err != nil || len(d.Dispositions) != 0 {
-		t.Errorf("empty dispositions: %v", err)
+		t.Errorf("the committed dispositions format must decode: %v", err)
+	}
+	// The dispositions format is versioned apart from the fixture schema.
+	if _, err := ReadDispositions(strings.NewReader(`{"schema":2,"dispositions":[]}`)); err == nil {
+		t.Error("a dispositions file at the fixture schema number must be rejected")
 	}
 }
 
@@ -460,18 +439,7 @@ func rawJSONL(t *testing.T, c *Corpus) string {
 	return sb.String()
 }
 
-func TestCorpusProvenanceIsValidatedByReadAndMarshal(t *testing.T) {
-	type side struct{ app, otherApp, locator, other string }
-	sides := []side{
-		{"series", "movie", "env:BOXSET_REF_SERIES", "env:BOXSET_REF_MOVIE"},
-		{"movie", "series", "env:BOXSET_REF_MOVIE", "env:BOXSET_REF_SERIES"},
-	}
-	// base is a fully valid corpus of one side; every rejection below breaks exactly one of its fields.
-	base := func(s side) *Corpus {
-		c := newCorpus(testCase("id-1", true, nil))
-		c.Header.App, c.Header.SourceRepository = s.app, s.locator
-		return c
-	}
+func TestCorpusHeaderAndCasesAreValidatedByReadAndMarshal(t *testing.T) {
 	// rejects asserts that Marshal of c gives no output and Read of the same records gives no corpus, both with code.
 	rejects := func(t *testing.T, c *Corpus, code string) {
 		t.Helper()
@@ -486,68 +454,39 @@ func TestCorpusProvenanceIsValidatedByReadAndMarshal(t *testing.T) {
 		}
 		wantCode(t, err, code)
 	}
-	badPaths := []string{"src/a.cs", "a.cs", "/tests/a.cs", "tests/../a.cs", "tests//a.cs", "tests/./a.cs", "tests/", "TESTS/a.cs", "tests", ""}
+	for _, tc := range []struct {
+		name, code string
+		mutate     func(c *Corpus)
+	}{
+		{"schema 1", "header_invalid", func(c *Corpus) { c.Header.Schema = 1 }},
+		{"future schema", "header_invalid", func(c *Corpus) { c.Header.Schema = 3 }},
+		{"unknown app", "header_invalid", func(c *Corpus) { c.Header.App = "anime" }},
+		{"no app", "header_invalid", func(c *Corpus) { c.Header.App = "" }},
+		{"empty id", "case_invalid", func(c *Corpus) { c.Cases[0].ID = "" }},
+		{"no owner", "case_invalid", func(c *Corpus) { c.Cases[0].ScopeOwner = "" }},
+		{"unknown scope", "case_invalid", func(c *Corpus) { c.Cases[0].Scope = "other" }},
+		{"removed out_of_scope", "case_invalid", func(c *Corpus) { c.Cases[0].Scope = "out_of_scope" }},
+		{"no scope", "case_invalid", func(c *Corpus) { c.Cases[0].Scope = "" }},
+		{"no args", "case_invalid", func(c *Corpus) { c.Cases[0].Args = nil }},
+		{"no expected", "case_invalid", func(c *Corpus) { c.Cases[0].Expected = nil }},
+		{"duplicate id", "duplicate_id", func(c *Corpus) { c.Cases = append(c.Cases, c.Cases[0]) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCorpus(testCase("id-1", nil))
+			tc.mutate(c)
+			rejects(t, c, tc.code)
+		})
+	}
 
-	for _, s := range sides {
-		for _, tc := range []struct {
-			name   string
-			mutate func(c *Corpus)
-		}{
-			{"locator of the other side", func(c *Corpus) { c.Header.SourceRepository = s.other }},
-			{"foreign locator", func(c *Corpus) { c.Header.SourceRepository = "env:OTHER" }},
-			{"locator lower case", func(c *Corpus) { c.Header.SourceRepository = strings.ToLower(s.locator) }},
-			{"locator without its prefix", func(c *Corpus) { c.Header.SourceRepository = strings.TrimPrefix(s.locator, "env:") }},
-			{"app of the other side", func(c *Corpus) { c.Header.App = s.otherApp }},
-			{"unknown app", func(c *Corpus) { c.Header.App = "anime" }},
-			{"licence of another version", func(c *Corpus) { c.Header.License = "GPL-3.0-or-later" }},
-			{"licence lower case", func(c *Corpus) { c.Header.License = "gpl-3.0" }},
-			{"another licence", func(c *Corpus) { c.Header.License = "MIT" }},
-			{"no licence", func(c *Corpus) { c.Header.License = "" }},
-			{"no source paths", func(c *Corpus) { c.Header.SourcePaths = nil }},
-			{"duplicate source path", func(c *Corpus) { c.Header.SourcePaths = []string{"tests/a.cs", "tests/a.cs"} }},
-			{"unnamed source count", func(c *Corpus) { c.Header.Counts["source::tests/a.cs"] = 1 }},
-			{"negative source count", func(c *Corpus) { c.Header.Counts["source:rows:tests/a.cs"] = -1 }},
-			{"count key of another kind", func(c *Corpus) { c.Header.Counts["rows:tests/a.cs"] = 1 }},
-			{"count key of a file with no case", func(c *Corpus) { c.Header.Counts["cases:tests/other.cs"] = 1 }},
-		} {
-			t.Run(s.app+" "+tc.name, func(t *testing.T) {
-				c := base(s)
-				tc.mutate(c)
-				rejects(t, c, "header_invalid")
-			})
-		}
-		for _, p := range badPaths {
-			t.Run(s.app+" header path "+strconv.Quote(p), func(t *testing.T) {
-				c := base(s)
-				c.Header.SourcePaths = []string{p}
-				rejects(t, c, "header_invalid")
-			})
-			t.Run(s.app+" count key path "+strconv.Quote(p), func(t *testing.T) {
-				c := base(s)
-				c.Header.Counts["source:rows:"+p] = 1
-				rejects(t, c, "header_invalid")
-			})
-		}
-		for _, p := range append([]string{"tests/b.cs"}, badPaths...) {
-			t.Run(s.app+" case file "+strconv.Quote(p), func(t *testing.T) {
-				c := base(s)
-				c.Cases[0].File = p
-				rejects(t, c, "case_invalid")
-			})
-		}
-
-		// Controls: every area, a nested file and a recorded source count, each on its own side.
-		for _, p := range []string{"tests/a.cs", "parser/a.cs", "qualities/a.cs", "tests/sub/dir/a.cs"} {
-			t.Run(s.app+" control "+p, func(t *testing.T) {
-				c := base(s)
-				c.Cases[0].File = p
-				c.Header.SourcePaths = []string{p}
-				c.Header.Counts = Tally(c.Cases)
-				c.Header.Counts["source:rows:"+p] = 3
-				data := mustMarshal(t, c)
-				got, err := Read(bytes.NewReader(data))
-				if err != nil || got.Header.App != s.app || got.Header.SourceRepository != s.locator || got.Header.Counts["source:rows:"+p] != 3 || got.Cases[0].File != p {
-					t.Errorf("Read of the %s side: %+v, %v", s.app, got, err)
+	// Controls: each application and each scope on its own.
+	for _, app := range []string{"series", "movie"} {
+		for _, scope := range []string{ScopeQuality, ScopeTitle} {
+			t.Run("control "+app+" "+scope, func(t *testing.T) {
+				c := newCorpus(testCase("id-1", nil))
+				c.Header.App, c.Cases[0].Scope = app, scope
+				got, err := Read(bytes.NewReader(mustMarshal(t, c)))
+				if err != nil || got.Header.App != app || got.Cases[0].Scope != scope {
+					t.Errorf("Read of %s/%s: %+v, %v", app, scope, got, err)
 				}
 			})
 		}
@@ -635,7 +574,7 @@ func TestCorpusReadAndMarshalAgreeOnContainedValues(t *testing.T) {
 		inArr bool
 	}{{"args", true, false}, {"expected", false, false}, {"nested in args", true, true}, {"nested in expected", false, true}} {
 		place := func(v Value) *Corpus {
-			c := newCorpus(testCase("id-1", true, nil))
+			c := newCorpus(testCase("id-1", nil))
 			if loc.args {
 				c.Cases[0].Args = []Argument{v}
 			} else {

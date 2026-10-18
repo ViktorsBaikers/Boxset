@@ -4,6 +4,7 @@ package parse
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -12,16 +13,15 @@ import (
 	"github.com/ViktorsBaikers/Boxset/internal/parse/corpus"
 )
 
-// TestMovieCorpus runs every enabled title case of the committed movie corpus
+// TestMovieCorpus runs every title case of the committed movie corpus
 // through the real parser: the movie title cases through ParseTitle (the
 // isDir cases through its directory form) and the release group and language
 // cases through the parsers ParseTitle runs. A case passes only when every
-// source assertion holds for every input; a retained mismatch needs an exact,
+// assertion holds for every input; a retained mismatch needs an exact,
 // answered disposition that binds every mismatching input observation, and a
-// stale or ownerless disposition fails. The whole inventory (all scopes)
-// reconciles against the header separately from the selected title scope, whose
-// count must be positive for every entry point and come only from the title
-// fixtures.
+// stale or ownerless disposition fails. The whole inventory (both scopes)
+// reconciles against the corpus's per-scope counts separately from the selected
+// title scope, whose count must be positive for every entry point.
 func TestMovieCorpus(t *testing.T) {
 	disp := readDispositions(t)
 	var all []corpus.Case
@@ -47,18 +47,18 @@ func TestMovieCorpus(t *testing.T) {
 	}
 
 	r := runTitleCorpus(newTestParser(t, time.Now), c, dispositionsByID(disp))
-	for _, problem := range append(r.problems, r.reconcile(c.Header.Counts)...) {
+	for _, problem := range append(r.problems, r.reconcile(scopeCounts(c))...) {
 		t.Error(problem)
 	}
-	t.Logf("movie-title-corpus cases=%d title=%d (title=%d group=%d languages=%d clean=%d) enabled=%d passed=%d disposed=%d disabled=%d quality=%d out_of_scope=%d inputs=%d private_isDir=%d sha256=%s",
-		len(c.Cases), r.enabled+r.disabled, byOwner[ownerMovieTitle], byOwner[ownerReleaseGroup], byOwner[ownerLanguages], byOwner[ownerCleanTitle],
-		r.enabled, r.passed, r.disposed, r.disabled, r.otherEnabled+r.otherDisabled, r.outOfScope, r.inputs, r.privateDir, hash)
+	t.Logf("movie-title-corpus cases=%d title=%d (title=%d group=%d languages=%d clean=%d) passed=%d disposed=%d quality=%d inputs=%d private_isDir=%d sha256=%s",
+		len(c.Cases), r.cases, byOwner[ownerMovieTitle], byOwner[ownerReleaseGroup], byOwner[ownerLanguages], byOwner[ownerCleanTitle],
+		r.passed, r.disposed, r.other, r.inputs, r.privateDir, hash)
 }
 
-// titleCase is one synthetic title-corpus case over a title fixture file.
-func titleCase(id, owner string, enabled bool, want map[string]corpus.Value, inputs ...string) corpus.Case {
-	cs := mixedCase(id, corpus.ScopeTitle, enabled, want, inputs...)
-	cs.File, cs.ScopeOwner = "tests/ParserFixture.cs", owner
+// titleCase is one synthetic title-corpus case.
+func titleCase(id, owner string, want map[string]corpus.Value, inputs ...string) corpus.Case {
+	cs := mixedCase(id, corpus.ScopeTitle, want, inputs...)
+	cs.ScopeOwner = owner
 	return cs
 }
 
@@ -74,42 +74,31 @@ func TestMovieCorpusConsumerReconcilesInventoryAndSelectedScopeSeparately(t *tes
 		"Languages.Contain": {Kind: corpus.KindArray, Items: []corpus.Value{languageEnum("German"), languageEnum("Original")}},
 		"ReleaseGroup":      str("GRP"), "Edition": str(""), "HardcodedSubs": {Kind: corpus.KindNull},
 	}
-	quality := mixedCase("q", corpus.ScopeQuality, true, map[string]corpus.Value{"Quality": qualityEnum("Bluray1080p")}, name)
-	outside := mixedCase("o", corpus.ScopeOutOfScope, true, nil, name)
+	quality := mixedCase("q", corpus.ScopeQuality, map[string]corpus.Value{"Quality": qualityEnum("Bluray1080p")}, name)
 	c := mixedCorpus(
-		titleCase("t1", ownerMovieTitle, true, pass, name),
-		titleCase("t2", ownerMovieTitle, false, pass, name),
-		quality, outside,
+		titleCase("t1", ownerMovieTitle, pass, name),
+		titleCase("t2", ownerMovieTitle, pass, name),
+		quality,
 	)
 	r := runTitleCorpus(p, c, nil)
-	if len(r.problems) != 0 || r.enabled != 1 || r.disabled != 1 || r.passed != 1 || r.otherEnabled != 1 || r.outOfScope != 1 {
+	if len(r.problems) != 0 || r.cases != 2 || r.passed != 2 || r.other != 1 {
 		t.Fatalf("run = %+v", r)
 	}
-	if problems := r.reconcile(c.Header.Counts); len(problems) != 0 {
+	if problems := r.reconcile(scopeCounts(c)); len(problems) != 0 {
 		t.Errorf("a consistent mixed inventory must reconcile: %v", problems)
 	}
 
-	// A header that miscounts the whole inventory is reported, whatever the selected scope did.
-	counts := map[string]int{}
-	for k, v := range c.Header.Counts {
-		counts[k] = v
-	}
-	counts["cases"]++
+	// A corpus whose counts miscount the whole inventory is reported, whatever the selected scope did.
+	counts := maps.Clone(scopeCounts(c))
+	counts[corpus.ScopeQuality]++
 	if problems := r.reconcile(counts); len(problems) == 0 {
 		t.Error("a miscounted inventory must be reported")
 	}
 
 	// No selected title case is a failure, never a zero-selection pass: quality names do not stand in.
-	none := mixedCorpus(quality, outside)
-	if problems := runTitleCorpus(p, none, nil).reconcile(none.Header.Counts); len(problems) == 0 {
-		t.Error("a corpus without an enabled title case must fail")
-	}
-
-	// A title case taken from a quality fixture is a substituted quality name.
-	subst := titleCase("t3", ownerMovieTitle, true, pass, name)
-	subst.File = "tests/QualityParserFixture.cs"
-	if r := runTitleCorpus(p, mixedCorpus(subst), nil); r.failed != 1 || len(r.problems) == 0 {
-		t.Errorf("a title case from a quality fixture must fail: %+v", r)
+	none := mixedCorpus(quality)
+	if problems := runTitleCorpus(p, none, nil).reconcile(scopeCounts(none)); len(problems) == 0 {
+		t.Error("a corpus without a title case must fail")
 	}
 }
 
@@ -120,7 +109,7 @@ func TestMovieCorpusConsumerResolvesEveryEntryPointAndRejectsUnknownAssertions(t
 		name, owner, input string
 		want               map[string]corpus.Value
 	}{
-		{"rejected hashed release is the source's null", ownerMovieTitle, "185d86a343e39f3341e35c4dad3f9959",
+		{"rejected hashed release has no title", ownerMovieTitle, "185d86a343e39f3341e35c4dad3f9959",
 			map[string]corpus.Value{titleResultKey: null}},
 		{"release group", ownerReleaseGroup, "Movie.Name.2022.1080p.BluRay.x264-VARYG",
 			map[string]corpus.Value{titleResultKey: str("VARYG")}},
@@ -138,7 +127,7 @@ func TestMovieCorpusConsumerResolvesEveryEntryPointAndRejectsUnknownAssertions(t
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := mixedCorpus(titleCase("t", tc.owner, true, tc.want, tc.input))
+			c := mixedCorpus(titleCase("t", tc.owner, tc.want, tc.input))
 			if r := runTitleCorpus(p, c, nil); r.passed != 1 || len(r.problems) != 0 {
 				t.Errorf("run = %+v", r)
 			}
@@ -146,15 +135,15 @@ func TestMovieCorpusConsumerResolvesEveryEntryPointAndRejectsUnknownAssertions(t
 	}
 
 	// A wrong expectation is a counted failure with the observed value, not a pass.
-	wrong := mixedCorpus(titleCase("w", ownerReleaseGroup, true, map[string]corpus.Value{titleResultKey: str("OTHER")}, "Movie.Name.2022.1080p.BluRay.x264-VARYG"))
+	wrong := mixedCorpus(titleCase("w", ownerReleaseGroup, map[string]corpus.Value{titleResultKey: str("OTHER")}, "Movie.Name.2022.1080p.BluRay.x264-VARYG"))
 	if r := runTitleCorpus(p, wrong, nil); r.failed != 1 || r.passed != 0 || len(r.problems) != 1 {
 		t.Errorf("a wrong expectation must fail once: %+v", r)
 	}
 	// An unknown property, member or entry point is a hard error, never a skipped assertion.
 	for name, cs := range map[string]corpus.Case{
-		"unknown property": titleCase("u1", ownerMovieTitle, true, map[string]corpus.Value{"Nonsense": str("x")}, "Movie.2015.1080p-GRP"),
-		"unknown language": titleCase("u2", ownerLanguages, true, map[string]corpus.Value{titleResultKey + ".Contain": {Kind: corpus.KindArray, Items: []corpus.Value{languageEnum("Klingon")}}}, "Movie.2015.English"),
-		"unknown owner":    titleCase("u3", "Parser.Other", true, map[string]corpus.Value{titleResultKey: str("x")}, "Movie.2015.English"),
+		"unknown property": titleCase("u1", ownerMovieTitle, map[string]corpus.Value{"Nonsense": str("x")}, "Movie.2015.1080p-GRP"),
+		"unknown language": titleCase("u2", ownerLanguages, map[string]corpus.Value{titleResultKey + ".Contain": {Kind: corpus.KindArray, Items: []corpus.Value{languageEnum("Klingon")}}}, "Movie.2015.English"),
+		"unknown owner":    titleCase("u3", "Parser.Other", map[string]corpus.Value{titleResultKey: str("x")}, "Movie.2015.English"),
 	} {
 		if r := runTitleCorpus(p, mixedCorpus(cs), nil); r.failed != 1 || len(r.problems) == 0 {
 			t.Errorf("%s must fail: %+v", name, r)
@@ -164,7 +153,7 @@ func TestMovieCorpusConsumerResolvesEveryEntryPointAndRejectsUnknownAssertions(t
 
 func TestMovieCorpusDispositionBindsEveryMismatchingInput(t *testing.T) {
 	p := newTestParser(t, time.Now)
-	cs := titleCase("d", ownerMovieTitle, true, map[string]corpus.Value{"Year": {Kind: corpus.KindInt, Int: 1999}},
+	cs := titleCase("d", ownerMovieTitle, map[string]corpus.Value{"Year": {Kind: corpus.KindInt, Int: 1999}},
 		"Movie.Name.2015.1080p.BluRay.x264-GRP", "Movie.Name.2016.1080p.BluRay.x264-GRP")
 	c := mixedCorpus(cs)
 	year := func(n int64) map[string]corpus.Value {
@@ -181,11 +170,11 @@ func TestMovieCorpusDispositionBindsEveryMismatchingInput(t *testing.T) {
 		t.Errorf("a disposition must bind every distinct observation: %+v", r)
 	}
 	// A disposition on a case that passes is stale.
-	pass := mixedCorpus(titleCase("d", ownerMovieTitle, true, year(2015), "Movie.Name.2015.1080p.BluRay.x264-GRP"))
+	pass := mixedCorpus(titleCase("d", ownerMovieTitle, year(2015), "Movie.Name.2015.1080p.BluRay.x264-GRP"))
 	if r := runTitleCorpus(p, pass, bind(2015)); r.failed != 1 || r.passed != 0 {
 		t.Errorf("a stale disposition must fail: %+v", r)
 	}
-	one := mixedCorpus(titleCase("d", ownerMovieTitle, true, year(1999), "Movie.Name.2015.1080p.BluRay.x264-GRP"))
+	one := mixedCorpus(titleCase("d", ownerMovieTitle, year(1999), "Movie.Name.2015.1080p.BluRay.x264-GRP"))
 	if r := runTitleCorpus(p, one, bind(2015)); r.disposed != 1 || r.failed != 0 || len(r.problems) != 0 {
 		t.Errorf("an exact disposition must bind the one observed value: %+v", r)
 	}
@@ -193,7 +182,7 @@ func TestMovieCorpusDispositionBindsEveryMismatchingInput(t *testing.T) {
 
 // longTail extends a release name with one long dotted word up to n bytes. A
 // name whose title, or whose German tag, is thousands of characters long
-// instead exceeds the 50 ms match timeout (the source's unanchored
+// instead exceeds the 50 ms match timeout (the unanchored
 // bracketed-alternative and German-remux patterns scan quadratically), which
 // is itself a fail-closed outcome; a bare run of letters would be rejected as
 // a hashed release.
@@ -221,7 +210,7 @@ func TestMovieBoundsLegitimate4096ByteNameParses(t *testing.T) {
 	}
 }
 
-// A rejected title is the source's null: every property assertion dereferences
+// A rejected title has no movie: every property assertion dereferences
 // it and fails, whatever it expects. Only an explicit $result null may compare
 // as null.
 func TestMovieCorpusMissingMovieFailsEveryPropertyAssertion(t *testing.T) {
@@ -229,7 +218,7 @@ func TestMovieCorpusMissingMovieFailsEveryPropertyAssertion(t *testing.T) {
 	const hashed = "185d86a343e39f3341e35c4dad3f9959"
 	null := corpus.Value{Kind: corpus.KindNull}
 	zero := corpus.Value{Kind: corpus.KindInt}
-	if r := runTitleCorpus(p, mixedCorpus(titleCase("n", ownerMovieTitle, true, map[string]corpus.Value{titleResultKey: null}, hashed)), nil); r.passed != 1 || r.failed != 0 {
+	if r := runTitleCorpus(p, mixedCorpus(titleCase("n", ownerMovieTitle, map[string]corpus.Value{titleResultKey: null}, hashed)), nil); r.passed != 1 || r.failed != 0 {
 		t.Fatalf("the explicit null result of a rejected title must pass: %+v", r)
 	}
 	for name, want := range map[string]map[string]corpus.Value{
@@ -243,14 +232,14 @@ func TestMovieCorpusMissingMovieFailsEveryPropertyAssertion(t *testing.T) {
 		"no title at an index":  {"MovieTitles[3]": null},
 		"result null and a key": {titleResultKey: null, "HardcodedSubs": null},
 	} {
-		r := runTitleCorpus(p, mixedCorpus(titleCase("m", ownerMovieTitle, true, want, hashed)), nil)
+		r := runTitleCorpus(p, mixedCorpus(titleCase("m", ownerMovieTitle, want, hashed)), nil)
 		if r.failed != 1 || r.passed != 0 || len(r.problems) == 0 {
 			t.Errorf("%s: a missing movie must fail the assertion, got %+v", name, r)
 		}
 	}
 }
 
-// $isDir is the source's argument of ParseMovieTitle; the public ParseTitle has
+// $isDir is the directory argument of the movie title parse; the public ParseTitle has
 // no such argument. A directory case is therefore proved on the private adapter,
 // is counted apart from public coverage, and its year-first name is refused by
 // the public ParseTitle.
@@ -263,27 +252,27 @@ func TestMovieCorpusDirectoryCasesAreProvedOnlyOnThePrivateAdapter(t *testing.T)
 		dir[k] = v
 	}
 
-	r := runTitleCorpus(p, mixedCorpus(titleCase("d", ownerMovieTitle, true, dir, dirName)), nil)
+	r := runTitleCorpus(p, mixedCorpus(titleCase("d", ownerMovieTitle, dir, dirName)), nil)
 	if r.passed != 1 || r.failed != 0 || r.privateDir != 1 {
 		t.Errorf("the directory case must pass on the private adapter and be counted as such: %+v", r)
 	}
 	// Without $isDir the same assertions run through the public ParseTitle, which rejects the name.
-	if r := runTitleCorpus(p, mixedCorpus(titleCase("n", ownerMovieTitle, true, want, dirName)), nil); r.failed != 1 || r.passed != 0 || r.privateDir != 0 {
+	if r := runTitleCorpus(p, mixedCorpus(titleCase("n", ownerMovieTitle, want, dirName)), nil); r.failed != 1 || r.passed != 0 || r.privateDir != 0 {
 		t.Errorf("the public ParseTitle must not read a year-first name: %+v", r)
 	}
 	_, err := p.ParseTitle(context.Background(), dirName, KindMovie)
 	wantReason(t, err, codeTitleUnrecognized, map[string]int64{})
 
 	// An ordinary case without $isDir is public coverage, never private.
-	plain := titleCase("p", ownerMovieTitle, true, map[string]corpus.Value{"Year": {Kind: corpus.KindInt, Int: 2015}}, "Movie.Name.2015.1080p.BluRay.x264-GRP")
+	plain := titleCase("p", ownerMovieTitle, map[string]corpus.Value{"Year": {Kind: corpus.KindInt, Int: 2015}}, "Movie.Name.2015.1080p.BluRay.x264-GRP")
 	if r := runTitleCorpus(p, mixedCorpus(plain), nil); r.passed != 1 || r.privateDir != 0 {
 		t.Errorf("a case without $isDir is public coverage: %+v", r)
 	}
 }
 
 // The release hash, release title and simple release title through the public
-// ParseTitle. Expected values are worked out by hand from the source's
-// ParseMovieTitle, not read from a parser run.
+// ParseTitle. Expected values are worked out by hand from the title
+// patterns, not read from a parser run.
 func TestMovieCorpusPublicParseTitleReleaseFields(t *testing.T) {
 	p := newTestParser(t, time.Now)
 	for _, tc := range []struct {
@@ -367,12 +356,12 @@ func TestMovieCorpusPublicParseTitleLanguageCodes(t *testing.T) {
 	}
 }
 
-// The source's own non-ASCII title (Cyrillic: one UTF-16 unit but two bytes per
+// A non-ASCII title (Cyrillic: one UTF-16 unit but two bytes per
 // letter). The title group is 26 units long and starts at 0; the simple title
 // loses "2160p" and "H.265" (the title patterns read it), while the simple
 // release title keeps both and loses only " |"; a byte length would cut the
 // replacement 10 characters too far.
-func TestMovieCorpusPublicParseTitleSourceNonASCIIName(t *testing.T) {
+func TestMovieCorpusPublicParseTitleNonASCIIName(t *testing.T) {
 	const name = "Енола Голмс / Enola Holmes (2020) UHD WEB-DL 2160p 4K HDR H.265 Ukr/Eng | Sub Ukr/Eng"
 	pt, err := newTestParser(t, time.Now).ParseTitle(context.Background(), name, KindMovie)
 	if err != nil || pt.Movie == nil {
@@ -387,10 +376,10 @@ func TestMovieCorpusPublicParseTitleSourceNonASCIIName(t *testing.T) {
 	}
 }
 
-// cleanMovieTitle against literals of the source's normalization tests and of
-// the accent test, fixed by hand. A letter whose decomposition is not ported is
+// cleanMovieTitle against literals of the normalization cases and of
+// the accent case, fixed by hand. A letter whose decomposition is not handled is
 // an error, not a wrong string.
-func TestMovieCorpusCleanMovieTitleMatchesSourceLiterals(t *testing.T) {
+func TestMovieCorpusCleanMovieTitleMatchesLiterals(t *testing.T) {
 	for in, want := range map[string]string{
 		"Conan": "conan", "Castle (2009)": "castle2009", "Parenthood.2010": "parenthood2010",
 		"Law_and_Order_SVU": "lawordersvu", "CaPitAl": "capital", "peri.od": "period",
@@ -409,25 +398,25 @@ func TestMovieCorpusCleanMovieTitleMatchesSourceLiterals(t *testing.T) {
 	}
 	for _, in := range []string{"Bjørn", "Łódź", "Енола", "Phở"} {
 		if got, err := cleanMovieTitle(in); err == nil {
-			t.Errorf("cleanMovieTitle(%q) = %q: a letter outside the ported decompositions must be an error", in, got)
+			t.Errorf("cleanMovieTitle(%q) = %q: a letter outside the handled decompositions must be an error", in, got)
 		}
 	}
 }
 
-// The source's accent test is a title case of the helper itself: its input is the
+// The accent case is a title case of the helper itself: its input is the
 // string it normalizes and its expectation the folded title.
 func TestMovieCorpusAccentTitleCase(t *testing.T) {
 	p := newTestParser(t, time.Now)
 	result := func(want string) map[string]corpus.Value { return map[string]corpus.Value{titleResultKey: str(want)} }
-	if r := runTitleCorpus(p, mixedCorpus(titleCase("ok", ownerCleanTitle, true, result("carnivale"), "Carniv\u00E0le")), nil); r.passed != 1 || r.failed != 0 {
+	if r := runTitleCorpus(p, mixedCorpus(titleCase("ok", ownerCleanTitle, result("carnivale"), "Carniv\u00E0le")), nil); r.passed != 1 || r.failed != 0 {
 		t.Errorf("the accent must fold: %+v", r)
 	}
 	for label, cs := range map[string]corpus.Case{
-		"unfolded expectation": titleCase("w", ownerCleanTitle, true, result("carnivàle"), "Carniv\u00E0le"),
-		"another title":        titleCase("o", ownerCleanTitle, true, result("carnival"), "Carniv\u00E0le"),
-		"unfoldable input":     titleCase("u", ownerCleanTitle, true, result("bjorn"), "Bj\u00F8rn"),
-		"not a string":         titleCase("n", ownerCleanTitle, true, map[string]corpus.Value{titleResultKey: {Kind: corpus.KindInt}}, "Carniv\u00E0le"),
-		"unknown property":     titleCase("p", ownerCleanTitle, true, map[string]corpus.Value{"Nonsense": str("x")}, "Carniv\u00E0le"),
+		"unfolded expectation": titleCase("w", ownerCleanTitle, result("carnivàle"), "Carniv\u00E0le"),
+		"another title":        titleCase("o", ownerCleanTitle, result("carnival"), "Carniv\u00E0le"),
+		"unfoldable input":     titleCase("u", ownerCleanTitle, result("bjorn"), "Bj\u00F8rn"),
+		"not a string":         titleCase("n", ownerCleanTitle, map[string]corpus.Value{titleResultKey: {Kind: corpus.KindInt}}, "Carniv\u00E0le"),
+		"unknown property":     titleCase("p", ownerCleanTitle, map[string]corpus.Value{"Nonsense": str("x")}, "Carniv\u00E0le"),
 	} {
 		if r := runTitleCorpus(p, mixedCorpus(cs), nil); r.failed != 1 || r.passed != 0 || len(r.problems) == 0 {
 			t.Errorf("%s must fail: %+v", label, r)
@@ -436,27 +425,27 @@ func TestMovieCorpusAccentTitleCase(t *testing.T) {
 }
 
 // A normalized-title assertion compares the parsed primary title and the expected
-// title after the source's normalization; a rejected name fails it.
+// title after normalization; a rejected name fails it.
 func TestMovieCorpusNormalizedTitleAssertion(t *testing.T) {
 	p := newTestParser(t, time.Now)
 	const name = "[www.test.com] - Movie.Title.2023.720p.HDTV.X264-DIMENSION"
 	norm := func(title string) map[string]corpus.Value {
 		return map[string]corpus.Value{"MovieTitle.CleanMovieTitle": str(title)}
 	}
-	if r := runTitleCorpus(p, mixedCorpus(titleCase("ok", ownerMovieTitle, true, norm("Movie Title"), name)), nil); r.passed != 1 || r.failed != 0 {
+	if r := runTitleCorpus(p, mixedCorpus(titleCase("ok", ownerMovieTitle, norm("Movie Title"), name)), nil); r.passed != 1 || r.failed != 0 {
 		t.Errorf("the URL prefix must not reach the title: %+v", r)
 	}
 	// Only the normalization is compared, so the spelling of the expected title may differ.
-	if r := runTitleCorpus(p, mixedCorpus(titleCase("ok", ownerMovieTitle, true, norm("movie.title"), name)), nil); r.passed != 1 {
+	if r := runTitleCorpus(p, mixedCorpus(titleCase("ok", ownerMovieTitle, norm("movie.title"), name)), nil); r.passed != 1 {
 		t.Errorf("both sides are normalized: %+v", r)
 	}
 	for label, cs := range map[string]corpus.Case{
-		"another title":  titleCase("w", ownerMovieTitle, true, norm("Other Title"), name),
-		"url kept":       titleCase("u", ownerMovieTitle, true, norm("www.test.com Movie Title"), name),
-		"rejected name":  titleCase("r", ownerMovieTitle, true, norm("Movie Title"), "185d86a343e39f3341e35c4dad3f9959"),
-		"unfoldable":     titleCase("a", ownerMovieTitle, true, norm("Movie Titlø"), name),
-		"not a string":   titleCase("n", ownerMovieTitle, true, map[string]corpus.Value{"MovieTitle.CleanMovieTitle": {Kind: corpus.KindNull}}, name),
-		"owner mismatch": titleCase("g", ownerReleaseGroup, true, norm("Movie Title"), name),
+		"another title":  titleCase("w", ownerMovieTitle, norm("Other Title"), name),
+		"url kept":       titleCase("u", ownerMovieTitle, norm("www.test.com Movie Title"), name),
+		"rejected name":  titleCase("r", ownerMovieTitle, norm("Movie Title"), "185d86a343e39f3341e35c4dad3f9959"),
+		"unfoldable":     titleCase("a", ownerMovieTitle, norm("Movie Titlø"), name),
+		"not a string":   titleCase("n", ownerMovieTitle, map[string]corpus.Value{"MovieTitle.CleanMovieTitle": {Kind: corpus.KindNull}}, name),
+		"owner mismatch": titleCase("g", ownerReleaseGroup, norm("Movie Title"), name),
 	} {
 		if r := runTitleCorpus(p, mixedCorpus(cs), nil); r.failed != 1 || r.passed != 0 || len(r.problems) == 0 {
 			t.Errorf("%s must fail: %+v", label, r)

@@ -485,14 +485,15 @@ func TestLatencyGateInvalidProvenance(t *testing.T) {
 // producer's hashing is checked, not echoed; changing one hashed byte of a disposable
 // fixture then makes the retained measurement INVALID.
 func TestLatencyGateRetainedMeasurementTracksHashedInputs(t *testing.T) {
+	// bump changes the last byte of the first case id to a letter no ordinal uses: the
+	// fixture stays valid, with a unique id, and its hashed bytes differ.
 	bump := func(b []byte) []byte {
-		i := bytes.Index(b, []byte(`"line":`))
-		j := i + len(`"line":`)
-		k := j
-		for b[k] >= '0' && b[k] <= '9' {
-			k++
-		}
-		return slices.Concat(b[:j], []byte("99999"), b[k:])
+		i := bytes.Index(b, []byte(`"id":"`))
+		j := i + len(`"id":"`)
+		k := j + bytes.IndexByte(b[j:], '"')
+		out := slices.Clone(b)
+		out[k-1] = 'x'
+		return out
 	}
 	appendLine := func(b []byte) []byte { return append(slices.Clone(b), '\n') }
 	for _, tc := range []struct {

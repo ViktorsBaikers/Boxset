@@ -4,8 +4,7 @@ package parse
 
 import "unicode"
 
-// resolution is the source Resolution enum of QualityParser.cs: the pixel
-// height, 0 for Unknown.
+// resolution is the pixel height of a quality, 0 for Unknown.
 type resolution int
 
 const (
@@ -19,7 +18,7 @@ const (
 	res2160p   resolution = 2160
 )
 
-// Explicit per-application code maps. Every source-native quality, source,
+// Explicit per-application code maps. Every fixture-named quality, source,
 // modifier and detection member maps to a stable Boxset code here; nothing is
 // derived from enum ordinals. The tables are values returned by functions so
 // no package state is shared or mutable.
@@ -31,7 +30,7 @@ const (
 	detectionExtension = "extension"
 )
 
-// detectionCode maps a source QualityDetectionSource member.
+// detectionCode maps a detection source member name.
 func detectionCode(member string) (string, bool) {
 	switch member {
 	case "Unknown":
@@ -46,10 +45,9 @@ func detectionCode(member string) (string, bool) {
 	return "", false
 }
 
-// qualityDef is one source Quality member: its Boxset code and the facts the
-// source Quality object carries. sourceRank is the source member's ordinal in
-// the application's own QualitySource enum, used only where the source
-// compares sources (QualityFinder), never to derive a code.
+// qualityDef is one quality member: its Boxset code and its facts.
+// sourceRank is the member's ordinal in the application's own source order,
+// used only where sources are compared (find), never to derive a code.
 type qualityDef struct {
 	member     string
 	code       string
@@ -63,7 +61,7 @@ func (d qualityDef) quality() Quality {
 	return Quality{Code: d.code, Source: d.source, Resolution: d.resolution, Modifier: d.modifier}
 }
 
-// Series QualitySource ordinals.
+// Series source ordinals.
 const (
 	ssUnknown = iota
 	ssTelevision
@@ -75,7 +73,7 @@ const (
 	ssBlurayRaw
 )
 
-// seriesSourceCode maps a series QualitySource member.
+// seriesSourceCode maps a series source member name.
 func seriesSourceCode(member string) (string, bool) {
 	switch member {
 	case "Unknown":
@@ -98,7 +96,7 @@ func seriesSourceCode(member string) (string, bool) {
 	return "", false
 }
 
-// Series Quality members in Quality.All order.
+// Series quality members in definition order.
 const (
 	sqUnknown = iota
 	sqSDTV
@@ -125,7 +123,7 @@ const (
 	sqCount
 )
 
-// seriesDefs is the series Quality table (Quality.cs).
+// seriesDefs is the series quality table.
 func seriesDefs() [sqCount]qualityDef {
 	return [sqCount]qualityDef{
 		sqUnknown:          {"Unknown", "unknown", "unknown", ssUnknown, "", 0},
@@ -153,7 +151,7 @@ func seriesDefs() [sqCount]qualityDef {
 	}
 }
 
-// Movie QualitySource ordinals.
+// Movie source ordinals.
 const (
 	rsUnknown = iota
 	rsCAM
@@ -167,7 +165,7 @@ const (
 	rsBluray
 )
 
-// movieSourceCode maps a movie QualitySource member.
+// movieSourceCode maps a movie source member name.
 func movieSourceCode(member string) (string, bool) {
 	switch member {
 	case "UNKNOWN":
@@ -213,7 +211,7 @@ func movieModifierCode(member string) (string, bool) {
 	return "", false
 }
 
-// Movie Quality members in Quality.All order.
+// Movie quality members in definition order.
 const (
 	rqUnknown = iota
 	rqWORKPRINT
@@ -248,7 +246,7 @@ const (
 	rqCount
 )
 
-// movieDefs is the movie Quality table (Quality.cs).
+// movieDefs is the movie quality table.
 func movieDefs() [rqCount]qualityDef {
 	return [rqCount]qualityDef{
 		rqUnknown:     {"Unknown", "unknown", "unknown", rsUnknown, "", 0},
@@ -284,7 +282,7 @@ func movieDefs() [rqCount]qualityDef {
 	}
 }
 
-// qualityDefByMember finds a source Quality member by its name.
+// qualityDefByMember finds a quality member by its name.
 func qualityDefByMember(defs []qualityDef, member string) (qualityDef, bool) {
 	for _, d := range defs {
 		if d.member == member {
@@ -294,8 +292,8 @@ func qualityDefByMember(defs []qualityDef, member string) (qualityDef, bool) {
 	return qualityDef{}, false
 }
 
-// seriesQualityDef and movieQualityDef resolve a source Quality member name
-// (as it appears in the extracted corpora) to its explicit code definition.
+// seriesQualityDef and movieQualityDef resolve a quality member name
+// (as it appears in the fixtures) to its explicit code definition.
 func seriesQualityDef(member string) (qualityDef, bool) {
 	defs := seriesDefs()
 	return qualityDefByMember(defs[:], member)
@@ -307,7 +305,7 @@ func movieQualityDef(member string) (qualityDef, bool) {
 }
 
 // extensionOrdinalUpper upper-cases a file extension per rune, the comparison
-// of the source's StringComparer.OrdinalIgnoreCase extension dictionary.
+// of the ordinal-ignore-case extension dictionary.
 func extensionOrdinalUpper(ext string) string {
 	out := make([]rune, 0, len(ext))
 	for _, r := range ext {
@@ -316,7 +314,7 @@ func extensionOrdinalUpper(ext string) string {
 	return string(out)
 }
 
-// seriesExtensionQuality is MediaFileExtensions.GetQualityForExtension.
+// seriesExtensionQuality is the quality of a series file extension.
 func seriesExtensionQuality(ext string) int {
 	switch extensionOrdinalUpper(ext) {
 	case ".M4V", ".3GP", ".NSV", ".TY", ".STRM", ".RM", ".RMVB", ".M3U", ".IFO", ".MOV", ".QT", ".DIVX", ".XVID",
@@ -333,7 +331,7 @@ func seriesExtensionQuality(ext string) int {
 	return sqUnknown
 }
 
-// movieExtensionQuality is the movie MediaFileExtensions.GetQualityForExtension.
+// movieExtensionQuality is the quality of a movie file extension.
 func movieExtensionQuality(ext string) int {
 	switch extensionOrdinalUpper(ext) {
 	case ".M4V", ".3GP", ".NSV", ".TY", ".STRM", ".RM", ".RMVB", ".M3U", ".IFO", ".MOV", ".QT", ".DIVX", ".XVID",
@@ -351,9 +349,9 @@ func movieExtensionQuality(ext string) int {
 	return rqUnknown
 }
 
-// Source Language members in Language.All order (the members the movie title
-// parser names, plus the rest of the source list). The table below maps each
-// member to a stable Boxset language code; nothing is derived from the source's
+// Language members in definition order (the members the movie title
+// parser names, plus the rest of the list). The table below maps each
+// member to a stable Boxset language code; nothing is derived from
 // numeric ids.
 const (
 	lgUnknown = iota
@@ -422,13 +420,13 @@ const (
 	lgCount
 )
 
-// languageDef is one source Language member and its Boxset code.
+// languageDef is one language member and its Boxset code.
 type languageDef struct {
 	member string
 	code   string
 }
 
-// languageDefs is the explicit source-Language-member to code table.
+// languageDefs is the explicit language-member to code table.
 func languageDefs() [lgCount]languageDef {
 	return [lgCount]languageDef{
 		lgUnknown:       {"Unknown", "unknown"},
@@ -497,9 +495,9 @@ func languageDefs() [lgCount]languageDef {
 	}
 }
 
-// languageCode maps a source Language member (as it appears in the extracted
-// corpus) to its explicit Boxset code. The series source names the Brazilian
-// Portuguese member PortugueseBrazil where the movie source names it PortugueseBR.
+// languageCode maps a language member name (as it appears in the fixtures)
+// to its explicit Boxset code. The series fixtures name the Brazilian
+// Portuguese member PortugueseBrazil where the movie fixtures name it PortugueseBR.
 func languageCode(member string) (string, bool) {
 	if member == "PortugueseBrazil" {
 		member = "PortugueseBR"

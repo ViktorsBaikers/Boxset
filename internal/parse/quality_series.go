@@ -2,20 +2,17 @@
 
 package parse
 
-// Quality parsing for kind KindSeries, ported from the series reference
-// parser (parser/QualityParser.cs and the qualities/ and
-// MediaFiles/MediaFileExtensions.cs members it uses, located by
-// BOXSET_REF_SERIES) at commit 57816c149d02f95543973fefb4780c4495f8121c.
-// Control flow, pattern order and pattern text follow the source; the parity
-// corpus testdata/parser/series.jsonl is extracted from its tests.
+// Quality parsing for kind KindSeries. Control flow, pattern order and
+// pattern text are semantic; the fixture table testdata/parser/series.jsonl
+// asserts them.
 //
-// Faithful-adapter notes: .NET char.IsWhiteSpace/Trim and the ordinal-ignore-
-// case extension table are reproduced with the equivalent Unicode sets;
-// ContainsIgnoreCase (invariant-culture) is applied only to ASCII needles, for
-// which ASCII case folding is equivalent; Path.GetInvalidPathChars and
-// Path.GetExtension follow Linux semantics (only NUL is invalid, only '/'
-// separates). regexp2 runs on runes where .NET runs on UTF-16 units; the two
-// agree for the Basic Multilingual Plane.
+// Implementation notes: white-space trimming and the ordinal-ignore-case
+// extension table use the equivalent Unicode sets;
+// the case-insensitive substring test is applied only to ASCII needles, for
+// which ASCII case folding is equivalent; path handling follows Linux
+// semantics (only NUL is an invalid path character, only '/'
+// separates). regexp2 runs on runes while indexes are counted in UTF-16
+// units; the two agree for the Basic Multilingual Plane.
 
 import (
 	"github.com/dlclark/regexp2/v2"
@@ -90,7 +87,7 @@ func (t *seriesTable) set(q *Quality, idx int) {
 	q.Code, q.Source, q.Resolution, q.Modifier = d.code, d.source, d.resolution, d.modifier
 }
 
-// parseQuality is QualityParser.ParseQuality.
+// parseQuality parses the quality of one series release name.
 func (t *seriesTable) parseQuality(b *budget, name string) (Quality, error) {
 	if isBlank(name) {
 		return t.newResult(), nil
@@ -425,7 +422,7 @@ func (t *seriesTable) parseQualityName(b *budget, name string) (Quality, error) 
 	return result, nil
 }
 
-// parseResolution is QualityParser.ParseResolution.
+// parseResolution parses the resolution of a name.
 func (t *seriesTable) parseResolution(b *budget, name string) (resolution, error) {
 	m, err := b.first(t.resolution, name)
 	if err != nil {
@@ -454,16 +451,16 @@ func (t *seriesTable) parseResolution(b *budget, name string) (resolution, error
 	return resUnknown, nil
 }
 
-// modifiers is QualityParser.ParseQualityModifiers.
+// modifiers parses the revision (version, proper, repack, real) of a name.
 func (t *seriesTable) modifiers(b *budget, name, normalized string) (Quality, error) {
 	result := t.newResult()
 	return applyRevision(b, &result, name, normalized, t.version, t.proper, t.repack, t.real)
 }
 
-// find is QualityFinder.FindBySourceAndResolution: the exact source and
+// find is the lookup by source and resolution: the exact source and
 // resolution match; Television/Web/WebRip below 720p roll to their 480p
 // quality; otherwise the lowest source at or above the requested one among the
-// qualities of that resolution (first in Quality.All order on ties); otherwise
+// qualities of that resolution (first in definition order on ties); otherwise
 // Unknown.
 func (t *seriesTable) find(source, res int) int {
 	for i, d := range t.defs {

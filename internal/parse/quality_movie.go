@@ -2,17 +2,12 @@
 
 package parse
 
-// Quality parsing for kind KindMovie, ported from the movie reference parser
-// (parser/QualityParser.cs and the qualities/ and
-// MediaFiles/MediaFileExtensions.cs members it uses, located by
-// BOXSET_REF_MOVIE) at commit df2faa64c75e6081556d11232dc46523e7264ea1.
-// Control flow, pattern order and pattern text follow the source; the parity
-// corpus testdata/parser/movie.jsonl is extracted from its tests.
-// The faithful-adapter notes of quality_series.go apply here too.
+// Quality parsing for kind KindMovie. Control flow, pattern order and pattern
+// text are semantic; the fixture table testdata/parser/movie.jsonl asserts
+// them. The implementation notes of quality_series.go apply here too.
 //
-// Source quirk kept observable: for a TELESYNC source the quality's
-// Resolution is the parsed resolution of that release (the source assigns it
-// on the quality object of that result).
+// Quirk kept observable: for a TELESYNC source the quality's Resolution is
+// the parsed resolution of that release.
 
 import (
 	"github.com/dlclark/regexp2/v2"
@@ -97,7 +92,7 @@ func (t *movieTable) set(q *Quality, idx int) {
 	q.Code, q.Source, q.Resolution, q.Modifier = d.code, d.source, d.resolution, d.modifier
 }
 
-// parseQuality is QualityParser.ParseQuality.
+// parseQuality parses the quality of one movie release name.
 func (t *movieTable) parseQuality(b *budget, name string) (Quality, error) {
 	if isBlank(name) {
 		return t.newResult(), nil
@@ -471,7 +466,7 @@ func (t *movieTable) parseQualityName(b *budget, name string) (Quality, error) {
 	return result, nil
 }
 
-// parseResolution is QualityParser.ParseResolution.
+// parseResolution parses the resolution of a name.
 func (t *movieTable) parseResolution(b *budget, name string) (resolution, error) {
 	m, err := b.first(t.resolution, name)
 	if err != nil {
@@ -500,10 +495,10 @@ func (t *movieTable) parseResolution(b *budget, name string) (resolution, error)
 	return resUnknown, nil
 }
 
-// find is QualityFinder.FindBySourceAndResolution: an exact source,
+// find is the lookup by source and resolution: an exact source,
 // resolution and modifier match; else the unknown-resolution quality of that
 // source and modifier; else the lowest source at or above the requested one
-// among the qualities with that modifier and resolution (first in Quality.All
+// among the qualities with that modifier and resolution (first in definition
 // order on ties); else Unknown.
 func (t *movieTable) find(source, res int, modifier string) int {
 	for i, d := range t.defs {

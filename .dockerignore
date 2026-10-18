@@ -1,5 +1,5 @@
 # Deny by default: only the allowlisted project inputs below enter the build
-# context. Owner secrets (.env), reference/, prototypes/, design/, workspaces
+# context. Owner secrets (.env), prototypes/, design/, workspaces
 # (.devrites/), caches, the host-only runner, its smoke check, the preserved
 # predecessor runner and its test driver never do.
 *

@@ -100,7 +100,7 @@ func newRunFixture(t *testing.T) runFixture {
 
 // args is the private argv after the program name.
 func (f runFixture) args() []string {
-	return []string{"-run", f.repo, testRunID, f.tmpd, "5", "0", "-", "-", "--", "true"}
+	return []string{"-run", f.repo, testRunID, f.tmpd, "5", "-", "-", "--", "true"}
 }
 
 func listing(t *testing.T, roots ...string) []string {
@@ -152,8 +152,8 @@ func TestRunArgvRejectedBeforeAnyEffect(t *testing.T) {
 		edit  func(a []string, f runFixture)
 		exe   func(f runFixture) string
 	}{
-		{name: "missing separator", edit: func(a []string, _ runFixture) { a[8] = "x" }},
-		{name: "missing command", edit: func(a []string, _ runFixture) { a[8] = "--" }, exe: nil},
+		{name: "missing separator", edit: func(a []string, _ runFixture) { a[7] = "x" }},
+		{name: "missing command", edit: func(a []string, _ runFixture) { a[7] = "--" }, exe: nil},
 		{name: "relative repo", edit: func(a []string, _ runFixture) { a[1] = "." }},
 		{name: "repo with a trailing slash", edit: func(a []string, f runFixture) { a[1] = f.repo + "/" }},
 		{name: "another directory as repo", edit: func(a []string, _ runFixture) { a[1] = t.TempDir() }},
@@ -192,13 +192,12 @@ func TestRunArgvRejectedBeforeAnyEffect(t *testing.T) {
 		{name: "timeout with a sign", edit: func(a []string, _ runFixture) { a[4] = "+5" }},
 		{name: "timeout not a number", edit: func(a []string, _ runFixture) { a[4] = "x" }},
 		{name: "empty timeout", edit: func(a []string, _ runFixture) { a[4] = "" }},
-		{name: "ref 2", edit: func(a []string, _ runFixture) { a[5] = "2" }},
-		{name: "write outside the map table", edit: func(a []string, _ runFixture) { a[6] = "docs" }},
-		{name: "write traversal", edit: func(a []string, _ runFixture) { a[6] = "../x" }},
-		{name: "write with a trailing slash", edit: func(a []string, _ runFixture) { a[6] = "testdata/parser/" }},
-		{name: "capture not a screenshots directory", edit: func(a []string, _ runFixture) { a[7] = "x" }},
-		{name: "capture with an uppercase slug", edit: func(a []string, _ runFixture) { a[7] = ".devrites/work/UP/screenshots-20260101T000000Z" }},
-		{name: "capture with a short stamp", edit: func(a []string, _ runFixture) { a[7] = ".devrites/work/a/screenshots-2026" }},
+		{name: "write outside the map table", edit: func(a []string, _ runFixture) { a[5] = "docs" }},
+		{name: "write traversal", edit: func(a []string, _ runFixture) { a[5] = "../x" }},
+		{name: "write with a trailing slash", edit: func(a []string, _ runFixture) { a[5] = "testdata/parser/" }},
+		{name: "capture not a screenshots directory", edit: func(a []string, _ runFixture) { a[6] = "x" }},
+		{name: "capture with an uppercase slug", edit: func(a []string, _ runFixture) { a[6] = ".devrites/work/UP/screenshots-20260101T000000Z" }},
+		{name: "capture with a short stamp", edit: func(a []string, _ runFixture) { a[6] = ".devrites/work/a/screenshots-2026" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -208,7 +207,7 @@ func TestRunArgvRejectedBeforeAnyEffect(t *testing.T) {
 			}
 			a := f.args()
 			if tc.name == "missing command" {
-				a = a[:9]
+				a = a[:8]
 			}
 			if tc.edit != nil {
 				tc.edit(a, f)

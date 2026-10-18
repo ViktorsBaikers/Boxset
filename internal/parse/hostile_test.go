@@ -419,8 +419,8 @@ func TestMovieTitleDirectoryFormIsTheOnlyReaderOfAYearFirstName(t *testing.T) {
 	wantReason(t, err, codeTitleUnrecognized, map[string]int64{})
 }
 
-// The source's generated-name tests (an MD5 chain and random alphanumeric hashes) have
-// no recordable input in the corpus, so they are run here: no such name is a title.
+// Generated names (an MD5 chain and random alphanumeric hashes) have
+// no fixture input, so they are run here: no such name is a title.
 func TestHostileMovieTitleRejectsGeneratedHashNames(t *testing.T) {
 	p := newTestParser(t, nil)
 	ctx := context.Background()
@@ -615,8 +615,8 @@ func TestBudgetSeriesTitleContextCancellationAndDeadlineFailClosed(t *testing.T)
 	}
 }
 
-// The source's generated-name tests (an MD5 chain and random alphanumeric hashes)
-// have no recordable input in the corpus, so they are run here: no such name is a
+// Generated names (an MD5 chain and random alphanumeric hashes)
+// have no fixture input, so they are run here: no such name is a
 // series title.
 func TestHostileSeriesTitleRejectsGeneratedHashNames(t *testing.T) {
 	p := newTestParser(t, nil)

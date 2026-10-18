@@ -2,10 +2,8 @@
 
 package parse
 
-// Release group parsing for the series title parser, ported from the series
-// reference parser (parser/ReleaseGroupParser.cs, located by BOXSET_REF_SERIES)
-// at commit 57816c149d02f95543973fefb4780c4495f8121c. Control flow, pattern
-// order and pattern text follow the source. The parser runs under the budget of
+// Release group parsing for the series title parser. Control flow, pattern
+// order and pattern text are semantic. The parser runs under the budget of
 // the title parse that calls it and never starts its own.
 
 import (
@@ -40,10 +38,9 @@ func newSeriesGroupTable() (*seriesGroupTable, error) {
 	return t, nil
 }
 
-// parse is ReleaseGroupParser.ParseReleaseGroup: the release group of a title,
-// empty where the source returns null. t supplies the extension removal, the
-// substitutions and the website and torrent suffix cleanup the two parsers
-// share.
+// parse returns the release group of a title, empty where there is none. t
+// supplies the extension removal, the substitutions and the website and
+// torrent suffix cleanup the two parsers share.
 func (g *seriesGroupTable) parse(b *budget, t *seriesTitleTable, title string) (string, error) {
 	title, err := t.removeFileExtension(b, trimWhite(title))
 	if err != nil {

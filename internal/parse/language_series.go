@@ -2,10 +2,8 @@
 
 package parse
 
-// Language parsing for the series title parser, ported from the series reference
-// parser (parser/LanguageParser.cs ParseLanguages, located by BOXSET_REF_SERIES)
-// at commit 57816c149d02f95543973fefb4780c4495f8121c. Control flow, pattern order
-// and pattern text follow the source; its Language members map to stable Boxset
+// Language parsing for the series title parser. Control flow, pattern order
+// and pattern text are semantic; the language members map to stable Boxset
 // codes through the explicit table of vocab.go. The parser runs under the budget
 // of the title parse that calls it and never starts its own.
 
@@ -28,7 +26,7 @@ func newSeriesLanguageTable() (*seriesLanguageTable, error) {
 	c := &compiler{}
 	t := &seriesLanguageTable{}
 	t.clean = c.re(`.*?[_. ](S\d{2}(?:E\d{2,4})*[_. ].*)`, ic)
-	// The source builds its language regex from the languages-only pattern: any
+	// The language regex is built from the languages-only pattern: any
 	// language not followed by further languages and a "subs" word.
 	only := `(?<english>\b(?:ing|eng)\b)|(?<italian>\b(?:ita|italian)\b)|(?<german>(?:swiss)?german\b|videomann|ger[. ]dub|\bger\b)|(?<flemish>flemish)|(?<greek>greek)|(?<french>(?:_|\b)(?:FR|VF|VF2|VFF|VFI|VFQ|TRUEFRENCH|FRENCH|FRE|FRA)(?:_|\b))|(?<russian>\b(?:rus|ru)\b)|(?<hungarian>\b(?:HUNDUB|HUN)\b)|(?<hebrew>\bHebDub\b)|(?<polish>\b(?:PL\W?DUB|DUB\W?PL|LEK\W?PL|PL\W?LEK)\b)|(?<chinese>\[(?:CH[ST]|BIG5|GB)\]|简|繁|字幕|国语音轨[.+])|(?<bulgarian>\bbgaudio\b)|(?<spanish>\b(?:español|castellano|esp|spa(?!\(Latino\)))\b)|(?<ukrainian>\b(?:\dx?)?(?:ukr))|(?<thai>\b(?:THAI)\b)|(?<romanian>\b(?:RoDubbed|ROMANIAN)\b)|(?<catalan>[-,. ]cat[. ](?:DD|subs)|\b(?:catalan|catalán)\b)|(?<latvian>\b(?:lat|lav|lv)\b)|(?<turkish>\b(?:tur)\b)|(?<urdu>\burdu\b)|(?<romansh>\b(?:romansh|rumantsch|romansch)\b)|(?<georgian>\b(?:geo|ka|kat|georgian)\b)|(?<irish>\b(?:irish|gaeilge)\b)|(?<japanese>\(JA\)|JAP|JPN)|(?<portuguese>[_. ]por[_. ])|(?<original>\b(?:orig|original)\b)`
 	t.insensitive = c.re(`(?:`+only+`)(?!(?:[-_. ](?:`+only+`))*[-_. ]subs?)`, ic)
@@ -41,8 +39,8 @@ func newSeriesLanguageTable() (*seriesLanguageTable, error) {
 	return t, nil
 }
 
-// seriesLanguageNames are the English language names ParseLanguages looks for in
-// the lower-cased title, in source order; a name list is any of its names.
+// seriesLanguageNames are the English language names the parser looks for in
+// the lower-cased title, in match order; a name list is any of its names.
 var seriesLanguageNames = [...]struct {
 	language int
 	names    []string
@@ -77,8 +75,8 @@ var seriesLanguageNames = [...]struct {
 	{lgUzbek, []string{"uzbek", "uzbekistan"}},
 }
 
-// The groups ParseLanguages reads from each match, in source order. The
-// insensitive list keeps the source's dutch entry, whose pattern has no such
+// The groups the parser reads from each match, in match order. The
+// insensitive list keeps a dutch entry, whose pattern has no such
 // group and so never matches.
 var (
 	seriesCaseSensitiveGroups = [...]groupLanguage{
@@ -96,8 +94,8 @@ var (
 	}
 )
 
-// parse is LanguageParser.ParseLanguages: the language codes of a title in the
-// source's order, without duplicates; Unknown when nothing matches.
+// parse returns the language codes of a title in match
+// order, without duplicates; Unknown when nothing matches.
 func (t *seriesLanguageTable) parse(b *budget, title string) ([]string, error) {
 	defs := languageDefs()
 	title, err := b.replace(t.clean, title, "$1")

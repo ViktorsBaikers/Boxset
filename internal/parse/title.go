@@ -12,9 +12,8 @@ import (
 )
 
 // MovieInfo is the parsed movie title of a release name. Strings and lists
-// follow the source's ParsedMovieInfo: empty means the source-native absence
-// (a null string and an empty one are not distinguished), lists are empty when
-// the source returns none, Year and TmdbID are 0 when unknown. Languages holds
+// are empty when the name holds none (a missing string and an empty one are
+// not distinguished), Year and TmdbID are 0 when unknown. Languages holds
 // stable Boxset language codes from the explicit map of vocab.go. The primary
 // title is the first MovieTitles item, never a second stored field.
 type MovieInfo struct {
@@ -54,10 +53,9 @@ const (
 )
 
 // EpisodeInfo is the parsed series title of a release name. Strings and lists
-// follow the source's ParsedEpisodeInfo: empty means the source-native absence
-// (a null string and an empty one are not distinguished), lists are empty when
-// the source returns none. Languages holds stable Boxset language codes from the
-// explicit map of vocab.go. AirDate is the source's date-only text of the air
+// are empty when the name holds none (a missing string and an empty one are
+// not distinguished). Languages holds stable Boxset language codes from the
+// explicit map of vocab.go. AirDate is the date-only text of the air
 // date, never a UTC instant. SpecialAbsoluteEpisodeNumbers are exact decimal
 // text, never floats. The first season (SeasonNumber) and the predicates below
 // derive from the stored fields; none is stored twice.
@@ -103,7 +101,7 @@ func (e *EpisodeInfo) IsDaily() bool { return !isBlank(e.AirDate) }
 // IsAbsoluteNumbering reports whether the release has absolute episode numbers.
 func (e *EpisodeInfo) IsAbsoluteNumbering() bool { return len(e.AbsoluteEpisodeNumbers) > 0 }
 
-// IsPossibleSpecialEpisode is the source's predicate: a release without air
+// IsPossibleSpecialEpisode reports a possible special: a release without air
 // date or series title and without episodes or in season 0, one with a series
 // title and the special flag, or the single episode 0.
 func (e *EpisodeInfo) IsPossibleSpecialEpisode() bool {
@@ -146,16 +144,16 @@ type ParsedTitle struct {
 // (at most 4096 UTF-8 bytes, valid UTF-8) and the kind checked before any
 // matching; the whole parse, including the quality, language and release
 // group parsing it runs, is then one operation under one 250 ms elapsed-work
-// budget, checked once more before the result is returned. KindMovie ports the
-// movie reference's ParseMovieTitle and KindSeries the series reference's
-// ParseTitle; a name it cannot parse is a title_unrecognized *ReasonError. On
+// budget, checked once more before the result is returned. KindMovie parses
+// with the movie title parser and KindSeries with the series title parser; a
+// name it cannot parse is a title_unrecognized *ReasonError. On
 // any error the ParsedTitle is the zero value.
 func (p *Parser) ParseTitle(ctx context.Context, name string, kind Kind) (ParsedTitle, error) {
 	return p.parseTitle(ctx, name, kind, false)
 }
 
-// parseTitle is ParseTitle with the source's isDir argument of
-// ParseMovieTitle: a directory name also tries the year-first folder pattern.
+// parseTitle is ParseTitle with the movie parser's isDir argument:
+// a directory name also tries the year-first folder pattern.
 func (p *Parser) parseTitle(ctx context.Context, name string, kind Kind, isDir bool) (ParsedTitle, error) {
 	if kind != KindMovie && kind != KindSeries {
 		return ParsedTitle{}, newReasonError(codeKindUnsupported, map[string]int64{"kind": int64(kind)})
@@ -193,9 +191,9 @@ func (p *Parser) parseTitle(ctx context.Context, name string, kind Kind, isDir b
 	return ParsedTitle{Kind: kind, Movie: movie, Episode: episode}, nil
 }
 
-// ---- budgeted replacement and split of the source's Regex API -----------------
+// ---- budgeted replacement and split ---------------------------------------
 
-// replace is Regex.Replace with a replacement pattern. The budget is checked
+// replace is a regex replacement with a replacement pattern. The budget is checked
 // before and after, so a late success after expiry is an error, not a pass. A
 // pattern whose guard rules the text out replaces nothing and is not run; the
 // budget is still checked twice.
@@ -219,7 +217,7 @@ func (b *budget) replace(re *regexp2.Regexp, s, replacement string) (string, err
 	return out, nil
 }
 
-// replaceFunc is Regex.Replace with a match evaluator. The evaluator cannot
+// replaceFunc is a regex replacement with a match evaluator. The evaluator cannot
 // fail: its first error is kept in *evalErr (the evaluator returns the match
 // unchanged after it) and surfaces after the replacement.
 func (b *budget) replaceFunc(re *regexp2.Regexp, s string, evalErr *error, fn func(regexp2.Match) string) (string, error) {
@@ -245,8 +243,8 @@ func (b *budget) replaceFunc(re *regexp2.Regexp, s string, evalErr *error, fn fu
 	return out, nil
 }
 
-// split is Regex.Split for a pattern without capture groups: the text between
-// successive matches, with the empty edges the source keeps.
+// split splits at a pattern without capture groups: the text between
+// successive matches, with the empty edges kept.
 func (b *budget) split(re *regexp2.Regexp, s string) ([]string, error) {
 	var parts []string
 	prev := 0
@@ -263,7 +261,7 @@ func (b *budget) split(re *regexp2.Regexp, s string) ([]string, error) {
 	return append(parts, s[prev:]), nil
 }
 
-// ---- string helpers of the source's extension methods --------------------------
+// ---- string helpers --------------------------------------------------------
 
 // groupText is Match.Groups[name].Value: the text of the group's last capture,
 // empty when the group did not take part.
@@ -293,7 +291,7 @@ func utf16Suffix(s string, n int) string {
 }
 
 // replaceUTF16 is s.Remove(index, length).Insert(index, insert) over UTF-16
-// code units. ok is false where the source throws: the range is outside s.
+// code units. ok is false where the range is outside s.
 func replaceUTF16(s string, index, length int, insert string) (string, bool) {
 	units := utf16.Encode([]rune(s))
 	if index < 0 || length < 0 || index+length > len(units) {
@@ -336,7 +334,7 @@ func tryParseInt(s string) (int, bool) {
 	return int(n), true
 }
 
-// hasLetterOrDigit is title.Any(char.IsLetterOrDigit): the source tests UTF-16
+// hasLetterOrDigit reports a letter or digit in title, tested on UTF-16
 // code units, so a code point outside the BMP (a surrogate pair) is neither.
 func hasLetterOrDigit(s string) bool {
 	for _, r := range s {

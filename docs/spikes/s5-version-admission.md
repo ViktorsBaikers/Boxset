@@ -230,10 +230,10 @@ for owner review; nothing is filed externally.
 
 ## Runner notes
 
-- `scripts/dev-run.sh [--ref] [--write docs/spikes/issue-drafts|testdata/parser] [--capture DIR] [--timeout SECONDS] -- COMMAND [ARG...]` is one small POSIX
+- `scripts/dev-run.sh [--write docs/spikes/issue-drafts] [--capture DIR] [--timeout SECONDS] -- COMMAND [ARG...]` is one small POSIX
   `sh` wrapper around Docker, run from the repository root. `--bench` stops with `bench_unavailable` until the work that
   introduces it lands (`--capture` with `--bench` is `capture_flag_invalid`), and any other `--write` path is
-  `write_path_invalid`. `--ref` is described in docs/spikes/s1-parser.md and `--capture DIR` in the capture
+  `write_path_invalid`; `--capture DIR` is described in the capture
   note below. The timeout is 1 to 600 seconds (default 600). Host Go, Bun and Node are never
   used: every command, including this report's admission, runs in the `work` image.
 - Each run rebuilds `work` from the current allowlisted inputs with frozen locks, creates one uniquely named, labelled
@@ -252,8 +252,8 @@ for owner review; nothing is filed externally.
   `scripts/dev-run-test.sh` each have their own exclusion line and are named by the admission's exposure check).
 - The container's daemon log is disabled (`--log-driver=none`); before the start the runner requires
   `docker inspect --format '{{.HostConfig.LogConfig.Type}}'` to print `none` (otherwise `log_driver_invalid`). Its
-  `dev-run: image=<id> inputs=<sha> timeout=<n>s container=<name> log=none` line on stderr identifies the run (with `--ref`
-  the line ends ` ref=objects`; the created container has no mount of any kind, else `mounts_invalid`). The image ID names
+  `dev-run: image=<id> inputs=<sha> timeout=<n>s container=<name> log=none` line on stderr identifies the run (the created
+  container has no mount of any kind, else `mounts_invalid`). The image ID names
   one build only: a Go consumer run is bound to an actual admission run by the immutable runtime payload, recorded by root's
   read-only `docker image inspect` of that run's `image=<id>` while the image exists: the complete ordered `RootFS.Layers`
   digest chain, the SHA-256 of the parsed `Config` value alone (`json.dumps(Config, ensure_ascii=True, sort_keys=True,
@@ -285,15 +285,6 @@ for owner review; nothing is filed externally.
   published even when the child exits nonzero. Overflow, an unknown status or a failed export, removal or publication
   publishes nothing further and exits 125; a later rename failure can leave earlier names already published, so rerun. There
   is no rollback and no crash-durability claim, and a draft is never filed externally.
-- `--ref` (first used by the parser corpora) reads reference parser text only as Git objects of the two read-only reference
-  repositories at the runner's pinned commits, located by the owner values `BOXSET_REF_SERIES` and `BOXSET_REF_MOVIE`; no
-  checkout directory is walked, copied or mounted and the checkout's HEAD, index and working tree are never read. After each
-  pin check and before the container starts, the host redactor's private archive mode streams the listed `.cs` blobs into the
-  created container's six empty root-owned read-only `/ref/<side>/<area>` directories with `docker cp -`; the producer and
-  receiver statuses are kept apart. Failures print only `dev-run: <reason> side=<series|movie>` (`ref_unavailable`,
-  `ref_invalid`, `ref_commit_invalid`, `ref_copy_failed`); recovery is in `docs/spikes/s1-parser.md`. A `--write
-  testdata/parser` corpus is published only when the stopped container's raw file hashes exactly as the sanitized staged bytes,
-  otherwise `export_changed` and nothing is published.
 - Recovery of a failing bootstrap. Before the redactor exists the runner prints only a fixed stage reason and exits 125, never a
   raw build diagnostic: `redact_unavailable` (the `host-redact` build, export or check failed) or `temp_dir_failed` (the
   private scratch directory). Confirm that the Docker daemon is running and that the registry and snapshot network the pinned
@@ -302,17 +293,12 @@ for owner review; nothing is filed externally.
 - The small runner check `scripts/dev-run-smoke.sh` archives the explicit admitted roots (with the final nested secret and
   cache exclusions of `.dockerignore` applied before archiving, so no owner-shaped nested file is copied) into its own unique,
   ownership-checked scratch directory (so repository drafts are never touched), runs that copy's runner through real Docker
-  and prints `ok R<n>` or `not ok R<n>` for seven assertions: R1 argument errors before Docker and the `--ref` root rejections
-  (unset, empty, relative, newline, tab, missing) and pin rejections (the unmodified runner's real pins, no Git, no repository,
-  a repository lacking the pin, a pin naming a blob, a directory nested in another repository), run from `env -i` with a
-  tool-only PATH over synthetic Git repositories built inside the scratch, R2 exact argv and child status
-  and a child outliving `--timeout 1` giving 124 with no container left, R3 child identity, environment names, network and
+  and prints `ok R<n>` or `not ok R<n>` for seven assertions: R1 argument errors before Docker (including `--ref` as an unknown
+  flag, `usage`, and `--write testdata/parser` as `write_path_invalid`), R2 exact argv and child status
+  and a child outliving `--timeout 1` giving 124 with no container left, R3 child identity, environment names (no `/ref`
+  directory and no unlisted name), network and
   `log=none` under a synthetic Docker proxy configuration (disposable assertions in the scratch Dockerfile's redactor build and
-  work stage, under a fresh nonce, show the configuration reaches neither build, and stop a direct build given it), then the
-  `--ref` Git-object delivery on those repositories (no mount, no scratch path in the output, the exact control-commit file set
-  and pinned blob digests in read-only root-owned files whatever the later HEAD, staged, working-tree and untracked bytes are,
-  every source-rule rejection with no child, no publication and no left container, and a producer that fails after the receiver
-  `docker cp` succeeded), R4 a
+  work stage, under a fresh nonce, show the configuration reaches neither build, and stop a direct build given it), R4 a
   synthetic secret printed by the child is `[REDACTED]`, R5 the same secret and a secret URL written into a draft by a failing
   child are published redacted with no part file and no container left, an oversized draft, a draft whose redaction expands
   past the cap, a link and a directory holding a secret-named entry fail the export with the prior draft intact, a passive
@@ -320,11 +306,9 @@ for owner review; nothing is filed externally.
   synthetic secret in any file or name there, a selected value `file` (which occurs in docker's missing-file message) still
   publishes a lone draft from a failing child (the retained copy diagnostic must hold the redaction marker and not the value),
   lets a silent child with no drafts return 0 with the prior draft intact, and publishes a lone `s5-tools.md` with the child's
-  status when the first name is absent, a synthetic tree with nested secret-shaped entries snapshots without them, and the
-  corpus export identity (a sentinel-free `series.jsonl`/`movie.jsonl` pair is published byte-identical, a `movie.jsonl` holding
-  the selected value is `export_changed` with both corpora unchanged), R6
-  the existing redaction-only Go tests and the bounded `TestRefArchive` producer tests through the runner with `CGO_ENABLED=0`
-  (the selector lists only `main_test.go` and `ref_archive_test.go` tests), and R7 the root alias `/src/.` running the real
+  status when the first name is absent, a synthetic tree with nested secret-shaped entries snapshots without them, R6
+  the existing redaction-only Go tests through the runner with `CGO_ENABLED=0`
+  (the selector lists only `main_test.go` tests), and R7 the root alias `/src/.` running the real
   controls (an unexpected child variable blocks it), a small noncanonical manifest copy printing only `S5-MANIFEST-ONLY-PASS`
   and no runtime control, the real admission blocking an impossible executed Bun date (`recorded Bun result date ... is not a
   valid date`) and a stale annual evidence date (the latter with a retained redacted draft), then the Go negatives: the go
@@ -374,7 +358,7 @@ driver and `redact -run`/`-clock` in `deploy/dev/redact`), not the active runner
 `scripts/dev-run.sh` names that pre-revision script. Nothing here is required by a gate or a check, none of it has been proven,
 and its historical findings stay open.
 
-- `scripts/dev-run.sh [--ref] [--write PATH] [--capture DIR] [--bench CPUSET] [--timeout SECONDS] -- COMMAND [ARG...]` runs
+- `scripts/dev-run.sh [--write PATH] [--capture DIR] [--bench CPUSET] [--timeout SECONDS] -- COMMAND [ARG...]` runs
   from the repository root. The child is the fixed user 1000:1000 (whatever the host UID); PID 1 and every supervisor exec
   run as 65534 on root-owned absolute binaries that a trust preflight checks before the child starts. Child output (stdout
   and stderr merged) passes through the host redactor `deploy/dev/redact` and is capped at 64 KiB raw and 64 KiB emitted;
@@ -386,8 +370,6 @@ and its historical findings stay open.
   Drafts are counted raw before redaction and emitted redacted separately. Publication commits only while every backup
   exists; a post-commit backup-cleanup failure is reported and never rolls back. The live cap is enforced during
   production, so the earlier post-run-only limitation no longer applies.
-- Reference mode mounts only the series and movie parser, qualities, languages and parser-test directories read-only, and
-  refuses any entry that is not a regular, non-executable `.cs` file.
 - Capture mode follows architecture DEC-020 and the strict enforcement fold: a protected precreated four-file `/capture`
   tmpfs map, host-exec child, fresh-container `capture-check` validation, and root-supplied fresh workspace DIR; the
   guarantees need root runtime proof and are not claimed here.

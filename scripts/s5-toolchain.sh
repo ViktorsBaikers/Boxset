@@ -1227,13 +1227,13 @@ else
 	ok "no parent secret in the child environment"
 fi
 
-# Exposure: no owner/reference/workspace input, no host runner, no socket, no ports.
-for p in .env reference prototypes design .devrites scripts/dev-run.sh scripts/dev-run-smoke.sh scripts/dev-run-hardening.sh scripts/dev-run-test.sh; do
+# Exposure: no owner/workspace input, no host runner, no socket, no ports.
+for p in .env prototypes design .devrites scripts/dev-run.sh scripts/dev-run-smoke.sh scripts/dev-run-hardening.sh scripts/dev-run-test.sh; do
 	[ ! -e "/src/$p" ] || block exposure "/src/$p is present in the work image"
 done
 [ -z "$(find /src \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.key' -o -name '.npmrc' -o -name '.netrc' \) -not -path '*/node_modules/*' -print -quit 2>/dev/null)" ] ||
 	block exposure "a nested secret-shaped file is present in the work image"
-[ -z "$(find /src -name '*.cs' -not -path '*/node_modules/*' -print -quit 2>/dev/null)" ] || block exposure "reference C# text is present in the work image"
+[ -z "$(find /src -name '*.[cC][sS]' -not -path '*/node_modules/*' -print -quit 2>/dev/null)" ] || block exposure "C# source text is present in the work image"
 [ ! -e /var/run/docker.sock ] && ! command -v docker >/dev/null 2>&1 || block exposure "Docker socket or CLI is present"
 if [ -r /proc/net/tcp ] && grep -Eq '^ *[0-9]+: [0-9A-F:]+ [0-9A-F:]+ 0A ' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
 	block exposure "a TCP listener exists"

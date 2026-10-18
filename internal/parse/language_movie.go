@@ -2,11 +2,9 @@
 
 package parse
 
-// Language parsing for the movie title parser, ported from the movie reference
-// parser (parser/LanguageParser.cs ParseLanguages, located by
-// BOXSET_REF_MOVIE) at commit df2faa64c75e6081556d11232dc46523e7264ea1.
-// Control flow, pattern order and pattern text follow the source; its Language
-// members map to stable Boxset codes through the explicit table of vocab.go.
+// Language parsing for the movie title parser. Control flow, pattern order and
+// pattern text are semantic; the language members map to stable Boxset codes
+// through the explicit table of vocab.go.
 // The parser runs under the budget of the title parse that calls it and never
 // starts its own.
 
@@ -70,8 +68,8 @@ func newLanguageTable() (*languageTable, error) {
 	return t, nil
 }
 
-// languageNames are the English language names ParseLanguages looks for in the
-// lower-cased title, in source order; a name list is any of its names.
+// languageNames are the English language names the parser looks for in the
+// lower-cased title, in match order; a name list is any of its names.
 var languageNames = [...]struct {
 	language int
 	names    []string
@@ -122,9 +120,9 @@ type groupLanguage struct {
 	language int
 }
 
-// caseSensitiveGroups and insensitiveGroups are the groups ParseLanguages reads
-// from each match, in source order. The insensitive list keeps the source's
-// dutch entry, whose pattern has no such group and so never matches.
+// caseSensitiveGroups and insensitiveGroups are the groups the parser reads
+// from each match, in match order. The insensitive list keeps a dutch entry,
+// whose pattern has no such group and so never matches.
 var (
 	caseSensitiveGroups = [...]groupLanguage{
 		{"english", lgEnglish}, {"lithuanian", lgLithuanian}, {"czech", lgCzech}, {"polish", lgPolish},
@@ -141,8 +139,8 @@ var (
 	}
 )
 
-// parse is LanguageParser.ParseLanguages: the language codes of a title in the
-// source's order, without duplicates; Unknown when nothing matches.
+// parse returns the language codes of a title in match
+// order, without duplicates; Unknown when nothing matches.
 func (t *languageTable) parse(b *budget, title string) ([]string, error) {
 	defs := languageDefs()
 	var found []int

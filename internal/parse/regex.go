@@ -243,21 +243,21 @@ func groupOK(m *regexp2.Match, name string) bool {
 	return g != nil && len(g.Captures) > 0
 }
 
-// ---- string helpers of the source's extension methods ---------------------
+// ---- string helpers -------------------------------------------------------
 
-// isBlank is string.IsNullOrWhiteSpace.
+// isBlank reports whether s is empty or only white space.
 func isBlank(s string) bool { return strings.TrimFunc(s, unicode.IsSpace) == "" }
 
-// trimWhite is string.Trim().
+// trimWhite trims white space from both ends of s.
 func trimWhite(s string) string { return strings.TrimFunc(s, unicode.IsSpace) }
 
-// replaceUnderscores is name.Replace('_', ' ').
+// replaceUnderscores replaces every '_' with a space.
 func replaceUnderscores(s string) string { return strings.ReplaceAll(s, "_", " ") }
 
-// containsOrdinal is the ordinal, case-sensitive string.Contains.
+// containsOrdinal is the ordinal, case-sensitive substring test.
 func containsOrdinal(s, sub string) bool { return strings.Contains(s, sub) }
 
-// containsFold is ContainsIgnoreCase for a lower-case ASCII needle.
+// containsFold is the case-insensitive substring test for a lower-case ASCII needle.
 func containsFold(s, lowerSub string) bool {
 	n := len(lowerSub)
 	for i := 0; i+n <= len(s); i++ {
@@ -278,11 +278,11 @@ func containsFold(s, lowerSub string) bool {
 	return false
 }
 
-// containsInvalidPathChar is ContainsInvalidPathChars: on Linux only NUL.
+// containsInvalidPathChar reports an invalid path character: on Linux only NUL.
 func containsInvalidPathChar(s string) bool { return strings.IndexByte(s, 0) >= 0 }
 
-// pathExtension is Path.GetExtension (Linux): the text from the last '.'
-// after the last '/', empty when there is none or the dot ends the name.
+// pathExtension is the text from the last '.' after the last '/', empty when
+// there is none or the dot ends the name.
 func pathExtension(s string) string {
 	for i := len(s) - 1; i >= 0; i-- {
 		switch s[i] {
@@ -298,8 +298,8 @@ func pathExtension(s string) string {
 	return ""
 }
 
-// pathExtensionAnywhere is the source's GetPathExtension: from the last '.'
-// anywhere in the name, empty when there is none or the dot ends the name.
+// pathExtensionAnywhere is the text from the last '.' anywhere in the name,
+// empty when there is none or the dot ends the name.
 func pathExtensionAnywhere(s string) string {
 	i := strings.LastIndexByte(s, '.')
 	if i < 0 || i == len(s)-1 {
@@ -308,7 +308,7 @@ func pathExtensionAnywhere(s string) string {
 	return s[i:]
 }
 
-// applyRevision is QualityParser.ParseQualityModifiers' revision logic,
+// applyRevision is the revision logic of quality parsing,
 // identical in both applications apart from the version pattern: an explicit
 // version, then proper and repack/rerip raising it, then the REAL count of the
 // un-normalized name.
@@ -320,8 +320,8 @@ func applyRevision(b *budget, result *Quality, name, normalized string, versionR
 	version := 0
 	if vm != nil {
 		g := vm.GroupByName("version")
-		// The source parses the digit with Convert.ToInt32, which throws for the
-		// non-ASCII decimal digits that \d admits; such a name has no value.
+		// The version digit must parse as a decimal integer, which the non-ASCII
+		// decimal digits that \d admits do not; such a name has no value.
 		if g == nil {
 			return Quality{}, newReasonError(codeTitleUnrecognized, nil)
 		}
@@ -357,7 +357,7 @@ func applyRevision(b *budget, result *Quality, name, normalized string, versionR
 		result.RevisionDetection = detectionName
 	}
 
-	// The source counts every REAL token, not only those after the
+	// Every REAL token counts, not only those after the
 	// season/episode number.
 	realCount, err := b.count(realRe, name)
 	if err != nil {
@@ -378,7 +378,7 @@ func applyRevision(b *budget, result *Quality, name, normalized string, versionR
 // match would have. A guard only ever rules out; any doubt (a construct it does
 // not model, case folding beyond ASCII) leaves the match to regexp2.
 //
-// A guard reads three kinds of fact from the source: the fewest characters a
+// A guard reads three kinds of fact from the pattern text: the fewest characters a
 // match has, the literal texts every match holds (with the word boundaries the
 // pattern puts around them), and the pairs of characters that sit side by side
 // in every match. What a character class matches is asked of regexp2 itself,

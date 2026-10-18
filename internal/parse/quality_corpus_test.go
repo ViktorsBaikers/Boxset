@@ -9,12 +9,12 @@ import (
 	"github.com/ViktorsBaikers/Boxset/internal/parse/corpus"
 )
 
-// TestQualityCorpus runs every enabled source case of both committed corpora
-// through the real parser. A case passes only when every source assertion
+// TestQualityCorpus runs every quality case of both committed corpora
+// through the real parser. A case passes only when every assertion
 // holds for every input; a retained mismatch needs an exact, answered
 // disposition that binds every mismatching input observation, and a stale or
-// ownerless disposition fails. The whole inventory (all scopes) reconciles
-// against the header separately from the selected quality scope.
+// ownerless disposition fails. The whole inventory (both scopes) reconciles
+// against the corpus's per-scope counts separately from the selected quality scope.
 func TestQualityCorpus(t *testing.T) {
 	disp := readDispositions(t)
 	var all []corpus.Case
@@ -37,12 +37,11 @@ func TestQualityCorpus(t *testing.T) {
 		t.Run(app.name, func(t *testing.T) {
 			c := corpora[app.name]
 			r := runQualityCorpus(newTestParser(t, time.Now), app.kind, app.name, c, byID)
-			for _, problem := range append(r.problems, r.reconcile(c.Header.Counts)...) {
+			for _, problem := range append(r.problems, r.reconcile(scopeCounts(c))...) {
 				t.Error(problem)
 			}
-			counts := c.Header.Counts
-			t.Logf("quality-corpus app=%s cases=%d enabled=%d passed=%d disposed=%d disabled=%d out_of_scope=%d inputs=%d sha256=%s",
-				app.name, len(c.Cases), counts["enabled"], r.passed, r.disposed, r.disabled, r.outOfScope, r.inputs, hashes[app.name])
+			t.Logf("quality-corpus app=%s cases=%d quality=%d passed=%d disposed=%d inputs=%d sha256=%s",
+				app.name, len(c.Cases), r.cases, r.passed, r.disposed, r.inputs, hashes[app.name])
 		})
 	}
 }

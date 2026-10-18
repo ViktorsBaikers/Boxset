@@ -1,8 +1,8 @@
-# S1 parser spike: attributed corpora, the native quality parser and the movie and series title parsers
+# S1 parser spike: frozen fixtures, the native quality parser and the movie and series title parsers
 
 Status: quality parsing for the series and movie sides, title parsing for both kinds (`ParseTitle` with `KindMovie` or `KindSeries`,
 with the language and release group parsing each runs) and custom-format compilation, evaluation and batch evaluation are
-implemented. Quality and title parsing are checked against the complete extracted source test corpora, including the series
+implemented. Quality and title parsing are checked against the complete frozen fixture tables, including the series
 episode title cases (daily, absolute, anime, multi-episode, season pack, special, Unicode, title-only) in
 `internal/parse/title_series.go`, `language_series.go` and `releasegroup_series.go`. The production latency benchmark and its
 eligibility judge are implemented (see "Production latency benchmark"); no eligible measurement has been run here, so nothing in
@@ -12,19 +12,16 @@ this report is a performance claim, and no ARM latency claim is made.
 
 | Part | Path | Role |
 | --- | --- | --- |
-| Native parser | `internal/parse/parser.go`, `limits.go`, `regex.go`, `vocab.go`, `quality_series.go`, `quality_movie.go`, `title.go`, `title_movie.go`, `title_series.go`, `language_movie.go`, `language_series.go`, `releasegroup_movie.go`, `releasegroup_series.go` | `NewParser`, `ParseQuality`, `ParseTitle`, bounded regexp2 matching, explicit code maps, the two ported quality parsers and the ported movie and series title, language and release group parsers |
+| Native parser | `internal/parse/parser.go`, `limits.go`, `regex.go`, `vocab.go`, `quality_series.go`, `quality_movie.go`, `title.go`, `title_movie.go`, `title_series.go`, `language_movie.go`, `language_series.go`, `releasegroup_movie.go`, `releasegroup_series.go` | `NewParser`, `ParseQuality`, `ParseTitle`, bounded regexp2 matching, explicit code maps, the two quality parsers and the movie and series title, language and release group parsers |
 | Format evaluator | `internal/parse/formats.go` | `CompileFormats`, `Evaluate`, `EvaluateBatch`, typed `FormatResult`/`ReleaseResult`; the compiled payload never leaves the `Parser` |
-| Corpus contract | `internal/parse/corpus/corpus.go` | Header/Case/Value schema, bounded JSONL `Read`/`Marshal`, count reconciliation, dispositions, `TimeContext.Materialize` |
-| Extractor | `internal/parse/corpus/extract/main.go` | Reads the reference C# test text (never executes it) and writes the two corpora: quality and title cases on both sides |
-| Corpora | `testdata/parser/series.jsonl`, `movie.jsonl`, `dispositions.json` | Attributed, counted, committed inputs and the (currently empty) owner dispositions |
+| Fixture contract | `internal/parse/corpus/corpus.go` | Header/Case/Value schema 2, bounded JSONL `Read`/`Marshal`, dispositions (format version 1), `TimeContext.Materialize` |
+| Fixtures | `testdata/parser/series.jsonl`, `movie.jsonl`, `dispositions.json` | The asserted cases (series 1522, movie 836) and the (currently empty) owner dispositions; new cases are added by hand |
 | Emulation | `scripts/parse-emulated.sh` | Cross-compiled tests under `qemu-aarch64` and `qemu-arm` |
-| Runner | `scripts/dev-run.sh --ref`, `--write testdata/parser` | Pinned Git-object reference text delivered by copy into the created container; fixed corpus write table with a raw-to-sanitized identity check |
-| Producer | `deploy/dev/redact/ref_archive.go` | Private `-ref-archive` mode of the host redactor: lists and reads only the pinned Git objects and writes a bounded archive |
+| Runner | `scripts/dev-run.sh` | Fixed-user, network-less container with fixed-name draft and benchmark write maps |
 | Benchmark | `bench/parser/main.go`, `eligibility.go` | Production per-call latency CLI (`-out`) and the final judge (`-judge`); the host-evidence schema and its eligibility rules |
 | Benchmark runner | `scripts/dev-run.sh --bench CPUSET`, `scripts/dev-run-smoke.sh --benchmark-evidence` | Reference-profile child limits, read-only `/config`, host-written before/during/after records; the evidence controls |
 
-Sources (GPL-3.0; the corpus headers and the ported Go files carry only the licence identifier GPL-3.0 and name no project):
-the series reference commit `57816c149d02f95543973fefb4780c4495f8121c` and the movie reference commit `df2faa64c75e6081556d11232dc46523e7264ea1`.
+Licence: parser source files carry only the licence identifier GPL-3.0 and name no project.
 Dependency: `github.com/dlclark/regexp2/v2` v2.8.4, exact pin in `go.mod`/`go.sum`.
 
 ## Use
@@ -42,7 +39,7 @@ n, err := p.ParseTitle(ctx, "Movie.Name.2015.German.DL.1080p.BluRay.x264-GRP", p
 // n.Movie.ReleaseGroup == "GRP", n.Movie.Languages == []string{"german", "original"}, n.Movie.Quality.Code == "bluray-1080p"
 ```
 
-`KindMovie` runs the movie port and `KindSeries` the series port of both `ParseQuality` and `ParseTitle`; a series name parses to
+`KindMovie` runs the movie parsers and `KindSeries` the series parsers of both `ParseQuality` and `ParseTitle`; a series name parses to
 `ParsedTitle{Kind: KindSeries, Episode: *EpisodeInfo}` (for example `Series.Title.S03E06.1080p.BluRay.x264-GRP` has
 `Episode.SeriesTitle == "Series Title"`, `SeasonNumbers == []int{3}` and `EpisodeNumbers == []int{6}`). A
 `*Parser` is immutable and safe for concurrent use.
@@ -60,7 +57,7 @@ Validation runs before any pattern is matched; a rejected input never reaches th
 | regexp2 match timeout (fixed 50 ms) | `match_timeout` | `limit_ms` |
 | regexp2 backtracking stack limit (library default) | `regex_stack_limit` | none |
 | context cancelled / deadline exceeded | `evaluation_cancelled` / `decision_deadline_exceeded` | none |
-| a version digit the source's `Convert.ToInt32` would throw on; a title the source's `ParseMovieTitle` or series `ParseTitle` returns null for (a daily name whose date is not a calendar date, or lies beyond the 14 day air date limit, included) | `title_unrecognized` | none |
+| a version digit that does not parse as an integer; a name with no title (a daily name whose date is not a calendar date, or lies beyond the 14 day air date limit, included) | `title_unrecognized` | none |
 | a built-in pattern fails to compile (constructor) | `regex_compile_failed` | `pattern_index` |
 
 ```go
@@ -76,25 +73,24 @@ no hard deadline is claimed.
 ### Quality fields and code maps
 
 `Quality{Code, Source, Resolution, Modifier, Revision, SourceDetection, ResolutionDetection, ModifierDetection,
-RevisionDetection}`. Every source quality, source, modifier and detection member maps to a Boxset code in `vocab.go` through
+RevisionDetection}`. Every quality, source, modifier and detection member maps to a Boxset code in `vocab.go` through
 an explicit table; nothing is derived from enum ordinals. `Source`, `Resolution` and `Modifier` were added to the planned
-`Quality` shape because the movie tests assert them (including the TELESYNC resolution, which the source sets per release).
+`Quality` shape because the movie fixtures assert them (including the TELESYNC resolution, which is set per release).
 The series side has no modifier, so its `Modifier`/`ModifierDetection` stay empty.
 
-Faithful-adapter decisions: `Trim`/whitespace follow `char.IsWhiteSpace`; `Path.GetInvalidPathChars` and `Path.GetExtension`
-follow Linux (only NUL is invalid, only `/` separates); `ContainsIgnoreCase` is used only with ASCII needles; extension
-lookups compare with per-rune upper-casing (ordinal ignore case). regexp2 runs on runes where .NET runs on UTF-16 units; they
-agree on the Basic Multilingual Plane.
+Implementation decisions: trimming follows Unicode white space; only NUL is an invalid path character and only `/` separates
+when a file extension is read (Linux); the case-insensitive substring test is used only with ASCII needles; extension
+lookups compare with per-rune upper-casing (ordinal ignore case). regexp2 runs on runes while indexes are counted in UTF-16
+units; they agree on the Basic Multilingual Plane.
 
 ## Movie titles
 
-`ParseTitle(ctx, name, parse.KindMovie)` ports the movie reference's `ParseMovieTitle` (`parser/Parser.cs`, with
-`parser/ReleaseGroupParser.cs`, `parser/LanguageParser.cs` `ParseLanguages` and the `parser/ParserCommon.cs` cleanup patterns) at
-commit `df2faa64c75e6081556d11232dc46523e7264ea1`. Semantic pattern order and pattern text follow the source; the tables compile
+`ParseTitle(ctx, name, parse.KindMovie)` parses a movie release name: the name preparation, the title patterns in their
+semantic order, the release group, language, edition and ID parsing and the cleanup patterns. The tables compile
 once with the `Parser`. It returns `ParsedTitle{Kind, Movie *MovieInfo}`; `MovieInfo` carries `MovieTitles`, `Languages`
 (Boxset codes from the explicit member table in `vocab.go`, for example `portuguese-br`), `OriginalTitle`, `ReleaseTitle`,
 `SimpleReleaseTitle`, `ReleaseGroup`, `ReleaseHash`, `Edition`, `ImdbID`, `HardcodedSubs`, `Quality`, `Year` and `TmdbID`. The
-primary title is `MovieTitles[0]`; an absent source value is the empty string or 0.
+primary title is `MovieTitles[0]`; an absent value is the empty string or 0.
 
 Fail closed, one budget. The name is validated and the kind checked before any matching. One 250 ms budget, created by
 `ParseTitle`, covers the title patterns and every subparser it runs (the quality, language, release group, hardcoded-subs,
@@ -107,13 +103,13 @@ parse finishes instead of failing and the test catches it.
 `TestHostileMovieTitleMatchInAnySubparserFailsClosed` injects a catastrophic pattern into each of the title, quality, language
 and release group tables in turn and gets `match_timeout` with no value; a 4096-byte legitimate name parses (`TestMovieBounds...`) and
 4097 bytes, invalid UTF-8, an unsupported kind, a hashed release and a cancelled or expired context are structured errors with the
-zero value. The source's own generated-name tests (an MD5 chain, random 32- and 40-character hashes) are reproduced against
-`ParseTitle` (`TestHostileMovieTitleRejectsGeneratedHashNames`) because the corpus cannot record generated inputs. The source asserts
+zero value. Generated names (an MD5 chain, random 32- and 40-character hashes) are run against
+`ParseTitle` (`TestHostileMovieTitleRejectsGeneratedHashNames`) because the fixtures cannot record generated inputs. The fixtures assert
 no `ReleaseHash`, `ReleaseTitle` or `SimpleReleaseTitle`, so `TestMovieCorpusPublicParseTitleReleaseFields` fixes them by hand
 through the public `ParseTitle` (an anime hash, a `1280x720` name that has no hash, a non-ASCII title index), and the language
 member table is checked against an independent literal table in `TestLanguageVocabularyMatchesIndependentMemberTable`.
 
-Pattern guards. A pattern is not run on a text its own source shows it cannot match. `NewParser` reads each built-in pattern for
+Pattern guards. A pattern is not run on a text its own pattern text shows it cannot match. `NewParser` reads each built-in pattern for
 facts every match must satisfy: the fewest characters, the literal texts (with the word boundaries the pattern puts around them)
 and the adjacent character pairs, with what a character class matches asked of regexp2 itself; the guard of a pattern with a
 start anchor also names the start. A pattern without a usable fact has no guard, and a text that is not ASCII is always left to
@@ -123,11 +119,11 @@ start anchor, show that no further match exists. The guards are built with the t
 a pattern replaced after construction (the hostile tests do) has none.
 
 Measured limit (one dev-image run): a 4096-byte name whose bulk is a trailing dotted word parsed in about 18 ms. A name whose
-title, or whose German tag, is thousands of characters long exceeds the 50 ms match timeout in the source's unanchored
+title, or whose German tag, is thousands of characters long exceeds the 50 ms match timeout in the unanchored
 bracketed-alternative pattern (about 290 ms for 4000 characters when it runs without a timeout) or its German-remux quality
-pattern (about 700 ms) and fails closed with `match_timeout`; the source has no timeout and would return a result.
+pattern (about 700 ms) and fails closed with `match_timeout`; without a timeout it would return a result.
 
-Faithful-adapter decisions are listed in `docs/parity-matrix.md` (null results, the `isDir` directory form, the reversed-title
+The decisions are listed in `docs/parity-matrix.md` (null results, the `isDir` directory form, the reversed-title
 marker, the file extension helper, UTF-16 indexes, language members).
 
 ## Custom formats: compile, evaluate, batch
@@ -207,130 +203,53 @@ median 150.4 ms, p99 150.7 ms, max 150.7 ms. That is a measurement of one run, n
 scripts/dev-run.sh -- go test ./internal/parse -run '^TestTimeoutOvershootReport$' -count=1 -v
 ```
 
-## Corpus contract
+## Fixture contract
 
-Each corpus is JSONL: a `Header` (schema 1, app `series` or `movie`, source locator `env:BOXSET_REF_SERIES` or `env:BOXSET_REF_MOVIE`, commit, source paths, licence `GPL-3.0`, counts), then one `Case`
-per source test case with its file, method, entry (`TestCase#n`, `TestCaseSource:name#n`, `Test`), source line, upstream
-status, scope, arguments exactly as written and the asserted result properties. `expected["$input"]` holds the release names
-passed to the scoped entry point (`QualityParser.ParseQuality` for scope `quality`; `Parser.ParseMovieTitle`,
-`ReleaseGroupParser.ParseReleaseGroup` or `LanguageParser.ParseLanguages` for scope `title`; a `string` or a symbolic relative
-date); every other key is the asserted C# property path (for example `Quality`, `Quality.Resolution`, `Revision.Version`,
-`PrimaryMovieTitle`, `MovieTitles[1]`, `Languages.Count`, `Languages.First()`). Title cases add three reserved or derived keys:
-`$result` (an assertion on the entry point's own result, `null` for a rejected name), `<list>.Contain` (a membership assertion, the
-ordered array of expected members) and `$isDir` (the `isDir` argument of `ParseMovieTitle`, present only when true). Values are tagged `string|bool|int|decimal|enum|array|
-null|date`; an unknown tag, field or form rejects the file. Source paths, count keys and each case's `file` use the form `<area>/<file>`
-(`tests/`, `parser/`, `qualities/`, relative to `/ref/<side>`). One shared validator, used by both `Read` and `Marshal`, enforces
-the app's own locator, the licence exactly `GPL-3.0`, canonical paths in the header, the count keys and every case, every
-contained value (decimal text, enum type and member identifiers, a date template the materializer supports and an offset within
-±36500 days, recursively through arrays), and at most 32
-nesting levels in both directions (exactly 32 is admitted, 33 is not). Every `a`/`A` immediately before a case-insensitive `rr` inside a tagged
-string value is written as the JSON escape `\u0061`/`\u0041` (decoded values, input hashes and identities are unchanged), so fixture
-bytes carry no upstream project name. Caps: 32 MiB per file, 256 KiB per record, 32 nesting levels,
-streaming; oversize, partial (unterminated record or non-reconciling counts) or malformed input yields no usable case.
+Each fixture is JSONL, schema 2: a `Header` `{"schema":2,"app":"series"|"movie"}`, then one `Case` per asserted case with only
+`id` (`<app>:<NNNN>`, the 1-based zero-padded ordinal), `scope` (`quality` or `title`), `scopeOwner` (the entry point the case
+runs), `args` (the arguments exactly as written) and `expected` (the asserted result properties). `expected["$input"]` holds
+the release names passed to the scoped entry point (`QualityParser.ParseQuality` for scope `quality`; `Parser.ParseMovieTitle`,
+`ReleaseGroupParser.ParseReleaseGroup`, `LanguageParser.ParseLanguages` and `Parser.CleanMovieTitle` for movie scope `title`;
+`Parser.ParseTitle`, `Parser.ParseSeriesName`, `Parser.CleanSeriesTitle`, `ReleaseGroupParser.ParseReleaseGroup` and
+`LanguageParser.ParseLanguages` for series scope `title`; a `string` or a symbolic relative date); every other key is the
+asserted property path (for example `Quality`, `Quality.Resolution`, `Revision.Version`, `PrimaryMovieTitle`,
+`MovieTitles[1]`, `Languages.Count`, `Languages.First()`). Title cases add three reserved or derived keys: `$result` (an
+assertion on the entry point's own result, `null` for a rejected name), `<list>.Contain` (a membership assertion, the ordered
+array of expected members) and `$isDir` (the directory argument of the movie title parse, present only when true). Values are
+tagged `string|bool|int|decimal|enum|array|null|date`; an unknown tag, field or form rejects the file. One shared validator,
+used by both `Read` and `Marshal`, enforces schema 2, the app, unique non-empty ids, the scope (`quality` or `title`), a
+non-empty `scopeOwner`, every contained value (decimal text, enum type and member identifiers, a date template the
+materializer supports and an offset within ±36500 days, recursively through arrays), and at most 32 nesting levels in both
+directions (exactly 32 is admitted, 33 is not). Every `a`/`A` immediately before a case-insensitive `rr` inside a tagged
+string value is written as the JSON escape `\u0061`/`\u0041` (decoded values and ids are unchanged), so fixture bytes carry no
+upstream project name. Caps: 32 MiB per file, 256 KiB per record, 32 nesting levels, streaming; oversize, partial
+(unterminated record) or malformed input yields no usable case.
 
-Counts reconcile per file: `cases = enabled + disabled + out_of_scope`, plus the extractor's raw tallies under `source:` (test
-methods, `TestCase` attributes, `TestCaseSource` rows, plain `[Test]` methods when a file has any, setup methods, commented-out
-test forms). A commented-out test is counted, not extracted. Duplicate rows are kept and get distinct identities
-(`<app>:<file>:<method>:<input hash>:<ordinal>`); relative dates stay symbolic in identities and bytes and are materialized by
-`corpus.TimeContext` with local-calendar `AddDays` (never a 24-hour duration).
+The fixtures hold exactly the asserted cases: series 1522 (356 quality, 1166 title) and movie 836 (323 quality, 513 title), in
+a fixed order. Relative dates stay symbolic in the bytes and are materialized by `corpus.TimeContext` with local-calendar
+`AddDays` (never a 24-hour duration). The series fixtures hold the release group `Neutral` wherever a group name would name an
+upstream product; `CleanSeriesTitle` output is lower case, so a lower-case expectation is compared with `Neutral` lower-cased.
+`TestCorpusFull` locks the schema, the SHA-256 of both files, the per-scope and per-owner counts, the id ordinals, zero
+dispositions and that the committed bytes are the canonical `Marshal` encoding.
 
-Title scope (movie side). The extractor reads seven title fixtures (`ParserFixture`, `EditionParserFixture`,
-`LanguageParserFixture`, `CrapParserFixture`, `HashedReleaseFixture`, `ReleaseGroupParserFixture`, `UrlFixture`) and classifies
-each test method by the identifiers of its body: a method that asserts one of the three title entry points becomes scope
-`title`; every other method is retained as scope `out_of_scope` under its own entry point with its arguments, an empty `$input`
-and no assertion, and its body is never interpreted (`docs/parity-matrix.md` lists the owners and reasons). A method that names
-no known entry point rejects the extraction. The assertion forms are `Should().Be`, `Contain` and `BeNull`, `for` loops bounded
-by an already asserted count, indexers, `First()`, `.Id` on a language member, `using (new AssertionScope())` and `new[] {…}`
-arrays. The `Language` declaration is outside the delivered areas (`languages/` is study-only), so the members an assertion may
-name are those `parser/LanguageParser.cs` itself names; the ported sources (`Parser.cs`, `ReleaseGroupParser.cs`,
-`ParserCommon.cs`, `RegexReplace.cs`, `Model/ParsedMovieInfo.cs`) are recorded as attributed source paths with their hashes and
-are never interpreted.
+`testdata/parser/dispositions.json` has its own format version, 1, independent of the fixture schema: `{"schema":1,"dispositions":[]}`
+is read by `corpus.ReadDispositions`, which rejects any other version.
 
-Title scope (series side). The series extractor reads eighteen further title fixtures (`ParserFixture`,
-`SingleEpisodeParserFixture`, `MultiEpisodeParserFixture`, `MiniSeriesEpisodeParserFixture`, `SeasonParserFixture`,
-`SeasonTitleParserFixture`, `AbsoluteEpisodeNumberParserFixture`, `AnimeMetadataParserFixture`, `DailyEpisodeParserFixture`,
-`CrapParserFixture`, `HashedReleaseFixture`, `ReleaseGroupParserFixture`, `SubGroupParserFixture`,
-`UnicodeReleaseParserFixture`, `UrlFixture`, `SeriesTitleInfoFixture`, `IsPossibleSpecialEpisodeFixture` and
-`LanguageParserFixture`) and the normalization fixture `NormalizeSeriesTitleFixture`, whose `CleanSeriesTitle` cases (accent
-folding included: `Ríkið` cleans to `rikid`) are title cases of the helper. Methods of these fixtures that assert `ParseTitle`,
-`ParseSeriesName`, `CleanSeriesTitle`, `ParseReleaseGroup` or `ParseLanguages` are scope `title`; the others are retained out of
-scope. The reference tests name a release group after the two upstream products. The extractor replaces each case-insensitive
-match of that name, in every recorded series input, argument, expected string and date template and before an identity is hashed,
-by the fixed group `Neutral` (`neutralGroup` in `main.go`; the pattern is held base64 encoded so the repository carries neither
-name). The movie extraction is not substituted. `CleanSeriesTitle` output is lower case, so a substituted lower-case expectation is
-compared with `Neutral` lower-cased.
+### Add a case
 
-An unsupported source form (loops other than `foreach` and a counted `for`, other `using` statements, unknown class or method
-attributes, unsupported assertions, interpolated strings, properties, a lone UTF-16 surrogate, …) fails extraction with
-`extract: unsupported app=… file=… line=… col=… reason=…`; it is never skipped or relabelled, and no partial output is published.
-
-### Regenerate and verify
-
-The two reference repositories are located only by the host values `BOXSET_REF_SERIES` and `BOXSET_REF_MOVIE` (absolute paths of
-existing directories that hold the Git repositories of the series and movie references, each containing its pinned commit); no
-repository location is written into the repository.
+New cases are added by hand. Append the case to the fixture of its application with the next ordinal id (`<app>:<NNNN>`; an id
+is never reused or renumbered), and keep the file canonical: decode it with `corpus.ReadFile`, append the `corpus.Case`, and
+write the `corpus.Marshal` bytes. In the same change update the locked SHA-256 and the per-scope and per-owner counts in
+`internal/parse/corpus/corpus_full_test.go`, then run:
 
 ```sh
-scripts/dev-run.sh --ref --write testdata/parser -- sh -c 'exec go run ./internal/parse/corpus/extract -series /ref/series -movie /ref/movie -series-commit "$BOXSET_REF_SERIES_COMMIT" -movie-commit "$BOXSET_REF_MOVIE_COMMIT" -out testdata/parser'
-scripts/dev-run.sh -- go test ./internal/parse/corpus/... ./internal/parse -run '^(TestCorpus|TestExtract|TestQualityCorpus|TestQualityBounds|TestMovie|TestTitle)' -count=1 -v
+scripts/dev-run.sh -- go test ./internal/parse/corpus/... ./internal/parse -run '^(TestCorpus|TestQualityCorpus|TestQualityBounds|TestMovie|TestTitle)' -count=1 -v
 scripts/dev-run.sh -- scripts/parse-emulated.sh '^(TestQualityCorpus|TestMovieCorpus)$'   # arm64 and arm/v7 under QEMU user mode
 ```
 
-`--ref` reads reference text only as Git objects at the runner's pinned commits (`REFPINS` in `scripts/dev-run.sh`: series
-`57816c149d02f95543973fefb4780c4495f8121c`, movie `df2faa64c75e6081556d11232dc46523e7264ea1`); it never walks, copies or
-mounts a checkout directory, and the checkout's HEAD, index and working tree are never read. Both roots are validated, series
-first, before any Git or Docker call (an absolute path to an existing directory without control characters); each pin is then
-checked with a bounded (30 s) `git rev-parse --verify '<pin>^{commit}'` under a cleared environment whose discovery cannot
-leave the root, with no replace refs, no lazy fetch and no system configuration. After the container is created and before it
-starts, the host redactor's private `-ref-archive` mode lists the three upstream directories at the pin (`src/NzbDrone.Core.Test/ParserTests` as
-`/ref/<side>/tests`, `src/NzbDrone.Core/Parser` as `parser`, `src/NzbDrone.Core/Qualities` as `qualities`), validates the whole
-listing (regular blobs only, `.cs` names, at most 256 files and 256 directories per area, 2 MiB per file, 16 MiB per side)
-before reading any blob, and streams a deterministic archive of at most 18 MiB (the side plus its tar framing) into the container's six empty root-owned read-only directories
-with `docker cp -`. The runner checks the producer's status apart from the receiver's, reads `/ref/<side>` back from the
-unstarted container through the same 18 MiB cap, and hands the two checked pins to the child as `BOXSET_REF_SERIES_COMMIT` and
-`BOXSET_REF_MOVIE_COMMIT` (the only reference values the child receives; roots never enter the image, a log, a mount or the
-child). A failure exits 125 and prints only `dev-run: <reason> side=<series|movie>` (or `dev-run: export_changed`); never a path or
-Git text:
-
-| Reason | Recovery |
-| --- | --- |
-| `ref_unavailable` | The owner variable of that side is unset or empty: export `BOXSET_REF_SERIES`/`BOXSET_REF_MOVIE` as absolute paths. |
-| `ref_invalid` | The value is relative, not an existing directory or holds a control character; or, from the producer, the listing of the pinned tree breaks a source rule (a missing upstream directory, a link, submodule or non-`.cs` entry, a name outside the allowed alphabet, nesting over 32, an area over 256 files or directories, a file over 2 MiB or a side over 16 MiB). Fix the path or choose a repository that holds the pinned tree. |
-| `ref_commit_invalid` | The pinned commit is not a commit of that repository: `git` is missing from `PATH`, the root is not itself a Git repository root (a directory nested inside another repository does not count), the object is absent or not a commit, Git failed or exceeded 30 s, or Git refused the directory's ownership. |
-| `ref_copy_failed` | The producer or `docker cp` failed or timed out, the producer status or the receiver status was not 0 (even after a readable archive was really delivered), the readback is larger than the producer's 18 MiB archive cap, or the delivered `/ref/<side>` is not exactly files and directories under the three areas owned by 0/0 with modes 0444/0555 and at least one file per area. Check the repository, Git and Docker, then rerun. |
-| `export_changed` | With `--write testdata/parser` the stopped container's raw corpus file does not hash as the sanitized staged bytes (the redactor changed it, for example a value taken from a secret-named environment variable). Nothing was published; remove that text from the corpus source or the environment and rerun. |
-
-The extractor reads the delivered text through `os.Root` (no path or link leaves `/ref/<side>`), keeps at most 2 MiB + 1 actual
-bytes per file (a larger stream is never consumed beyond that; it rejects the file with its location), and bounds its interpreter before each step or append: 4,194,304
-steps, 65,536 observations per side and the 32 MiB corpus cap on expanded bytes. Converting a recorded value (an argument, an
-assertion or an entry-point input) charges every node to that same step and byte budget and checks the 14 array levels the
-32-level record admits before the node is built, so a compact shared array that expands exponentially is rejected with its
-location, not built. A date value the corpus cannot write or read (an unsupported format such as `ToString("HH")`, an offset beyond
-±36500 days or one that overflows) also rejects with its location, before either corpus is written. C# string escapes decode UTF-16 surrogate pairs
-faithfully and reject a lone surrogate; an unknown class or method attribute rejects with its location while `Ignore`/`Explicit`
-are retained. The extractor opens each corpus
-with truncate, checks every write and close, and prints `extract: write_failed file=<name>` (exit 1) on any write error; the
-runner publishes the two names only when the child exited 0, from the stopped container, through the redactor, within the 32 MiB
-cap, never from a link or non-regular entry, and only when each raw file hashes as its sanitized staged bytes. Repeated
-extraction at fixed inputs reproduces identical bytes; the extractor prints
-each source file's byte count and SHA-256 and each corpus's counts, size and SHA-256 for the evidence record.
-
-Proof status. Runtime checks in this report are the parser, corpus and extractor unit tests, the producer's `TestRefArchive` tests, the
-whole-module linter and `gofmt`, and the runner smoke's synthetic-repository controls (pinned objects against later HEAD,
-staged, working-tree and untracked bytes, source-rule rejections, producer failure and receiver failure after a real delivery,
-the 18 MiB readback bound, corpus export
-identity). NOT-RUN here: extraction from the real reference repositories, which needs the two owner locations and is owned by the
-root verification; until it runs, the
-committed corpora are the retained extraction (their per-file hashes are recorded in the feature evidence), and no source
-success is claimed. The title section of `movie.jsonl` was produced by running this extractor over a Git-object extraction of
-the movie reference's `parser/`, `tests/` and `qualities/` areas at the pinned commit (the same three areas `--ref` delivers, in
-a scratch container with no network and no mount of any checkout), not by `--ref`; the quality records are byte-identical to
-the earlier extraction, repeated extraction is byte-identical, and `series.jsonl` was regenerated the same way over the Git-object
-extraction of the series reference's three areas at its pinned commit (run on the host over a scratch copy, not by `--ref`). A Go consumer run counts for the same immutable runtime payload as an admission run only by the payload
+A Go consumer run counts for the same immutable runtime payload as an admission run only by the payload
 comparison in `docs/spikes/s5-version-admission.md` (ordered layers, `Config` SHA-256, platform, `inputs=<sha>`), never by the image ID.
 
-`TestCorpusFull` pins the exact per-file inventories and source commits; changing a reference commit means re-extracting and
-updating that table together.
 
 ## Production latency benchmark
 
@@ -339,7 +258,7 @@ budgets: pooled p50 at most 100000 ns and pooled p99 at most 1000000 ns (nearest
 comparable earlier run is given with `-base`, no more than 10% regression of either. Without a comparable base the budgets are an
 absolute baseline only. No ARM latency claim is made; `GOARCH` other than `amd64` is INVALID.
 
-Measuring (`-rounds 30 -seed 1 -out DIR`, built `CGO_ENABLED=0`) loads every enabled title case of both corpora through the corpus
+Measuring (`-rounds 30 -seed 1 -out DIR`, built `CGO_ENABLED=0`) loads every title case of both fixtures through the corpus
 reader and `TimeContext.Materialize`, constructs the parser once (reported as `compile_ns`, never part of a sample), runs one
 discarded warmup pass, then 30 rounds, each every materialized name once in a seeded shuffle. Each sample is one `ParseTitle` call
 including validation, quality, language and release group work and the budget checks. It writes exactly `DIR/samples.jsonl`,

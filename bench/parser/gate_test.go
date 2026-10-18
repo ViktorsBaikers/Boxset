@@ -30,7 +30,7 @@ func testManifest(t *testing.T) (path string, content []byte) {
 }
 
 // wantItems derives the measured inputs from the corpus files themselves, apart from
-// the producer: every enabled title case of both corpora, series first, in file order,
+// the producer: every title case of both corpora, series first, in file order,
 // materialized for the local day startDate names.
 func wantItems(t *testing.T, startDate string) ([]item, int) {
 	t.Helper()
@@ -51,7 +51,7 @@ func wantItems(t *testing.T, startDate string) ([]item, int) {
 			t.Fatal(err)
 		}
 		for _, cs := range c.Cases {
-			if cs.Scope != corpus.ScopeTitle || !cs.UpstreamEnabled {
+			if cs.Scope != corpus.ScopeTitle {
 				continue
 			}
 			names, err := cs.Inputs(tc)
@@ -65,13 +65,13 @@ func wantItems(t *testing.T, startDate string) ([]item, int) {
 		}
 	}
 	if len(want) == 0 || cases == 0 {
-		t.Fatal("the corpora hold no enabled title case")
+		t.Fatal("the corpora hold no title case")
 	}
 	return want, cases
 }
 
 // TestBenchmarkCorpus: the production benchmark over the real corpora, through the
-// same reader and materializer the corpus tests use, reaches every enabled title
+// same reader and materializer the corpus tests use, reaches every title
 // case's materialized names in 30 deterministically shuffled rounds after a
 // discarded warmup, writes exactly samples.jsonl under -out, and a write error
 // there is exit 1 with the fixed message and no success.
@@ -381,7 +381,7 @@ func TestBenchmarkRejectsTimedCallsThatDoNotRunTheWarmupsParse(t *testing.T) {
 // TestParseTitleClockReadsOfAGuardedParse freezes the clock-read count of one public
 // ParseTitle call as a literal, so the count is not the candidate's own. The budget
 // checks before and after each pattern, and a pattern the guard rules out is skipped
-// with its checks kept. wantReads was counted once from the reference parse of this
+// with its checks kept. wantReads was counted once from a measured parse of this
 // title and is not derived here: a guard that dropped a check on its skip path lowers
 // the count, which a sweep bounded by the candidate's own count cannot see.
 func TestParseTitleClockReadsOfAGuardedParse(t *testing.T) {
