@@ -589,15 +589,39 @@ bench_topology() {
 # read. Kernel threads (no address space), threads that exited while being read and the scanner
 # itself (this function's own shell and everything below it) are not counted. The enumeration is
 # complete or the call fails: the list of threads goes through a scratch file, the status of
-# `find` is kept, and its diagnostics may only be "No such file or directory" (a task that vanished
-# while it was walked); a timeout, any other diagnostic, a thread that is still there but cannot be
-# read, or a read that ends early fails the observation (nothing is counted from it).
+# `find` is kept, and a timeout, an unreadable live status file, or a read that ends early fails
+# the observation (nothing is counted from it). A path that is already gone is a vanished task,
+# whatever word find used. A sibling file this walk does not read (mem, fdinfo, and the rest) may
+# return EINVAL while its status file is fine, so that diagnostic is not a failed read.
+# bench_diag_ok LINE: status 0 when LINE does not spoil the enumeration.
+bench_diag_ok() {
+	_ln=$1
+	case $_ln in
+	*"No such file or directory") return 0 ;;
+	esac
+	_path=$(printf '%s\n' "$_ln" | sed -n "s/^\\([^ ]*\\/\\)\\{0,1\\}find: [‘']\\(.*\\)[’']: .*/\\2/p")
+	[ -n "$_path" ] || return 1
+	_kind=$(printf '%s\n' "$_path" | sed -n \
+		-e 's#^/proc/[0-9][0-9]*/task/[0-9][0-9]*/status$#status#p' \
+		-e 's#^/proc/[0-9][0-9]*$#ancestor#p' \
+		-e 's#^/proc/[0-9][0-9]*/task$#ancestor#p' \
+		-e 's#^/proc/[0-9][0-9]*/task/[0-9][0-9]*$#ancestor#p')
+	case $_kind in
+	status | ancestor)
+		[ -e "$_path" ] || [ -L "$_path" ] || return 0
+		return 1
+		;;
+	esac
+	return 0
+}
 bench_overlap() {
 	timeout 30 find /proc -mindepth 4 -maxdepth 4 -path '/proc/[0-9]*/task/[0-9]*/status' -print >"$T/f/tasks" 2>"$T/f/terr"
 	_frc=$?
 	case $_frc in 0 | 1) ;; *) return 1 ;; esac
 	[ "$_frc" = 0 ] || [ -s "$T/f/terr" ] || return 1
-	[ "$(grep -c -v -E '^([^ ]*/)?find: .*: No such file or directory$' "$T/f/terr")" = 0 ] || return 1
+	while IFS= read -r _ln; do
+		bench_diag_ok "$_ln" || return 1
+	done <"$T/f/terr"
 	_ovo=$(awk -v set="$BENCHLIST" -v sibs="$TOPO_SIBLIST" -v cid="$CID" -v cgroot=/sys/fs/cgroup '
 function exists(path) { return system("test -e \x27" path "\x27") == 0 }
 # inlist: whether CPU c is in a CPU list such as 0-3,8.

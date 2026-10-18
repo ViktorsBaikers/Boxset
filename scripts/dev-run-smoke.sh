@@ -1074,6 +1074,26 @@ if [ "${1:-}" = /proc ]; then
 		"$DR_REAL_FIND" "$@" 2>/dev/null
 		exit 1
 		;;
+	diag_status)
+		"$DR_REAL_FIND" "$@" 2>/dev/null
+		echo "find: '/proc/$DR_LIVEPID/task/$DR_LIVEPID/status': Input/output error" >&2
+		exit 1
+		;;
+	diag_sibling)
+		"$DR_REAL_FIND" "$@" 2>/dev/null
+		echo "find: '/proc/$DR_LIVEPID/task/$DR_LIVEPID/mem': Invalid argument" >&2
+		exit 1
+		;;
+	diag_gone)
+		"$DR_REAL_FIND" "$@" 2>/dev/null
+		echo "find: '/proc/99999999/task/99999999/status': Input/output error" >&2
+		exit 1
+		;;
+	diag_text)
+		"$DR_REAL_FIND" "$@" 2>/dev/null
+		echo "find: unexpected diagnostic without a quoted path" >&2
+		exit 1
+		;;
 	esac
 fi
 if [ -n "${DR_CFG_FAULT:-}" ] && [ "${1:-}" = "$DR_CFG_FAULT" ]; then
@@ -1131,7 +1151,7 @@ fi
 exec "$DR_REAL_DOCKER" "$@"
 EOF
 	chmod 0755 "$S/bshim/date" "$S/bshim/find" "$S/bshim/docker" || return 1
-	BE_SHIM="PATH=$S/bshim:$PATH DR_REAL_DATE=$(command -v date) DR_REAL_FIND=$(command -v find) DR_REAL_DOCKER=$(command -v docker) DR_DATE_COUNT=$S/date.count DR_FIND_COUNT=$S/find.count DR_DIRTASK=$S/dirtask"
+	BE_SHIM="PATH=$S/bshim:$PATH DR_REAL_DATE=$(command -v date) DR_REAL_FIND=$(command -v find) DR_REAL_DOCKER=$(command -v docker) DR_DATE_COUNT=$S/date.count DR_FIND_COUNT=$S/find.count DR_DIRTASK=$S/dirtask DR_LIVEPID=$$"
 }
 # be_try CFG WORDS SLEEP: one --bench run of the smoke's own (a fresh run name, a child that writes its
 # samples and stays SLEEP seconds) with the shim words WORDS; sets BE_RUN and RC.
@@ -1180,6 +1200,21 @@ be_d() {
 		need 'published' grep -Fxq "DEV-RUN-BENCH-PUBLISHED run=$BE_RUN files=4" "$S/out" &&
 		need 'four files' [ "$(cd "$_r/$BE_RUN" && find . -type f | wc -l | tr -d ' ')" = 4 ] || return 1
 	BE_N=$((BE_N + 1))
+	# find diagnostics are classified, not accepted or rejected wholesale: a numeric status path that exists for
+	# the whole run (this script's own pid, any wording but "No such file or directory") and a line that is no
+	# quoted-path diagnostic fail closed; a sibling file (mem) and a status path that does not exist, whatever the
+	# wording, publish.
+	be_try "$_cfg" "DR_FIND_MODE=diag_status" 1
+	be_closed bench_evidence_failed || return 1
+	be_try "$_cfg" "DR_FIND_MODE=diag_text" 1
+	be_closed bench_evidence_failed || return 1
+	for _m in diag_sibling diag_gone; do
+		be_try "$_cfg" "DR_FIND_MODE=$_m" 1
+		need "$_m is not a failed read" [ "$RC" = 0 ] &&
+			need "$_m published" grep -Fxq "DEV-RUN-BENCH-PUBLISHED run=$BE_RUN files=4" "$S/out" &&
+			need "$_m four files" [ "$(cd "$_r/$BE_RUN" && find . -type f | wc -l | tr -d ' ')" = 4 ] || return 1
+		BE_N=$((BE_N + 1))
+	done
 	# A /config that gains an entry after the child ran is seen by the after record, not copied from before.
 	mkdir "$S/benchcfg2" || return 1
 	be_try "$S/benchcfg2" "DR_CFG_TOUCH=$S/benchcfg2" 1
