@@ -46,7 +46,7 @@ The language entry point asserts `$result.Contain` and `First().Id`. The consume
 code table of `vocab.go`, compares a null string with the empty text, and rejects any other property path, entry point or
 enum member.
 
-Generated hashed names (an MD5 chain and random 32- and 40-character names) have no recordable input; the hostile tests
+Generated hashed names (a SHA-256 chain and random 32- and 40-character names) have no recordable input; the hostile tests
 (`TestHostileMovieTitleRejectsGeneratedHashNames`, `TestHostileSeriesTitleRejectsGeneratedHashNames`) run the same generators
 (100 chained hashes, 2 x 500 random names) against `ParseTitle`.
 

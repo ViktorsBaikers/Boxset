@@ -52,6 +52,7 @@ Validation runs before any pattern is matched; a rejected input never reaches th
 | --- | --- | --- |
 | name longer than 4096 UTF-8 bytes (4096 admitted) | `release_name_too_long` | `limit_bytes`, `observed_bytes` |
 | name is not valid UTF-8 | `release_name_invalid_utf8` | `offset` |
+| a non-ASCII letter remains after accent folding (`CleanMovieTitle`, `CleanSeriesTitle`); the code point is numeric and the text does not contain the name | `accent_unhandled` | `codepoint` |
 | kind is neither `KindMovie` nor `KindSeries` (`ParseQuality`, `ParseTitle`) | `kind_unsupported` | `kind` |
 | one 250 ms elapsed-work budget exhausted (also after a late successful match, and for a blank or unmatched name: the budget and context are checked once more before any usable value is returned) | `release_work_budget_exhausted` | `limit_ms` |
 | regexp2 match timeout (fixed 50 ms) | `match_timeout` | `limit_ms` |
@@ -103,7 +104,7 @@ parse finishes instead of failing and the test catches it.
 `TestHostileMovieTitleMatchInAnySubparserFailsClosed` injects a catastrophic pattern into each of the title, quality, language
 and release group tables in turn and gets `match_timeout` with no value; a 4096-byte legitimate name parses (`TestMovieBounds...`) and
 4097 bytes, invalid UTF-8, an unsupported kind, a hashed release and a cancelled or expired context are structured errors with the
-zero value. Generated names (an MD5 chain, random 32- and 40-character hashes) are run against
+zero value. Generated names (a SHA-256 chain, random 32- and 40-character hashes) are run against
 `ParseTitle` (`TestHostileMovieTitleRejectsGeneratedHashNames`) because the fixtures cannot record generated inputs. The fixtures assert
 no `ReleaseHash`, `ReleaseTitle` or `SimpleReleaseTitle`, so `TestMovieCorpusPublicParseTitleReleaseFields` fixes them by hand
 through the public `ParseTitle` (an anime hash, a `1280x720` name that has no hash, a non-ASCII title index), and the language

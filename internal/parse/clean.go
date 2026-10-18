@@ -3,7 +3,6 @@
 package parse
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 	"unicode"
@@ -16,6 +15,9 @@ import (
 // otherwise the title is lower-cased, German umlauts are spelled out and
 // accents are removed.
 func (p *Parser) CleanMovieTitle(title string) (string, error) {
+	if err := validateName(title); err != nil {
+		return "", err
+	}
 	return cleanMovieTitle(title)
 }
 
@@ -24,6 +26,9 @@ func (p *Parser) CleanMovieTitle(title string) (string, error) {
 // otherwise a percent sign after digits reads "percent", and the title is
 // lower-cased and stripped of accents.
 func (p *Parser) CleanSeriesTitle(title string) (string, error) {
+	if err := validateName(title); err != nil {
+		return "", err
+	}
 	return cleanSeriesTitle(title)
 }
 
@@ -76,7 +81,7 @@ func removeAccent(s string) (string, error) {
 	}, accentFold.Replace(s))
 	for _, r := range s {
 		if r > unicode.MaxASCII {
-			return "", fmt.Errorf("RemoveAccent(%q): %q is outside the Latin letters whose decomposition is handled", s, r)
+			return "", newReasonError(codeAccentUnhandled, map[string]int64{"codepoint": int64(r)})
 		}
 	}
 	return s, nil

@@ -54,6 +54,7 @@ const (
 	codeCancelled              = "evaluation_cancelled"
 	codeEvaluatorBusy          = "evaluator_busy"
 	codeTitleUnrecognized      = "title_unrecognized"
+	codeAccentUnhandled        = "accent_unhandled"
 )
 
 // validateName rejects a release name that is longer than maxNameBytes or is

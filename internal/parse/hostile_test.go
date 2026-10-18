@@ -2,7 +2,7 @@ package parse
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"math/rand/v2"
@@ -419,7 +419,89 @@ func TestMovieTitleDirectoryFormIsTheOnlyReaderOfAYearFirstName(t *testing.T) {
 	wantReason(t, err, codeTitleUnrecognized, map[string]int64{})
 }
 
-// Generated names (an MD5 chain and random alphanumeric hashes) have
+// The folder entry runs the same single release budget: a clock that expires on
+// the last read of a year-first folder parse leaves no usable title.
+func TestMovieTitleDirectoryFormExpiryFailsClosed(t *testing.T) {
+	const dir = "(1995) Movie Name"
+	ctx := context.Background()
+	run := func(at int) (*blipClock, ParsedTitle, error) {
+		clk := &blipClock{base: time.Unix(1000, 0), at: at}
+		pt, err := newTestParser(t, clk.Now).ParseDirTitle(ctx, dir, KindMovie)
+		return clk, pt, err
+	}
+	probe, _, err := run(0)
+	if err != nil {
+		t.Fatalf("ParseDirTitle: %v", err)
+	}
+	reads := probe.Calls()
+	clk, got, err := run(reads)
+	var re *ReasonError
+	if !errors.As(err, &re) || (re.Reason.Code != codeWorkBudgetExhausted && re.Reason.Code != codeDeadlineExceeded) {
+		t.Fatalf("expired at read %d of %d: err = %v, want %s or %s", reads, reads, err, codeWorkBudgetExhausted, codeDeadlineExceeded)
+	}
+	if got != (ParsedTitle{}) {
+		t.Errorf("an expired folder parse must carry no usable value: %+v", got)
+	}
+	if clk.Calls() != reads {
+		t.Errorf("clock reads = %d, want %d", clk.Calls(), reads)
+	}
+}
+
+// The public clean methods are bounded like every other entry: an over-long or
+// invalid UTF-8 name is rejected before the blank fast path.
+func TestCleanTitleBoundsFailClosed(t *testing.T) {
+	p := newTestParser(t, nil)
+	for name, clean := range map[string]func(string) (string, error){
+		"movie":  p.CleanMovieTitle,
+		"series": p.CleanSeriesTitle,
+	} {
+		t.Run(name, func(t *testing.T) {
+			atLimit := strings.Repeat(" ", maxNameBytes)
+			if got, err := clean(atLimit); err != nil || got != atLimit {
+				t.Errorf("%d spaces = %d bytes, %v; want unchanged, nil", maxNameBytes, len(got), err)
+			}
+			got, err := clean(strings.Repeat(" ", maxNameBytes+1))
+			wantReason(t, err, codeReleaseNameTooLong, map[string]int64{"limit_bytes": maxNameBytes, "observed_bytes": maxNameBytes + 1})
+			if got != "" {
+				t.Errorf("over-long name returned %d bytes", len(got))
+			}
+			got, err = clean("bad\xffname")
+			wantReason(t, err, codeReleaseNameInvalidUTF8, map[string]int64{"offset": 3})
+			if got != "" {
+				t.Errorf("invalid UTF-8 name returned %q", got)
+			}
+		})
+	}
+}
+
+// An unhandled letter is a structured reason. The error text does not contain the name.
+func TestCleanUnhandledAccentDoesNotEchoTheName(t *testing.T) {
+	p := newTestParser(t, nil)
+	for name, clean := range map[string]func(string) (string, error){
+		"movie":  p.CleanMovieTitle,
+		"series": p.CleanSeriesTitle,
+	} {
+		t.Run(name, func(t *testing.T) {
+			const in = "Bjørn"
+			got, err := clean(in)
+			var re *ReasonError
+			if !errors.As(err, &re) || re.Reason.Code != codeAccentUnhandled {
+				t.Fatalf("error = %v, want *ReasonError %s", err, codeAccentUnhandled)
+			}
+			if _, ok := re.Reason.Params["codepoint"]; !ok || len(re.Reason.Params) != 1 {
+				t.Fatalf("params = %v, want one codepoint", re.Reason.Params)
+			}
+			if got != "" {
+				t.Errorf("returned %q", got)
+			}
+			if strings.Contains(err.Error(), in) || strings.Contains(err.Error(), "ø") {
+				t.Errorf("error echoes the name: %s", err)
+			}
+		})
+	}
+}
+
+// Generated names (a SHA-256 chain and random alphanumeric hashes) have
 // no fixture input, so they are run here: no such name is a title.
 func TestHostileMovieTitleRejectsGeneratedHashNames(t *testing.T) {
 	p := newTestParser(t, nil)
@@ -432,7 +514,7 @@ func TestHostileMovieTitleRejectsGeneratedHashNames(t *testing.T) {
 	}
 	hash := "CRAPPY TEST SEED"
 	for range 100 {
-		sum := md5.Sum([]byte(hash))
+		sum := sha256.Sum256([]byte(hash))
 		hash = strings.ToUpper(hex.EncodeToString(sum[:]))
 		check(hash)
 	}
@@ -615,7 +697,7 @@ func TestBudgetSeriesTitleContextCancellationAndDeadlineFailClosed(t *testing.T)
 	}
 }
 
-// Generated names (an MD5 chain and random alphanumeric hashes)
+// Generated names (a SHA-256 chain and random alphanumeric hashes)
 // have no fixture input, so they are run here: no such name is a
 // series title.
 func TestHostileSeriesTitleRejectsGeneratedHashNames(t *testing.T) {
@@ -629,7 +711,7 @@ func TestHostileSeriesTitleRejectsGeneratedHashNames(t *testing.T) {
 	}
 	hash := "CRAPPY TEST SEED"
 	for range 100 {
-		sum := md5.Sum([]byte(hash))
+		sum := sha256.Sum256([]byte(hash))
 		hash = strings.ToUpper(hex.EncodeToString(sum[:]))
 		check(hash)
 	}
