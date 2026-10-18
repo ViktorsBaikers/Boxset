@@ -13,6 +13,10 @@
 !bench
 !testdata
 !docs/spikes/*.md
+!docs/spikes/data/bench-*/samples/samples.jsonl
+!docs/spikes/data/bench-*/before.json
+!docs/spikes/data/bench-*/during.json
+!docs/spikes/data/bench-*/after.json
 !scripts/*.sh
 scripts/dev-run.sh
 scripts/dev-run-smoke.sh

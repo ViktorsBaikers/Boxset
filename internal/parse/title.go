@@ -164,6 +164,7 @@ func (p *Parser) parseTitle(ctx context.Context, name string, kind Kind, isDir b
 		return ParsedTitle{}, err
 	}
 	b := newBudget(ctx, p.now)
+	b.guards = p.guards
 	if err := b.check(); err != nil {
 		return ParsedTitle{}, err
 	}
@@ -195,10 +196,18 @@ func (p *Parser) parseTitle(ctx context.Context, name string, kind Kind, isDir b
 // ---- budgeted replacement and split of the source's Regex API -----------------
 
 // replace is Regex.Replace with a replacement pattern. The budget is checked
-// before and after, so a late success after expiry is an error, not a pass.
+// before and after, so a late success after expiry is an error, not a pass. A
+// pattern whose guard rules the text out replaces nothing and is not run; the
+// budget is still checked twice.
 func (b *budget) replace(re *regexp2.Regexp, s, replacement string) (string, error) {
 	if err := b.check(); err != nil {
 		return "", err
+	}
+	if b.ruledOut(re, s) {
+		if err := b.check(); err != nil {
+			return "", err
+		}
+		return s, nil
 	}
 	out, err := re.Replace(s, replacement, -1, -1)
 	if err != nil {
@@ -216,6 +225,12 @@ func (b *budget) replace(re *regexp2.Regexp, s, replacement string) (string, err
 func (b *budget) replaceFunc(re *regexp2.Regexp, s string, evalErr *error, fn func(regexp2.Match) string) (string, error) {
 	if err := b.check(); err != nil {
 		return "", err
+	}
+	if b.ruledOut(re, s) {
+		if err := b.check(); err != nil {
+			return "", err
+		}
+		return s, nil
 	}
 	out, err := re.ReplaceFunc(s, fn, -1, -1)
 	if *evalErr != nil {
@@ -240,7 +255,7 @@ func (b *budget) split(re *regexp2.Regexp, s string) ([]string, error) {
 		at, n := m.ByteRange()
 		parts = append(parts, s[prev:at])
 		prev = at + n
-		m, err = b.next(re, m)
+		m, err = b.next(re, s, m)
 	}
 	if err != nil {
 		return nil, err

@@ -177,7 +177,11 @@ COPY --from=redact-build /redact /redact
 # their manifests/locks and never regenerate a lock. /src and the existing
 # ancestors of the issue-draft root stay root:root 1777, so the child can
 # create its own entries there but cannot replace a root-owned one; everything
-# else under /src belongs to the child. `/capture` (1000:1000, 0700) is the
+# else under /src belongs to the child, except the benchmark records the
+# context may carry under docs/spikes/data (a run's before/during/after.json and
+# samples/samples.jsonl): those files and every directory below data are
+# root:root read-only (0444/0555), so the child can overwrite, unlink or replace
+# none of them. `/capture` (1000:1000, 0700) is the
 # child's own private browser-capture directory, exported only after the
 # container stopped; it is never mounted.
 FROM dev AS work
@@ -202,6 +206,11 @@ RUN set -eu; \
     for d in /src /src/testdata /src/docs /src/docs/spikes /src/docs/spikes/data; do \
       if [ -d "$d" ]; then chown root:root "$d"; chmod 1777 "$d"; fi; \
     done; \
+    if [ -d /src/docs/spikes/data ]; then \
+      find /src/docs/spikes/data -mindepth 1 -exec chown -h root:root {} +; \
+      find /src/docs/spikes/data -mindepth 1 -type d -exec chmod 0555 {} +; \
+      find /src/docs/spikes/data -mindepth 1 -type f -exec chmod 0444 {} +; \
+    fi; \
     install -d -o 1000 -g 1000 -m 0700 /capture; \
     find /usr /etc -xtype l -delete; \
     find /usr /etc ! -type l -perm /022 -exec chmod go-w {} +

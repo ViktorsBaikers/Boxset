@@ -1,6 +1,6 @@
 #!/bin/sh
 # Small host-only runner/sentinel check (never part of the image context):
-#   scripts/dev-run-smoke.sh [--tools-failure]
+#   scripts/dev-run-smoke.sh [--tools-failure|--benchmark-evidence]
 # Runs the real scripts/dev-run.sh and Docker from a unique, ownership-checked
 # scratch snapshot of the admitted project inputs (explicit roots, with the final
 # nested secret and cache exclusions of .dockerignore applied before archiving,
@@ -22,6 +22,21 @@
 # a failed host sink write (observed after a validator that exited 0) and a readable diagnostic log
 # whose last 40 lines are far over both the 6000-byte draft cap and a pipe buffer (the capped draft
 # is still written); only then `S5-FAILURE-PROOF-PASS draft=retained downstream=0` prints.
+# `--benchmark-evidence` instead runs the benchmark evidence controls from the same scratch, with a
+# synthetic one-core cpuset and a synthetic empty config directory of its own (never the owner's
+# reservation) and nothing published into the repository: the real runner's `--bench` run of a child
+# that tries to overwrite, unlink and replace the imported records of an earlier run and writes the
+# benchmark package's synthetic control samples, then, as the next runner invocations from images
+# refreshed with the published records, the final judge over the real host-written records (INVALID: one
+# core), a run absent from the image, missing, hostile, oversized, after-state-swapped, identity-
+# mismatched, link and overlapping records (each INVALID, exit 3) and, with independently valid
+# synthetic records beside the same samples, PASS. `BENCH-EVIDENCE-PASS controls=N` prints only when all hold.
+# Before those, eight controls on private sysfs trees prove the runner's backing-disk NVMe check (md slaves,
+# a rotational member, ATA, a network transport, a lone disk, an empty slave list, a disk without a
+# rotational flag, a disk whose device link dangles), and two short real --bench publications, each in its own
+# mount namespace with a fixture bound over /sys and a df shim naming the scratch config an ext4 md0, prove the
+# unmodified runner passes the result to every stage record (the accepting md true, one with a rotational member
+# false); the scratch runner is then pointed at the first tree, as a scratch config directory has no disk source of its own.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -30,15 +45,18 @@ MODE=checks
 case ${1:-} in
 '') ;;
 --tools-failure) MODE=tools-failure ;;
+--benchmark-evidence) MODE=benchmark-evidence ;;
 *)
-	echo 'usage: scripts/dev-run-smoke.sh [--tools-failure]' >&2
+	echo 'usage: scripts/dev-run-smoke.sh [--tools-failure|--benchmark-evidence]' >&2
 	exit 2
 	;;
 esac
 [ $# -le 1 ] || {
-	echo 'usage: scripts/dev-run-smoke.sh [--tools-failure]' >&2
+	echo 'usage: scripts/dev-run-smoke.sh [--tools-failure|--benchmark-evidence]' >&2
 	exit 2
 }
+# No owner benchmark value is ever read here: the checks give the runner their own synthetic ones.
+unset BOXSET_BENCH_CPUSET BOXSET_BENCH_CONFIG
 
 { [ -f scripts/dev-run.sh ] && [ -f deploy/dev/Dockerfile ] && [ -f .dockerignore ]; } || {
 	echo 'dev-run-smoke: run from the repository root' >&2
@@ -427,6 +445,20 @@ r1_one() {
 	(cd "$S/repo" && PATH=$S/empty exec /bin/sh scripts/dev-run.sh "$@") </dev/null >"$S/out" 2>&1
 	[ $? = 125 ] && grep -qx "dev-run: $_w" "$S/out"
 }
+# r1_bench WORD CFG ARGS...: a `--bench` rejection with BOXSET_BENCH_CONFIG set to CFG (`-` leaves it
+# unset), whatever the owner exported: 125 and the fixed word before Docker (no PATH).
+r1_bench() {
+	_w=$1
+	_cf=$2
+	shift 2
+	(
+		cd "$S/repo" || exit 2
+		if [ "$_cf" = - ]; then unset BOXSET_BENCH_CONFIG; else BOXSET_BENCH_CONFIG=$_cf; export BOXSET_BENCH_CONFIG; fi
+		PATH=$S/empty exec /bin/sh scripts/dev-run.sh "$@"
+	) </dev/null >"$S/out" 2>&1
+	[ $? = 125 ] && grep -qx "dev-run: $_w" "$S/out"
+}
+BRUN=docs/spikes/data/bench-20260101T000000Z
 r1() {
 	r1_one usage true &&
 		r1_one timeout_invalid --timeout 0 -- true &&
@@ -436,7 +468,24 @@ r1() {
 		r1_one capture_destination_invalid --capture d -- true &&
 		r1_one capture_destination_invalid --capture .devrites/work/Bad/screenshots-20260101T000000Z -- true &&
 		r1_one capture_flag_invalid --capture .devrites/work/zz/screenshots-20260101T000000Z --bench 1 -- true &&
-		r1_one bench_unavailable --bench 1 -- true &&
+		r1_one usage --bench 1 --bench 2 -- true &&
+		r1_one write_path_invalid --write "$BRUN/samples" -- true &&
+		r1_bench 'bench_invalid side=write' - --bench 1 -- true &&
+		r1_bench 'bench_invalid side=cpuset' "$S/empty" --bench 3-1 --write "$BRUN/samples" -- true &&
+		r1_bench 'bench_invalid side=cpuset' "$S/empty" --bench 01 --write "$BRUN/samples" -- true &&
+		r1_bench 'bench_invalid side=cpuset' "$S/empty" --bench '1,,2' --write "$BRUN/samples" -- true &&
+		r1_bench 'bench_invalid side=samples' "$S/empty" --bench 1 --write docs/spikes/issue-drafts -- true &&
+		r1_bench 'bench_invalid side=samples' "$S/empty" --bench 1 --write "$BRUN/other" -- true &&
+		r1_bench 'bench_invalid side=samples' "$S/empty" --bench 1 --write docs/spikes/data/bench-20260101T000000/samples -- true &&
+		r1_bench 'bench_unavailable side=config' - --bench 1 --write "$BRUN/samples" -- true &&
+		r1_bench 'bench_unavailable side=config' '' --bench 1 --write "$BRUN/samples" -- true &&
+		r1_bench 'bench_invalid side=config' relative/dir --bench 1 --write "$BRUN/samples" -- true &&
+		r1_bench 'bench_invalid side=config' "$S/repo/go.mod" --bench 1 --write "$BRUN/samples" -- true &&
+		r1_bench 'bench_invalid side=config' "$S/empty/" --bench 1 --write "$BRUN/samples" -- true &&
+		r1_bench 'bench_invalid side=config' "$S/no such dir" --bench 1 --write "$BRUN/samples" -- true &&
+		mkdir -p "$S/repo/$BRUN" &&
+		r1_bench 'bench_invalid side=samples' "$S/empty" --bench 1 --write "$BRUN/samples" -- true &&
+		rmdir "$S/repo/$BRUN" "$S/repo/docs/spikes/data" &&
 		mkdir -p "$S/repo/.devrites/work/zz/screenshots-20260101T000000Z" &&
 		printf prior >"$S/repo/.devrites/work/zz/screenshots-20260101T000000Z/marker" &&
 		r1_one capture_destination_exists --capture .devrites/work/zz/screenshots-20260101T000000Z -- true &&
@@ -1021,6 +1070,821 @@ tf_big() {
 		echo "# tf_big: tail held >= $_tail bytes in whole numbered lines from OVERCAP-$_i, section capped at 6000 bytes, draft $(wc -c <"$_d" | tr -d ' ') bytes written"
 }
 
+# ---- --benchmark-evidence ---------------------------------------------------------------------
+# Everything here is synthetic and stays in the scratch copy: a one-core cpuset taken from this
+# process's own allowed list (never an owner reservation), an empty config directory of the smoke's
+# own, run directories under the scratch's docs/spikes/data, and the benchmark package's synthetic
+# control samples. The records the runner writes are real; the records of the valid control and of
+# the hostile controls are written below, independently of the runner and of the Go validator.
+BE_N=0
+BED=docs/spikes/data
+BEPRE=bench-20200101T000000Z
+BE_IMG=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+BE_INP=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+BE_T0=1792232100
+BE_HOSTILE='bench-20200102T000000Z bench-20200103T000000Z bench-20200104T000000Z bench-20200105T000000Z bench-20200106T000000Z bench-20200107T000000Z bench-20200108T000000Z bench-20200109T000000Z bench-20200112T000000Z'
+# need DESC CMD...: the condition, or its description and status 1.
+need() {
+	_needd=$1
+	shift
+	"$@" || {
+		echo "# not met: $_needd"
+		return 1
+	}
+}
+# none ARGS...: grep finds nothing.
+none() { ! grep "$@"; }
+# be_rec STAGE RUN START END OBS: one valid synthetic record (four same-NUMA cores without SMT
+# siblings, no foreign workload, 4 GiB, no swap, a read-only empty ext4 NVMe config).
+be_rec() {
+	printf '{"schema":1,"stage":"%s","run":"%s","image":"%s","inputs":"%s","start_unix":%s,"end_unix":%s,"observations":%s,"cpus":4,"cores":4,"threads_per_core_max":1,"siblings_outside_set":0,"sibling_runnable_max":0,"numa_nodes":1,"foreign_allowed_max":0,"foreign_runnable_max":0,"load1_milli_max":20,"mem_available_kib_min":16777216,"swap_in_start":7,"swap_in_end":7,"swap_out_start":9,"swap_out_end":9,"mem_limit_bytes":4294967296,"memswap_limit_bytes":4294967296,"cpuset_matches":true,"config_fs":"ext4","config_nvme":true,"config_empty":true,"config_readonly":true}\n' \
+		"$1" "$2" "$BE_IMG" "$BE_INP" "$3" "$4" "$5"
+}
+# be_set DIR RUN: the three valid records of RUN in DIR.
+be_set() {
+	mkdir -p "$1" && be_rec before "$2" "$BE_T0" "$BE_T0" 1 >"$1/before.json" &&
+		be_rec during "$2" $((BE_T0 + 1)) $((BE_T0 + 9)) 9 >"$1/during.json" &&
+		be_rec after "$2" $((BE_T0 + 10)) $((BE_T0 + 10)) 1 >"$1/after.json"
+}
+# be_expect NAME RC TEXT: the judge child's line for NAME in the merged output.
+be_expect() {
+	need "judged $1 rc=$2 $3" grep -Fxq "judged $1 rc=$2 $3" "$S/out" || return 1
+	BE_N=$((BE_N + 1))
+}
+# BE_CHILD: the --bench child of the first run: it first tries to overwrite, append to, unlink,
+# replace and chmod the imported records of the earlier run, to create entries beside them and to
+# move or remove them and every ancestor up to /src/docs, and to write the read-only /config; it
+# reports each attempt, the imported records' digests and decoys that must not be in the image,
+# and creates its own look-alike of this run's before.json (the host's file is not reachable from
+# here). Then it writes the benchmark package's synthetic control samples with the production writer.
+BE_CHILD='old=/src/docs/spikes/data/$1
+run=/src/docs/spikes/data/$2
+t() { n=$1; shift; if "$@" >/dev/null 2>&1; then echo "canary $n=allowed"; else echo "canary $n=denied"; fi; }
+echo own >/tmp/own
+for f in before during after; do
+	t overwrite-$f sh -c ": >$old/$f.json"
+	t append-$f sh -c "printf x >>$old/$f.json"
+	t unlink-$f rm "$old/$f.json"
+	t replace-$f mv -f /tmp/own "$old/$f.json"
+	t chmod-$f chmod u+w "$old/$f.json"
+	printf "sum %s %s.json\n" "$(sha256sum <"$old/$f.json" | cut -c1-64)" $f
+done
+t overwrite-samples sh -c ": >$old/samples/samples.jsonl"
+t unlink-samples rm "$old/samples/samples.jsonl"
+t create-beside-records sh -c ": >$old/new.json"
+t create-beside-samples sh -c ": >$old/samples/new.jsonl"
+t remove-run rm -r "$old"
+t move-run mv "$old" "$old.moved"
+t move-data mv /src/docs/spikes/data /src/docs/spikes/data2
+t remove-data rm -r /src/docs/spikes/data
+t move-spikes mv /src/docs/spikes /src/docs/spikes2
+t move-docs mv /src/docs /src/docs2
+t write-config sh -c ": >/config/x"
+printf "sum %s samples.jsonl\n" "$(sha256sum <"$old/samples/samples.jsonl" | cut -c1-64)"
+[ -d /config ] && echo "canary config=present" || echo "canary config=absent"
+for x in "$old/notes.txt" "$old/during.json.bak" "$old/samples/extra.jsonl" /src/docs/spikes/data/stray.json; do
+	[ ! -e "$x" ] && echo "canary decoy=absent" || echo "canary decoy=present"
+done
+mkdir -p "$run/samples" && printf "{}" >"$run/before.json" && echo "canary fresh=created" || echo "canary fresh=denied"
+exec go test ./bench/parser -run "^TestLatencyGateControlSamples\$" -count=1 -v -args -control-out "$run/samples"'
+# BE_JUDGE: the final judge, built as production (CGO off), over each named run directory of the
+# image this invocation was built with, one `judged NAME rc=N OUTPUT` line each, and what the image
+# imported under docs/spikes/data with its mode and owner.
+BE_JUDGE='CGO_ENABLED=0 go build -trimpath -o /tmp/parserbench ./bench/parser || exit 1
+find docs/spikes/data -mindepth 1 -type f -printf "imported-f %m %u %p\n"
+find docs/spikes/data -mindepth 1 -type d -printf "imported-d %m %u %p\n"
+for d in "$@"; do
+	o=$(/tmp/parserbench -judge "docs/spikes/data/$d")
+	rc=$?
+	printf "judged %s rc=%s %s\n" "$d" "$rc" "$o"
+done'
+# be_a: the real runner's --bench run (nothing from the owner: a one-core cpuset of this process, an
+# empty config of the smoke's own). The image carries the earlier run's records; its child cannot
+# change any of them and the host's own records of this run are published beside the samples.
+be_a() {
+	BE_CPU=$(sed -n 's/^Cpus_allowed_list:[[:space:]]*\([0-9][0-9]*\).*/\1/p' /proc/self/status)
+	need 'a one-core cpuset' [ -n "$BE_CPU" ] || return 1
+	mkdir "$S/benchcfg" || return 1
+	_o=$S/repo/$BED/$BEPRE
+	mkdir -p "$_o/samples" "$S/repo/$BED" || return 1
+	printf 'old samples\n' >"$_o/samples/samples.jsonl" && be_set "$_o" "$BEPRE" || return 1
+	printf 'decoy\n' >"$_o/notes.txt" && printf '{}\n' >"$_o/during.json.bak" && printf 'decoy\n' >"$_o/samples/extra.jsonl" &&
+		printf '{}\n' >"$S/repo/$BED/stray.json" || return 1
+	RUNC=bench-$(date -u +%Y%m%dT%H%M%SZ)
+	obs_setup && printf '%s\n' "$S/benchcfg" >>"$S/obs.needles" || return 1
+	RRENV="BOXSET_BENCH_CONFIG=$S/benchcfg"
+	obs_rr --bench "$BE_CPU" --write "$BED/$RUNC/samples" -- sh -c "$BE_CHILD" sh "$BEPRE" "$RUNC"
+	RRENV=
+	need 'the owner config path never reached the runner scratch' obs_ok || return 1
+	_r=$S/repo/$BED/$RUNC
+	need 'child and publication succeeded' [ "$RC" = 0 ] &&
+		need 'published line' grep -Fxq "DEV-RUN-BENCH-PUBLISHED run=$RUNC files=4" "$S/out" &&
+		need 'go test control passed' grep -Eq '^--- PASS: TestLatencyGateControlSamples \(' "$S/out" || return 1
+	need 'no attempt allowed' none -q '^canary .*=allowed$' "$S/out" &&
+		need 'every attempt denied' [ "$(grep -c '^canary .*=denied$' "$S/out" | tr -d ' ')" = 26 ] &&
+		need 'config mounted' grep -Fxq 'canary config=present' "$S/out" &&
+		need 'decoys not imported' [ "$(grep -c '^canary decoy=absent$' "$S/out" | tr -d ' ')" = 4 ] &&
+		need 'child made its own look-alike' grep -Fxq 'canary fresh=created' "$S/out" || return 1
+	for _f in before during after; do
+		_h=$(sha256sum <"$_o/$_f.json") || return 1
+		need "$_f.json imported unchanged" grep -Fxq "sum ${_h%% *} $_f.json" "$S/out" || return 1
+	done
+	_h=$(sha256sum <"$_o/samples/samples.jsonl") || return 1
+	need 'samples.jsonl imported unchanged' grep -Fxq "sum ${_h%% *} samples.jsonl" "$S/out" || return 1
+	BE_IMG=$(sed -n 's/^dev-run: image=\(sha256:[0-9a-f]*\) inputs=\([0-9a-f]*\) .*/\1/p' "$S/out")
+	BE_INP=$(sed -n 's/^dev-run: image=\(sha256:[0-9a-f]*\) inputs=\([0-9a-f]*\) .*/\2/p' "$S/out")
+	need 'run identity line' [ "${#BE_IMG}" = 71 ] && [ "${#BE_INP}" = 64 ] || return 1
+	need 'only the four names are published' [ "$(cd "$_r" && find . -mindepth 1 | LC_ALL=C sort | tr '\n' ' ')" = './after.json ./before.json ./during.json ./samples ./samples/samples.jsonl ' ] || return 1
+	for _f in before during after; do
+		_p=$_r/$_f.json
+		_sz=$(wc -c <"$_p" | tr -d ' ')
+		need "$_f.json is the host's own bounded record" [ -f "$_p" ] && [ ! -L "$_p" ] && [ -O "$_p" ] && [ "$_sz" -ge 1 ] && [ "$_sz" -le 65536 ] || return 1
+		need "$_f.json is one fixed line" [ "$(wc -l <"$_p" | tr -d ' ')" = 1 ] && [ "$(grep -o '"[a-z0-9_]*":' "$_p" | wc -l | tr -d ' ')" = 29 ] || return 1
+		need "$_f.json holds no path or host text" none -q -e '/' -e '\\' "$_p" || return 1
+		need "$_f.json names its stage, run, image and inputs" grep -q "^{\"schema\":1,\"stage\":\"$_f\",\"run\":\"$RUNC\",\"image\":\"$BE_IMG\",\"inputs\":\"$BE_INP\"," "$_p" || return 1
+		need "$_f.json observed one core" grep -q '"cpus":1,"cores":1,' "$_p" || return 1
+		need "$_f.json carries the 4 GiB memory and swap limits and the matching cpuset" grep -q '"mem_limit_bytes":4294967296,"memswap_limit_bytes":4294967296,"cpuset_matches":true,' "$_p" || return 1
+	done
+	_n=$(sed -n 's/.*"observations":\([0-9][0-9]*\),.*/\1/p' "$_r/during.json")
+	need 'the child was observed more than once' [ "${_n:-0}" -ge 2 ] || return 1
+	need 'samples carry this run and image' grep -q "^{\"schema\":1,\"kind\":\"parser-latency-samples\",\"run\":\"$RUNC\",\"inputs_sha256\":\"$BE_INP\"," "$_r/samples/samples.jsonl" || return 1
+	BE_N=$((BE_N + 1))
+}
+# be_b: the next invocation. Its image is refreshed with what the first run published and with the
+# smoke's hostile run directories; the final judge, built as production, reads them from that image.
+# The real host-written records are INVALID only for the physical reason (one core), after their
+# identities matched; every other control is INVALID for its own reason; none is ever a PASS.
+be_b() {
+	_day=$(sed -n '1s/.*"start_date":"\([0-9]*\)".*/\1/p' "$S/repo/$BED/$RUNC/samples/samples.jsonl")
+	need 'samples date' [ "${#_day}" = 8 ] || return 1
+	BE_T0=$(date -u -d "$(printf '%s' "$_day" | sed 's/\(....\)\(..\)\(..\)/\1-\2-\3/') 12:00:00" +%s) || return 1
+	_d=$S/repo/$BED
+	be_set "$_d/bench-20200102T000000Z" bench-20200102T000000Z && rm "$_d/bench-20200102T000000Z/after.json" || return 1
+	be_set "$_d/bench-20200103T000000Z" bench-20200103T000000Z && printf '{"host":"example.invalid"}\n' >"$_d/bench-20200103T000000Z/during.json" || return 1
+	be_set "$_d/bench-20200104T000000Z" bench-20200104T000000Z || return 1
+	_l=$(be_rec after bench-20200104T000000Z $((BE_T0 + 10)) $((BE_T0 + 10)) 1 | wc -c | tr -d ' ')
+	{ be_rec after bench-20200104T000000Z $((BE_T0 + 10)) $((BE_T0 + 10)) 1 && head -c $((65537 - _l)) /dev/zero | tr '\0' ' '; } >"$_d/bench-20200104T000000Z/after.json" || return 1
+	need 'oversized record is 64 KiB + 1' [ "$(wc -c <"$_d/bench-20200104T000000Z/after.json" | tr -d ' ')" = 65537 ] || return 1
+	be_set "$_d/bench-20200105T000000Z" bench-20200105T000000Z && be_rec before bench-20200105T000000Z "$BE_T0" "$BE_T0" 1 >"$_d/bench-20200105T000000Z/after.json" || return 1
+	be_set "$_d/bench-20200106T000000Z" bench-20200106T000000Z && be_rec during bench-20200107T000000Z $((BE_T0 + 1)) $((BE_T0 + 9)) 9 >"$_d/bench-20200106T000000Z/during.json" || return 1
+	be_set "$_d/bench-20200107T000000Z" bench-20200107T000000Z && rm "$_d/bench-20200107T000000Z/before.json" && ln -s during.json "$_d/bench-20200107T000000Z/before.json" || return 1
+	be_set "$_d/bench-20200108T000000Z" bench-20200108T000000Z &&
+		sed -i 's/"foreign_allowed_max":0/"foreign_allowed_max":3/' "$_d/bench-20200108T000000Z/during.json" || return 1
+	# Otherwise eligible, /config empty before and after but not during: the stage record the real writer
+	# produces for a during-only change (before true, during false, after true).
+	be_set "$_d/bench-20200112T000000Z" bench-20200112T000000Z &&
+		sed -i 's/"config_empty":true/"config_empty":false/' "$_d/bench-20200112T000000Z/during.json" &&
+		[ "$(grep -c '"config_empty":false' "$_d/bench-20200112T000000Z/during.json")" = 1 ] &&
+		[ "$(grep -c '"config_empty":true' "$_d/bench-20200112T000000Z/before.json" "$_d/bench-20200112T000000Z/after.json" | tr '\n' ' ' | sed 's/[^ ]*://g')" = '1 1 ' ] || return 1
+	rr -- sh -c "$BE_JUDGE" sh "$RUNC" $BE_HOSTILE
+	need 'judge child ran' [ "$RC" = 0 ] || return 1
+	_nfiles=$(grep -c '^imported-f ' "$S/out" | tr -d ' ')
+	_ndirs=$(grep -c '^imported-d ' "$S/out" | tr -d ' ')
+	need 'the image imported the records' [ "$_nfiles" -ge 20 ] && [ "$_ndirs" -ge 10 ] || return 1
+	need 'imported files are all root-owned 0444' [ "$(grep -c '^imported-f 444 root ' "$S/out" | tr -d ' ')" = "$_nfiles" ] &&
+		need 'imported directories are all root-owned 0555' [ "$(grep -c '^imported-d 555 root ' "$S/out" | tr -d ' ')" = "$_ndirs" ] &&
+		need 'no decoy imported' none -q -e 'notes.txt' -e '[.]bak' -e 'extra.jsonl' -e 'stray.json' "$S/out" &&
+		need 'run samples imported' grep -Fxq "imported-f 444 root docs/spikes/data/$RUNC/samples/samples.jsonl" "$S/out" || return 1
+	be_expect "$RUNC" 3 'PARSER-LATENCY-INVALID reason=topology' &&
+		be_expect bench-20200102T000000Z 3 'PARSER-LATENCY-INVALID reason=record_missing' &&
+		be_expect bench-20200103T000000Z 3 'PARSER-LATENCY-INVALID reason=record_incomplete' &&
+		be_expect bench-20200104T000000Z 3 'PARSER-LATENCY-INVALID reason=record_oversized' &&
+		be_expect bench-20200105T000000Z 3 'PARSER-LATENCY-INVALID reason=record_stage' &&
+		be_expect bench-20200106T000000Z 3 'PARSER-LATENCY-INVALID reason=identity_mismatch' &&
+		be_expect bench-20200107T000000Z 3 'PARSER-LATENCY-INVALID reason=record_nonregular' &&
+		be_expect bench-20200108T000000Z 3 'PARSER-LATENCY-INVALID reason=overlap' &&
+		be_expect bench-20200109T000000Z 3 'PARSER-LATENCY-INVALID reason=record_missing' &&
+		be_expect bench-20200112T000000Z 3 'PARSER-LATENCY-INVALID reason=filesystem' &&
+		need 'no pass line' none -q PARSER-LATENCY-PASS "$S/out"
+}
+# BE_FINAL: the final judge of the next invocation, built as production (CGO off). Before it reads
+# the records it is about to judge, this child (UID 1000) tries to overwrite, append to, unlink,
+# replace and chmod each of them, to create entries beside them, to replace, remove or move the run
+# directory, its samples directory and every ancestor up to /src/docs; every attempt is denied and
+# every digest, owner, mode and inode is unchanged afterwards. It then judges the run, a complete
+# look-alike of it that this child makes inside the data directory (valid names and content, its own
+# files, writable) and one it makes outside the image: only the run of the image can pass.
+BE_FINAL='CGO_ENABLED=0 go build -trimpath -o /tmp/parserbench ./bench/parser || exit 1
+run=docs/spikes/data/$1
+snap() { for f in before.json during.json after.json samples/samples.jsonl; do stat -c "%u:%g:%a:%i:%s" "$run/$f"; sha256sum <"$run/$f"; done; for d in "$run" "$run/samples" docs/spikes/data docs/spikes docs; do stat -c "%u:%g:%a:%i" "$d"; done; }
+t() { n=$1; shift; if "$@" >/dev/null 2>&1; then echo "canary $n=allowed"; else echo "canary $n=denied"; fi; }
+before=$(snap)
+echo own >/tmp/own
+for f in before.json during.json after.json samples/samples.jsonl; do
+	t overwrite-$f sh -c ": >$run/$f"
+	t append-$f sh -c "printf x >>$run/$f"
+	t unlink-$f rm "$run/$f"
+	t replace-$f mv -f /tmp/own "$run/$f"
+	t chmod-$f chmod u+w "$run/$f"
+done
+t create-beside-records sh -c ": >$run/new.json"
+t create-beside-samples sh -c ": >$run/samples/new.jsonl"
+cp -R --no-preserve=mode "$run" "$run.alt" >/dev/null 2>&1
+t replace-run mv -T "$run.alt" "$run"
+t remove-run rm -r "$run"
+t move-run mv "$run" "$run.moved"
+t remove-samples rm -r "$run/samples"
+t move-samples mv "$run/samples" "$run/samples.moved"
+t move-data mv docs/spikes/data docs/spikes/data2
+t remove-data rm -r docs/spikes/data
+t move-spikes mv docs/spikes docs/spikes2
+t move-docs mv docs docs2
+rm -rf "$run.alt"
+after=$(snap)
+[ "$before" = "$after" ] && echo "canary unchanged=yes" || echo "canary unchanged=no"
+la=bench-20200110T000000Z
+out=/tmp/bench-20200111T000000Z
+for d in docs/spikes/data/$la $out; do
+	mkdir -p "$d/samples" || exit 1
+	for f in before.json during.json after.json samples/samples.jsonl; do sed "s/$1/$la/g" "$run/$f" >"$d/$f" || exit 1; done
+done
+for d in "$run" docs/spikes/data/$la $out; do
+	o=$(/tmp/parserbench -judge "$d")
+	rc=$?
+	printf "judged %s rc=%s %s\n" "${d##*/}" "$rc" "$o"
+done'
+# be_c: the next invocation after the host-written records of the first run are replaced by
+# independently written valid ones (they name the same image and inputs as its samples): the final
+# judge, again from a refreshed image, accepts the very samples the first run exported, after the
+# child that runs it failed to change, replace or remove any of what it reads; a complete child-made
+# look-alike, in the data directory or outside the image, is INVALID and never a pass.
+be_c() {
+	be_set "$S/repo/$BED/$RUNC" "$RUNC" || return 1
+	rr -- sh -c "$BE_FINAL" sh "$RUNC"
+	need 'judge child ran' [ "$RC" = 0 ] || return 1
+	need 'no attempt allowed' none -q '^canary .*=allowed$' "$S/out" &&
+		need 'every attempt denied' [ "$(grep -c '^canary .*=denied$' "$S/out" | tr -d ' ')" = 31 ] &&
+		need 'bytes, owners, modes and identities unchanged' grep -Fxq 'canary unchanged=yes' "$S/out" || return 1
+	need 'valid control passes' grep -Eq "^judged $RUNC rc=0 PARSER-LATENCY-PASS eligible=VALID p50_ns=[0-9]+ p99_ns=[0-9]+ samples=[0-9]+ rounds=30 base=none\$" "$S/out" &&
+		need 'a writable look-alike in the data directory is INVALID' grep -Fxq 'judged bench-20200110T000000Z rc=3 PARSER-LATENCY-INVALID reason=record_mutable' "$S/out" &&
+		need 'a look-alike outside the image is INVALID' grep -Fxq 'judged bench-20200111T000000Z rc=3 PARSER-LATENCY-INVALID reason=run_location' "$S/out" &&
+		need 'exactly one pass line' [ "$(grep -c 'PARSER-LATENCY-PASS' "$S/out" | tr -d ' ')" = 1 ] || return 1
+	BE_N=$((BE_N + 3))
+}
+# be_d: host-side evidence faults, each on the real runner with a passive shim in front of one host
+# tool (never of Docker's behaviour in the child) and each a fresh run directory that must not exist
+# afterwards. A sampler that fails after a good observation (the final observation made after it
+# succeeds, so only its status shows it), a /proc enumeration cut short after one readable task
+# (find timed out), an unreadable live task, a /config that cannot be scanned and a daemon that is
+# not this machine (another endpoint, another kernel) all fail closed with the fixed reason and
+# publish nothing; a task that vanished while the walk ran does not (the same shims, the run is
+# published); and a /config that gains an entry between the stages reaches the stage records.
+BE_FASTCHILD='mkdir -p "$1" && printf "x\n" >"$1/samples.jsonl"; sleep "$2"; exit "$3"'
+BE_RUNS=0
+# be_shims: the shim directory. Each shim does nothing unless its DR_* word is given.
+be_shims() {
+	mkdir "$S/bshim" "$S/dirtask" || return 1
+	cat >"$S/bshim/date" <<'EOF'
+#!/bin/sh
+if [ -n "${DR_MASK_AFTER_OBS:-}" ] && [ ! -e "$DR_MASK_FLAG" ]; then
+	for f in "$DR_MASK_AFTER_OBS"/boxset-dev-run.*/f/during.obs; do
+		[ -s "$f" ] || continue
+		l=$(wc -l <"$f")
+		r=$("$DR_REAL_DOCKER" ps -q --filter label=boxset.dev-run --filter status=running 2>/dev/null | wc -l)
+		if [ "$l" -ge 1 ] && [ "$r" -ge 1 ] && [ ! -e "$DR_RELEASE" ] && mount -t tmpfs tmpfs "/proc/$DR_LMASK_PID" && [ ! -e "/proc/$DR_LMASK_PID/status" ]; then
+			echo "$l running=$r gate=held" >"$DR_MASK_FLAG"
+			: >"$DR_RELEASE"
+		fi
+	done
+fi
+if [ -n "${DR_DATE_FAIL_AT:-}${DR_DATE_TOUCH_AT:-}${DR_DATE_RENAME_AT:-}" ]; then
+	n=$(cat "$DR_DATE_COUNT" 2>/dev/null)
+	n=$((${n:-0} + 1))
+	echo "$n" >"$DR_DATE_COUNT"
+	[ "$n" != "${DR_DATE_FAIL_AT:-}" ] || exit 1
+	[ "$n" != "${DR_DATE_TOUCH_AT:-}" ] || : >"$DR_CFG_DIR/during"
+	[ "$n" != "${DR_DATE_UNTOUCH_AT:-}" ] || rm -f "$DR_CFG_DIR/during"
+	if [ "$n" = "${DR_DATE_RENAME_AT:-}" ]; then
+		mv "$DR_CFG_DIR" "$DR_CFG_DIR.old" && mkdir "$DR_CFG_DIR"
+	fi
+fi
+exec "$DR_REAL_DATE" "$@"
+EOF
+	cat >"$S/bshim/find" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = /proc ]; then
+	case ${DR_FIND_MODE:-} in
+	partial)
+		"$DR_REAL_FIND" "$@" | head -n 1
+		exit 124
+		;;
+	fake)
+		"$DR_REAL_FIND" "$@"
+		echo "$DR_FAKE_STATUS"
+		exit 0
+		;;
+	hidden)
+		"$DR_REAL_FIND" "$@" 2>/dev/null | head -n 3
+		exit 0
+		;;
+	live)
+		echo "$DR_DIRTASK"
+		"$DR_REAL_FIND" "$@"
+		exit $?
+		;;
+	vanish)
+		echo /proc/99999999/task/99999999/status
+		echo "find: '/proc/99999999/task': No such file or directory" >&2
+		"$DR_REAL_FIND" "$@" 2>/dev/null
+		exit 1
+		;;
+	esac
+fi
+if [ -n "${DR_CFG_FAULT:-}" ] && [ "${1:-}" = "$DR_CFG_FAULT" ]; then
+	c=$(cat "$DR_FIND_COUNT" 2>/dev/null)
+	c=$((${c:-0} + 1))
+	echo "$c" >"$DR_FIND_COUNT"
+	if [ "$c" -ge "${DR_CFG_FAULT_FROM:-1}" ]; then
+		echo "find: cannot open directory: Permission denied" >&2
+		exit 1
+	fi
+fi
+exec "$DR_REAL_FIND" "$@"
+EOF
+	cat >"$S/bshim/docker" <<'EOF'
+#!/bin/sh
+if [ -n "${DR_CTX_HOST:-}" ] && [ "${1:-}" = context ] && [ "${2:-}" = inspect ]; then
+	echo "$DR_CTX_HOST"
+	exit 0
+fi
+if [ -n "${DR_KERNEL:-}" ] && [ "${1:-}" = info ] && [ "${3:-}" = '{{.KernelVersion}}' ]; then
+	echo "$DR_KERNEL"
+	exit 0
+fi
+if [ -n "${DR_SWAP_DIR:-}" ]; then
+	case ${1:-} in
+	start)
+		mv "$DR_SWAP_DIR" "$DR_SWAP_DIR.A" && mkdir "$DR_SWAP_DIR" && : >"$DR_SWAP_DIR.armed"
+		;;
+	inspect)
+		if [ "${3:-}" = '{{.State.Pid}} {{.State.Running}}' ] && [ -e "$DR_SWAP_DIR.armed" ]; then
+			out=$("$DR_REAL_DOCKER" "$@")
+			rc=$?
+			case $out in
+			*' true')
+				rm -f "$DR_SWAP_DIR.armed"
+				mv "$DR_SWAP_DIR" "$DR_SWAP_DIR.B" && mv "$DR_SWAP_DIR.A" "$DR_SWAP_DIR"
+				;;
+			esac
+			echo "$out"
+			exit "$rc"
+		fi
+		;;
+	esac
+fi
+if [ -n "${DR_MASK_PID:-}" ] && [ "${1:-}" = inspect ] && [ "${3:-}" = '{{.Id}}' ] && [ ! -e "$DR_MASK_FLAG" ]; then
+	mount -t tmpfs tmpfs "/proc/$DR_MASK_PID" && [ ! -e "/proc/$DR_MASK_PID/status" ] && : >"$DR_MASK_FLAG"
+fi
+if [ -n "${DR_PID_FAKE:-}" ] && [ "${1:-}" = inspect ] && [ "${3:-}" = '{{.State.Pid}} {{.State.Running}}' ]; then
+	echo "$DR_PID_FAKE true"
+	exit 0
+fi
+if [ -n "${DR_CFG_TOUCH:-}" ] && [ "${1:-}" = inspect ] && [ "${3:-}" = '{{.State.Status}} {{.State.ExitCode}}' ]; then
+	: >"$DR_CFG_TOUCH/late"
+fi
+exec "$DR_REAL_DOCKER" "$@"
+EOF
+	chmod 0755 "$S/bshim/date" "$S/bshim/find" "$S/bshim/docker" || return 1
+	BE_SHIM="PATH=$S/bshim:$PATH DR_REAL_DATE=$(command -v date) DR_REAL_FIND=$(command -v find) DR_REAL_DOCKER=$(command -v docker) DR_DATE_COUNT=$S/date.count DR_FIND_COUNT=$S/find.count DR_DIRTASK=$S/dirtask"
+}
+# be_try CFG WORDS SLEEP: one --bench run of the smoke's own (a fresh run name, a child that writes its
+# samples and stays SLEEP seconds) with the shim words WORDS; sets BE_RUN and RC.
+be_try() {
+	BE_RUNS=$((BE_RUNS + 1))
+	BE_RUN=bench-20261017T12$(printf '%02d' "$BE_RUNS")00Z
+	rm -f "$S/date.count"
+	RRENV="BOXSET_BENCH_CONFIG=$1 $BE_SHIM $2"
+	rr --bench "$BE_CPU" --write "$BED/$BE_RUN/samples" -- sh -c "$BE_FASTCHILD" sh "/src/$BED/$BE_RUN/samples" "$3" "${4:-0}"
+	RRENV=
+}
+# be_closed WORD: the last be_try failed closed: 125, the fixed word alone as the runner's own line,
+# no run directory or part file, nothing owned left, no config path in the output.
+be_closed() {
+	need "closed with $1" [ "$RC" = 125 ] && grep -Fxq "dev-run: $1" "$S/out" &&
+		need 'nothing published' [ ! -e "$S/repo/$BED/$BE_RUN" ] && [ -z "$(find "$S/repo/$BED" -name '*.part*' -print)" ] &&
+		need 'no pass or published line' none -q -e PARSER-LATENCY -e DEV-RUN-BENCH-PUBLISHED "$S/out" &&
+		need 'no owner config path in the output' none -Fq -e "$S/benchcfg" "$S/out" || return 1
+	BE_N=$((BE_N + 1))
+}
+be_d() {
+	be_shims || return 1
+	_r=$S/repo/$BED
+	_cfg=$S/benchcfg
+	# A sampler whose third date read fails (the second observation of the child's lifetime); the
+	# final observation made by the runner (the fourth read) succeeds.
+	be_try "$_cfg" "DR_DATE_FAIL_AT=3" 5
+	need "the failure was the sampler second observation, and the runner stopped there (date reads $(cat "$S/date.count" 2>/dev/null))" [ "$(cat "$S/date.count" 2>/dev/null)" = 3 ] &&
+		be_closed bench_evidence_failed || return 1
+	be_try "$_cfg" "DR_FIND_MODE=partial" 1
+	be_closed bench_evidence_failed || return 1
+	be_try "$_cfg" "DR_FIND_MODE=live" 1
+	be_closed bench_evidence_failed || return 1
+	be_try "$_cfg" "DR_CFG_FAULT=$_cfg" 1
+	be_closed bench_evidence_failed || return 1
+	for _w in "DR_CTX_HOST=tcp://203.0.113.9:2375" "DR_CTX_HOST=ssh://203.0.113.9" "DR_KERNEL=0.0.0-not-this-machine"; do
+		lbl >"$S/lbl.before"
+		be_try "$_cfg" "$_w" 1
+		be_closed 'bench_invalid side=daemon' &&
+			need 'no endpoint printed' none -q -e 203.0.113 -e not-this-machine "$S/out" &&
+			need 'no container created' [ "$(lbl)" = "$(cat "$S/lbl.before")" ] || return 1
+	done
+	# A task that vanished while /proc was walked is not a failure: the same shim chain publishes.
+	be_try "$_cfg" "DR_FIND_MODE=vanish DR_DATE_FAIL_AT=99999" 1
+	need 'a vanished task does not fail the run' [ "$RC" = 0 ] &&
+		need 'published' grep -Fxq "DEV-RUN-BENCH-PUBLISHED run=$BE_RUN files=4" "$S/out" &&
+		need 'four files' [ "$(cd "$_r/$BE_RUN" && find . -type f | wc -l | tr -d ' ')" = 4 ] || return 1
+	BE_N=$((BE_N + 1))
+	# A /config that gains an entry after the child ran is seen by the after record, not copied from before.
+	mkdir "$S/benchcfg2" || return 1
+	be_try "$S/benchcfg2" "DR_CFG_TOUCH=$S/benchcfg2" 1
+	need 'published' [ "$RC" = 0 ] && grep -Fxq "DEV-RUN-BENCH-PUBLISHED run=$BE_RUN files=4" "$S/out" || return 1
+	need 'before: /config empty' grep -q '"config_empty":true' "$_r/$BE_RUN/before.json" &&
+		need 'after: /config not empty' grep -q '"config_empty":false' "$_r/$BE_RUN/after.json" &&
+		need 'the late entry exists' [ -e "$S/benchcfg2/late" ] || return 1
+	BE_N=$((BE_N + 1))
+	# The mounted directory renamed and its path recreated while the child runs: the container stays on
+	# the old directory while a scan of the path would report the new one, so it fails closed.
+	mkdir "$S/benchcfg3" || return 1
+	be_try "$S/benchcfg3" "DR_DATE_RENAME_AT=3 DR_CFG_DIR=$S/benchcfg3" 6
+	need 'the directory was really replaced' [ -d "$S/benchcfg3.old" ] || return 1
+	be_closed bench_evidence_failed || return 1
+	# A /config that changes only while the child runs (a file appears and is gone again before the
+	# after state) reaches the during record.
+	mkdir "$S/benchcfg4" || return 1
+	be_try "$S/benchcfg4" "DR_DATE_TOUCH_AT=3 DR_DATE_UNTOUCH_AT=5 DR_CFG_DIR=$S/benchcfg4" 8
+	need 'published' [ "$RC" = 0 ] && grep -Fxq "DEV-RUN-BENCH-PUBLISHED run=$BE_RUN files=4" "$S/out" || return 1
+	need 'before: /config empty' grep -q '"config_empty":true' "$_r/$BE_RUN/before.json" &&
+		need 'during: /config not empty' grep -q '"config_empty":false' "$_r/$BE_RUN/during.json" &&
+		need 'after: /config empty again' grep -q '"config_empty":true' "$_r/$BE_RUN/after.json" &&
+		need 'the file is gone' [ ! -e "$S/benchcfg4/during" ] || return 1
+	BE_N=$((BE_N + 1))
+	# A /config read that fails after the first observation succeeded fails closed.
+	rm -f "$S/find.count"
+	be_try "$_cfg" "DR_CFG_FAULT=$_cfg DR_CFG_FAULT_FROM=3" 5
+	need 'the failing read was not the first' [ "$(cat "$S/find.count" 2>/dev/null)" -ge 3 ] || return 1
+	be_closed bench_evidence_failed || return 1
+	# A /proc walk that returns well under the kernel's own task count (tasks hidden from the view) fails.
+	be_try "$_cfg" "DR_FIND_MODE=hidden" 1
+	be_closed bench_evidence_failed || return 1
+	# A daemon whose container is not a task of this machine (a forwarded socket to a machine with the same
+	# kernel release reports a pid that is not this container's): rejected, nothing published, no endpoint.
+	sleep 60 &
+	_fp=$!
+	lbl >"$S/lbl.before"
+	be_try "$_cfg" "DR_PID_FAKE=$_fp" 3
+	kill "$_fp" 2>/dev/null
+	wait "$_fp" 2>/dev/null
+	be_closed 'bench_invalid side=daemon' &&
+		need 'no endpoint printed' none -q -e 203.0.113 "$S/out" || return 1
+	# The path swapped to another directory while the container starts and back as soon as it runs: the
+	# container mounted a directory other than the observed one though every scan of the path reads the
+	# observed one, so only the container's own view shows it.
+	mkdir "$S/benchcfg5" || return 1
+	be_try "$S/benchcfg5" "DR_SWAP_DIR=$S/benchcfg5" 4
+	need 'the directory was really swapped and back' [ -d "$S/benchcfg5.B" ] && [ -d "$S/benchcfg5" ] || return 1
+	be_closed bench_evidence_failed || return 1
+	# A child that wrote its samples and then exited nonzero keeps that exact status; nothing is
+	# published, no pass or published line is printed, and the owned containers are removed.
+	be_try "$_cfg" "" 1 37
+	need 'the nonzero child status is kept' [ "$RC" = 37 ] &&
+		need 'nothing published' [ ! -e "$_r/$BE_RUN" ] && [ -z "$(find "$_r" -name '*.part*' -print)" ] &&
+		need 'no pass or published line' none -q -e PARSER-LATENCY -e DEV-RUN-BENCH-PUBLISHED "$S/out" &&
+		need 'owned containers removed' owned_gone || return 1
+	BE_N=$((BE_N + 1))
+	be_cap || return 1
+	be_cg || return 1
+	be_sib || return 1
+	be_proc || return 1
+}
+# be_cap: the child-stdout cap is 256 KiB: a child that prints 200000 bytes (more than the old 64 KiB, as the
+# canonical verbose benchmark-package test run does) succeeds with its status, and one that prints a byte
+# over the cap is output_overflow, 125, never a success.
+be_cap() {
+	rr -- sh -c 'head -c 200000 /dev/zero | tr "\0" x; exit 7'
+	need 'output of 200000 bytes fits and keeps the child status' [ "$RC" = 7 ] || return 1
+	rr -- sh -c 'head -c 262145 /dev/zero | tr "\0" x'
+	need 'one byte over 262144 is output_overflow, the last text of the output' [ "$RC" = 125 ] && grep -q 'dev-run: output_overflow$' "$S/out" || return 1
+	BE_N=$((BE_N + 2))
+	return 0
+}
+# be_cg: foreign overlap is counted from the effective cgroup cpuset, not from affinity alone. A copy of the
+# runner reads a smoke-owned cgroup tree (one root file, so every task inherits it) instead of the host's.
+# A busy task pinned to the reserved CPU is runnable and its affinity meets the set throughout. When the
+# tree's effective cpuset excludes the set, neither it nor any other task counts (allowed 0, runnable 0);
+# when it includes the set, the same tasks do (allowed and runnable above 0). Values are numbers only.
+be_cg() {
+	_r=$S/repo/$BED
+	command -v taskset >/dev/null 2>&1 || return 1
+	sed "s#cgroot=/sys/fs/cgroup#cgroot=$S/fakecg#" "$S/repo/scripts/dev-run.sh" >"$S/cgrunner.sh" &&
+		[ "$(grep -c "cgroot=$S/fakecg" "$S/cgrunner.sh")" = 1 ] || return 1
+	mkdir -p "$S/fakecg/cpuset" || return 1
+	for _case in excluded included; do
+		if [ "$_case" = excluded ]; then _cp=4094-4095; else _cp=$BE_CPU; fi
+		printf '%s\n' "$_cp" >"$S/fakecg/cpuset.cpus.effective" && printf '%s\n' "$_cp" >"$S/fakecg/cpuset/cpuset.effective_cpus" || return 1
+		taskset -c "$BE_CPU" sh -c 'while :; do :; done' &
+		_bz=$!
+		RSH=$S/cgrunner.sh
+		be_try "$S/benchcfg" "" 4
+		RSH=
+		kill "$_bz" 2>/dev/null
+		wait "$_bz" 2>/dev/null
+		need "$_case: the run published" [ "$RC" = 0 ] && grep -Fxq "DEV-RUN-BENCH-PUBLISHED run=$BE_RUN files=4" "$S/out" || return 1
+		if [ "$_case" = excluded ]; then
+			need "excluded: affinity overlap outside the effective cpuset does not count, runnable or not" grep -q '"foreign_allowed_max":0,"foreign_runnable_max":0,' "$_r/$BE_RUN/during.json" || return 1
+		else
+			need "included: tasks whose effective cpuset holds the set count, runnable ones too" grep -Eq '"foreign_allowed_max":[1-9][0-9]*,"foreign_runnable_max":[1-9]' "$_r/$BE_RUN/during.json" || return 1
+		fi
+		BE_N=$((BE_N + 1))
+	done
+	return 0
+}
+# be_sib: a running foreign thread on an SMT sibling outside the set is recorded as sibling_runnable_max
+# (numbers only), an idle sibling as 0. A copy of the runner reads a smoke-owned topology tree that names the
+# one-core set's sibling: first an idle CPU number that no thread can run on, then a real CPU with a busy
+# thread pinned to it (the pair; a busy thread on a CPU that is not the sibling counts nothing).
+be_sib() {
+	_r=$S/repo/$BED
+	sed "s#^SYSCPU=/sys/devices/system/cpu\$#SYSCPU=$S/fakecpu#" "$S/repo/scripts/dev-run.sh" >"$S/sibrunner.sh" &&
+		[ "$(grep -c "^SYSCPU=$S/fakecpu\$" "$S/sibrunner.sh")" = 1 ] || return 1
+	_x=0
+	[ "$BE_CPU" != 0 ] || _x=1
+	mkdir -p "$S/fakecpu/cpu$BE_CPU/topology" || return 1
+	printf '0\n' >"$S/fakecpu/cpu$BE_CPU/topology/physical_package_id" && printf '0\n' >"$S/fakecpu/cpu$BE_CPU/topology/core_id" || return 1
+	for _case in idle busy busynl; do
+		if [ "$_case" = idle ]; then _sb=4094; else _sb=$_x; fi
+		printf '%s,%s\n' "$BE_CPU" "$_sb" >"$S/fakecpu/cpu$BE_CPU/topology/thread_siblings_list" || return 1
+		if [ "$_case" = busynl ]; then
+			# The busy thread is named with an embedded newline (a copy of the shell under that name), so its
+			# stat record spans two lines.
+			_nm=$S/nl/bu$(printf '\nsy')
+			[ -e "$_nm" ] || { mkdir -p "$S/nl" && cp -L "$(command -v sh)" "$_nm"; } || return 1
+			taskset -c "$_x" "$_nm" -c 'while :; do :; done' &
+		else
+			taskset -c "$_x" sh -c 'while :; do :; done' &
+		fi
+		_bz=$!
+		RSH=$S/sibrunner.sh
+		be_try "$S/benchcfg" "" 4
+		RSH=
+		kill "$_bz" 2>/dev/null
+		wait "$_bz" 2>/dev/null
+		need "$_case sibling: the run published" [ "$RC" = 0 ] && grep -Fxq "DEV-RUN-BENCH-PUBLISHED run=$BE_RUN files=4" "$S/out" || return 1
+		if [ "$_case" = idle ]; then
+			need "idle external sibling records none running on it" grep -q '"sibling_runnable_max":0,' "$_r/$BE_RUN/during.json" || return 1
+		else
+			need "$_case external sibling records a running thread" grep -Eq '"sibling_runnable_max":[1-9]' "$_r/$BE_RUN/during.json" || return 1
+		fi
+		BE_N=$((BE_N + 1))
+	done
+	# A stat record that ends right after the CPU field cannot delimit that token (it may be a truncated
+	# number): the observation fails closed. The same record with one more field is parsed and counted, so the
+	# fake task is really read. The fake task is a smoke-owned status and stat pair beside a real process id (its
+	# cgroup is read from the real /proc), running state, affinity outside the set, CPU one of the siblings.
+	printf '%s,4094\n' "$BE_CPU" >"$S/fakecpu/cpu$BE_CPU/topology/thread_siblings_list" || return 1
+	sleep 60 &
+	_fp=$!
+	_fd=$S/fk/$_fp/task/$_fp
+	mkdir -p "$_fd" || return 1
+	printf 'Tgid:\t%s\nPPid:\t1\nState:\tR (running)\nVmSize:\t1 kB\nCpus_allowed_list:\t4094\n' "$_fp" >"$_fd/status" || return 1
+	_pre="$_fp (fake) R"
+	_i=2
+	while [ "$_i" -le 36 ]; do
+		_pre="$_pre 0"
+		_i=$((_i + 1))
+	done
+	printf '%s 4094\n' "$_pre" >"$_fd/stat.trunc" && printf '%s 4094 0\n' "$_pre" >"$_fd/stat.full" || return 1
+	for _case in trunc full; do
+		cp "$_fd/stat.$_case" "$_fd/stat" || return 1
+		RSH=$S/sibrunner.sh
+		be_try "$S/benchcfg" "DR_FIND_MODE=fake DR_FAKE_STATUS=$_fd/status" 3
+		RSH=
+		if [ "$_case" = trunc ]; then
+			be_closed bench_evidence_failed || { kill "$_fp" 2>/dev/null; return 1; }
+		else
+			need "complete fake stat record is read and counted" [ "$RC" = 0 ] && grep -Eq '"sibling_runnable_max":[1-9]' "$_r/$BE_RUN/during.json" || { kill "$_fp" 2>/dev/null; return 1; }
+			BE_N=$((BE_N + 1))
+		fi
+	done
+	kill "$_fp" 2>/dev/null
+	wait "$_fp" 2>/dev/null
+	return 0
+}
+# be_proc: a /proc that can hide tasks is rejected before anything runs, whoever the caller. In a private
+# mount namespace, with a root-owned competing task running, /proc is mounted with hidepid=2, hidepid=4 and
+# hidepid=ptraceable (each as an unprivileged user, for whom the competing task really is not there, and as
+# root, who still sees it: the mount option alone rejects), and a tmpfs is mounted over that one task's
+# /proc entry (it hides the task from everyone, root included, while the visible share of the kernel's task
+# count stays far above the old 97% bound). Every case is 125 with the fixed reason, nothing created.
+be_proc() {
+	_dr=$S/repo/$BED
+	chmod 0711 "$S" || return 1
+	cat >"$S/proc.sh" <<'EOF'
+#!/bin/sh
+case $4 in
+mask) mount -t tmpfs tmpfs "/proc/$1" || exit 99 ;;
+stack) mount -t proc proc /proc || exit 99 ;;
+delayed | later) : ;; # no mask yet: delayed is mounted by the docker shim after the startup guard, later by the date shim after a successful observation
+*)
+	# The one mount at /proc is replaced, not stacked, so that the mode is what is under test.
+	umount -l /proc || exit 98
+	mount -t proc -o "hidepid=$4" proc /proc || exit 99
+	;;
+esac
+echo "canary proc-mounts=$(awk '$5 == "/proc"' /proc/self/mountinfo | wc -l)"
+setpriv --reuid=65534 --regid=65534 --clear-groups sh -c '[ ! -e "/proc/$1/status" ] && echo "canary competing-task=hidden" || echo "canary competing-task=visible"' sh "$1"
+[ -e "/proc/$1/status" ] && echo "canary root-sees-it=yes" || echo "canary root-sees-it=no"
+v=$(find /proc -mindepth 4 -maxdepth 4 -path '/proc/[0-9]*/task/[0-9]*/status' 2>/dev/null | wc -l)
+t=$(awk '{ split($4, a, "/"); print a[2] }' /proc/loadavg)
+[ $((v * 100)) -ge $((t * 97)) ] && echo "canary share-above-old-threshold=yes" || echo "canary share-above-old-threshold=no"
+case $4 in
+later)
+	# The child holds on a gate file the host creates in /config, not on a sleep: it is alive until released.
+	exec sh scripts/dev-run.sh --bench 1 --timeout 120 --write "$3" -- sh -c 'while [ ! -e /config/release ]; do sleep 0.1; done'
+	;;
+esac
+CH=0
+case $2 in
+nobody) exec setpriv --reuid=65534 --regid=65534 --clear-groups sh scripts/dev-run.sh --bench 1 --write "$3" -- sh -c 'sleep "$1"' x "$CH" ;;
+*) exec sh scripts/dev-run.sh --bench 1 --write "$3" -- sh -c 'sleep "$1"' x "$CH" ;;
+esac
+EOF
+	sleep 120 &
+	_sp=$!
+	lbl >"$S/lbl.before"
+	_k=0
+	for _mode in 2 4 ptraceable stack mask delayed later; do
+		for _who in nobody root; do
+			[ "$_mode" != delayed ] && [ "$_mode" != later ] || [ "$_who" = root ] || continue
+			_x=
+			if [ "$_mode" = delayed ]; then
+				rm -f "$S/mask.applied"
+				_x="$BE_SHIM DR_MASK_PID=$_sp DR_MASK_FLAG=$S/mask.applied"
+			fi
+			_cf=
+			if [ "$_mode" = later ]; then
+				rm -rf "$S/mask.applied" "$S/tmpl" "$S/benchcfgL"
+				mkdir "$S/tmpl" "$S/benchcfgL" || return 1
+				_cf=$S/benchcfgL
+				_x="$BE_SHIM TMPDIR=$S/tmpl DR_MASK_AFTER_OBS=$S/tmpl DR_LMASK_PID=$_sp DR_MASK_FLAG=$S/mask.applied DR_RELEASE=$S/benchcfgL/release"
+			fi
+			_k=$((_k + 1))
+			_rn=bench-20261017T13$(printf '%02d' "$_k")00Z
+			(cd "$S/repo" && exec env BOXSET_BENCH_CONFIG=${_cf:-$S/benchcfg} $_x unshare -m --propagation private sh "$S/proc.sh" "$_sp" "$_who" "$BED/$_rn/samples" "$_mode") </dev/null >"$S/out" 2>&1
+			RC=$?
+			need "$_mode/$_who: rejected, status 125 and the fixed reason" [ "$RC" = 125 ] && grep -Fxq 'dev-run: bench_invalid side=proc' "$S/out" &&
+				need "$_mode/$_who: no pass, no publication" none -q -e PARSER-LATENCY -e DEV-RUN-BENCH-PUBLISHED "$S/out" &&
+				need "$_mode/$_who: nothing created" [ "$(lbl)" = "$(cat "$S/lbl.before")" ] && [ ! -e "$_dr/$_rn" ] || { kill "$_sp" 2>/dev/null; return 1; }
+			if [ "$_who" = nobody ] && [ "$_mode" != stack ] || [ "$_mode" = mask ]; then
+				need "$_mode/$_who: the competing task was really hidden from this caller" grep -Fxq 'canary competing-task=hidden' "$S/out" || { kill "$_sp" 2>/dev/null; return 1; }
+			fi
+			case $_mode in
+			2 | 4 | ptraceable)
+				need "$_mode/$_who: the restricted /proc is the one mount at /proc, so only the mode can be what rejects it" grep -Fxq 'canary proc-mounts=1' "$S/out" || { kill "$_sp" 2>/dev/null; return 1; }
+				;;
+			stack)
+				need "$_mode/$_who: two mounts at /proc" grep -Fxq 'canary proc-mounts=2' "$S/out" || { kill "$_sp" 2>/dev/null; return 1; }
+				;;
+			mask)
+				need "$_mode/$_who: root cannot see it either, and the visible share is above the old bound" grep -Fxq 'canary root-sees-it=no' "$S/out" &&
+					need "$_mode/$_who: the old 97% rule would have accepted it" grep -Fxq 'canary share-above-old-threshold=yes' "$S/out" &&
+					need "$_mode/$_who: only the one task entry is masked" grep -Fxq 'canary proc-mounts=1' "$S/out" || { kill "$_sp" 2>/dev/null; return 1; }
+				;;
+			esac
+			if [ "$_mode" = delayed ] || [ "$_mode" = later ]; then
+				need "$_mode/root: the mask was applied, hiding the task from root" [ -e "$S/mask.applied" ] || { kill "$_sp" 2>/dev/null; return 1; }
+			fi
+			if [ "$_mode" = later ]; then
+				need "later/root: at mask time a successful observation existed and the child was still running, held on its gate ($(cat "$S/mask.applied" 2>/dev/null))" grep -Eq '^[1-9][0-9]* running=[1-9][0-9]* gate=held$' "$S/mask.applied" || { kill "$_sp" 2>/dev/null; return 1; }
+				need "later/root: the gate was released only after the mask" [ -e "$S/benchcfgL/release" ] || { kill "$_sp" 2>/dev/null; return 1; }
+			fi
+			BE_N=$((BE_N + 1))
+		done
+	done
+	kill "$_sp" 2>/dev/null
+	wait "$_sp" 2>/dev/null
+	return 0
+}
+# be_e: a disposable image-input fault. The scratch Dockerfile gets one extra last RUN that leaves an
+# imported canonical fact writable by UID 1000 (every record and directory owned by it), or only a
+# replacement-capable parent (the run directory owned by it, the files still root 0444), while every
+# imported byte, and so the image manifest, stays the same. The next invocation's child shows the
+# write access is real, and the final judge, built as production, returns record_mutable for the run
+# that passes on the normal image (be_c) and never a pass line.
+BE_FAULT='CGO_ENABLED=0 go build -trimpath -o /tmp/parserbench ./bench/parser || exit 1
+run=docs/spikes/data/$1
+for p in "$run/before.json" "$run/samples/samples.jsonl" "$run" "$run/samples"; do
+	[ -w "$p" ] && echo "canary writable ${p#"$run"}=yes" || echo "canary writable ${p#"$run"}=no"
+done
+o=$(/tmp/parserbench -judge "$run")
+printf "judged %s rc=%s %s\n" "$1" "$?" "$o"'
+be_fault() {
+	cp "$S/repo/deploy/dev/Dockerfile" "$S/Dockerfile.fault.orig" || return 1
+	printf '\n%s\n' "$2" >>"$S/repo/deploy/dev/Dockerfile"
+	rr -- sh -c "$BE_FAULT" sh "$RUNC"
+	_frc=$RC
+	cat "$S/Dockerfile.fault.orig" >"$S/repo/deploy/dev/Dockerfile" || return 1
+	need "$1: the child ran" [ "$_frc" = 0 ] &&
+		need "$1: write access is real" grep -Fxq "$3" "$S/out" &&
+		need "$1: record_mutable and no pass" grep -Fxq "judged $RUNC rc=3 PARSER-LATENCY-INVALID reason=record_mutable" "$S/out" &&
+		need "$1: no pass line" none -q 'PARSER-LATENCY-PASS' "$S/out" || return 1
+	BE_N=$((BE_N + 1))
+}
+be_e() {
+	be_fault 'records and directories writable' 'RUN chown -R boxset:boxset /src/docs/spikes/data && chmod -R u+w /src/docs/spikes/data' 'canary writable /before.json=yes' &&
+		be_fault 'parent only writable' "RUN chown boxset:boxset /src/docs/spikes/data/$RUNC && chmod 0755 /src/docs/spikes/data/$RUNC" 'canary writable =yes'
+}
+# be_n: the local-NVMe proof of the runner's /config, on private sysfs trees (never a live host device).
+# nv_disk ROOT NAME VENDOR ROT PATH: disk NAME at ROOT/devices/PATH with queue/rotational ROT, a device link
+# to the controller directory beside it (vendor text VENDOR there, none when -) and block/NAME for it.
+nv_disk() {
+	mkdir -p "$1/block" "$1/devices/$5/$2/queue" "$1/devices/$5/ctrl" &&
+		printf '%s\n' "$4" >"$1/devices/$5/$2/queue/rotational" &&
+		ln -s ../ctrl "$1/devices/$5/$2/device" &&
+		ln -s "$1/devices/$5/$2" "$1/block/$2" &&
+		{ [ "$3" = - ] || printf '%s\n' "$3" >"$1/devices/$5/ctrl/vendor"; }
+}
+# nv_md ROOT ROTB: block md0 with two partition slaves, each of its own NVMe disk (the second rotational ROTB).
+nv_md() {
+	nv_disk "$1" da NVMe 0 pci/ctl-a && nv_disk "$1" db NVMe "$2" pci/ctl-b &&
+		mkdir -p "$1/devices/pci/ctl-a/da/da1" "$1/devices/pci/ctl-b/db/db1" "$1/block/md0/slaves" &&
+		: >"$1/devices/pci/ctl-a/da/da1/partition" && : >"$1/devices/pci/ctl-b/db/db1/partition" &&
+		ln -s "$1/devices/pci/ctl-a/da/da1" "$1/block/md0/slaves/da1" &&
+		ln -s "$1/devices/pci/ctl-b/db/db1" "$1/block/md0/slaves/db1"
+}
+# nv_is ROOT BLOCK WANT RC: the runner's self-check prints exactly WANT (and no path), with status RC.
+nv_is() {
+	_nvo=$(cd "$S/repo" && sh scripts/dev-run.sh --backing-nvme-check "$1" "/dev/$2" 2>&1 </dev/null)
+	_nvc=$?
+	need "$2: $3" [ "$_nvo" = "$3" ] &&
+		need "$2: status $4" [ "$_nvc" = "$4" ] &&
+		need "$2: no path in the output" [ "${_nvo#*/}" = "$_nvo" ] || return 1
+	BE_N=$((BE_N + 1))
+}
+# nv_setup: a synthetic config directory, a df shim that answers only for it (an ext4 md0, a fixture name, not a
+# host device; any other df is the real one) and the runner wrapper that binds the tree NV_TREE over /sys in a
+# mount namespace of its own (private, so the host's /sys is never touched) before it runs the unmodified runner.
+nv_setup() {
+	mkdir "$S/nvcfg" "$S/nvshim" &&
+		cat >"$S/nvshim/df" <<'EOF' &&
+#!/bin/sh
+for a; do l=$a; done
+[ "$l" = "$NV_CFG" ] || exec "$NV_REAL_DF" "$@"
+printf 'Filesystem Type\n/dev/md0 ext4\n'
+EOF
+		chmod 0755 "$S/nvshim/df" &&
+		cat >"$S/nvwrap.sh" <<'EOF'
+exec unshare -m sh -c 'mount --bind "$NV_TREE" /sys && exec sh scripts/dev-run.sh "$@"' sh "$@"
+EOF
+}
+# nv_pub TREE WANT RUN: one short --bench publication of the unmodified scratch runner (its line stays
+# `backing_nvme /sys "$1"`) over TREE bound as /sys: the host-written before, during and after records each carry
+# config_nvme WANT (true or false) and the runner's output has no slash.
+nv_pub() {
+	RSH=$S/nvwrap.sh
+	RRENV="BOXSET_BENCH_CONFIG=$S/nvcfg PATH=$S/nvshim:$PATH NV_REAL_DF=$(command -v df) NV_CFG=$S/nvcfg NV_TREE=$1"
+	rr --bench "$BE_CPU" --write "$BED/$3/samples" -- sh -c "$BE_FASTCHILD" sh "/src/$BED/$3/samples" 1 0
+	RRENV=
+	RSH=
+	need "$3: published" [ "$RC" = 0 ] &&
+		need "$3: published line" grep -Fxq "DEV-RUN-BENCH-PUBLISHED run=$3 files=4" "$S/out" &&
+		need "$3: the output has no slash" none -q -e / "$S/out" || return 1
+	for _f in before during after; do
+		need "$3: $_f.json config_nvme $2" grep -q "\"config_fs\":\"ext4\",\"config_nvme\":$2," "$S/repo/$BED/$3/$_f.json" || return 1
+	done
+	rm -rf "$S/repo/$BED/$3" || return 1
+	BE_N=$((BE_N + 1))
+}
+# The one config call passes the literal /sys and no device-name test is left; the usage line is untouched.
+# After the controls, the scratch copy of the runner (and so every real --bench run below) reads the first
+# tree instead of this host's /sys, whose df source of the scratch is not a disk.
+be_n() {
+	_rn=$S/repo/scripts/dev-run.sh
+	_nt=$S/nv
+	need 'bench_config passes the literal /sys, once' [ "$(grep -Fxc "$(printf '\tbacking_nvme /sys "$1" || return 1')" "$_rn")" = 1 ] &&
+		need 'no device-name test is left' none -q 'dev/nvme' "$_rn" &&
+		need 'the flag is not in the usage line' none -q 'usage:.*backing-nvme' "$_rn" || return 1
+	mkdir "$_nt" && nv_md "$_nt/t1" 0 && nv_md "$_nt/t2" 1 &&
+		nv_disk "$_nt/t3" sda ATA 0 pci/ata && nv_disk "$_nt/t4" sdb NVMe 0 pci/iscsi &&
+		nv_disk "$_nt/t5" d0 Samsung 0 pci/nvme && mkdir -p "$_nt/t6/block/md1/slaves" || return 1
+	nv_disk "$_nt/t7" sdc NVMe 0 pci/nvme && rm "$_nt/t7/devices/pci/nvme/sdc/queue/rotational" &&
+		nv_disk "$_nt/t8" sdd NVMe 0 pci/nvme && ln -sfn ../gone "$_nt/t8/devices/pci/nvme/sdd/device" || return 1
+	nv_is "$_nt/t1" md0 nvme=1 0 &&
+		nv_is "$_nt/t2" md0 nvme=0 0 &&
+		nv_is "$_nt/t3" sda nvme=0 0 &&
+		nv_is "$_nt/t4" sdb nvme=0 0 &&
+		nv_is "$_nt/t5" d0 nvme=1 0 &&
+		nv_is "$_nt/t6" md1 unreadable 1 &&
+		nv_is "$_nt/t7" sdc unreadable 1 &&
+		nv_is "$_nt/t8" sdd unreadable 1 || return 1
+	BE_CPU=$(sed -n 's/^Cpus_allowed_list:[[:space:]]*\([0-9][0-9]*\).*/\1/p' /proc/self/status)
+	need 'a one-core cpuset' [ -n "$BE_CPU" ] && nv_setup &&
+		nv_pub "$_nt/t1" true bench-20261017T110100Z &&
+		nv_pub "$_nt/t2" false bench-20261017T110200Z || return 1
+	sed 's#^\([[:space:]]*\)backing_nvme /sys "\$1" || return 1$#\1backing_nvme '"$_nt"'/t1 /dev/md0 || return 1#' "$_rn" >"$S/nvrunner.sh" &&
+		[ "$(grep -c "backing_nvme $_nt/t1 /dev/md0 || return 1\$" "$S/nvrunner.sh")" = 1 ] &&
+		cat "$S/nvrunner.sh" >"$_rn"
+}
+
 if [ "$MODE" = tools-failure ]; then
 	cp "$PROBE" "$S/Probe.orig" && cp "$VCONF" "$S/vite.orig" && cp "$RUNNER" "$S/runner.orig" || exit 2
 	for _s in tf_fail tf_write tf_read tf_stall tf_success tf_cap tf_env tf_log tf_sink tf_big; do
@@ -1033,6 +1897,20 @@ if [ "$MODE" = tools-failure ]; then
 		fi
 	done
 	echo "S5-FAILURE-PROOF-PASS draft=retained downstream=$_down"
+	exit 0
+fi
+
+if [ "$MODE" = benchmark-evidence ]; then
+	for _s in be_n be_a be_b be_c be_d be_e; do
+		if "$_s"; then
+			echo "ok $_s"
+		else
+			echo "not ok $_s"
+			head -c 3000 "$S/out" | sed 's/^/# /'
+			exit 1
+		fi
+	done
+	echo "BENCH-EVIDENCE-PASS controls=$BE_N"
 	exit 0
 fi
 

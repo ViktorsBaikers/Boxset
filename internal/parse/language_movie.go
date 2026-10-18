@@ -168,7 +168,7 @@ func (t *languageTable) parse(b *budget, title string) ([]string, error) {
 					found = append(found, g.language)
 				}
 			}
-			m, err = b.next(pass.re, m)
+			m, err = b.next(pass.re, title, m)
 		}
 		if err != nil {
 			return nil, err

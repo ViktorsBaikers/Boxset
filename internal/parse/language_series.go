@@ -133,7 +133,7 @@ func (t *seriesLanguageTable) parse(b *budget, title string) ([]string, error) {
 				found = append(found, g.language)
 			}
 		}
-		m, err = b.next(t.insensitive, m)
+		m, err = b.next(t.insensitive, title, m)
 	}
 	if err != nil {
 		return nil, err

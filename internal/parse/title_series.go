@@ -392,7 +392,7 @@ func (b *budget) all(re *regexp2.Regexp, s string) ([]*regexp2.Match, error) {
 	m, err := b.first(re, s)
 	for m != nil && err == nil {
 		out = append(out, m)
-		m, err = b.next(re, m)
+		m, err = b.next(re, s, m)
 	}
 	return out, err
 }

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Canonical Boxset dev runner (host, repository root only):
-#   scripts/dev-run.sh [--ref] [--write docs/spikes/issue-drafts|testdata/parser] [--capture DIR] [--timeout SECONDS] -- COMMAND [ARG...]
+#   scripts/dev-run.sh [--ref] [--write docs/spikes/issue-drafts|testdata/parser|docs/spikes/data/bench-<UTC>/samples] [--capture DIR] [--bench CPUSET] [--timeout SECONDS] -- COMMAND [ARG...]
 #
 # Rebuilds the `work` image from the current allowlisted inputs (frozen locks,
 # never a lock regeneration) and runs COMMAND with its exact argv in one fresh,
@@ -12,7 +12,8 @@
 # one), so no owner Docker proxy or credential setting reaches a build or the
 # container. No host environment, .env, Docker socket, mount or port reaches the
 # child. Stdout and stderr are merged through the host redactor
-# (deploy/dev/redact -cap) and bounded to 64 KiB.
+# (deploy/dev/redact -cap) and bounded to 256 KiB (262144 bytes; the canonical verbose benchmark-package
+# test run is a little over 64 KiB). More output than that is output_overflow, exit 125, never a success.
 # Exit status: the child's (Docker's checked terminal state), 124 on the
 # deadline, or 125 with a fixed reason word on stderr.
 #
@@ -49,8 +50,35 @@
 # and BOXSET_REF_MOVIE_COMMIT, and the created container has no mount (else mounts_invalid). The
 # reference is text for extraction only: it is never executed. A corpus export (--write
 # testdata/parser) is published only when the raw file of the stopped container hashes as the
-# sanitized staged bytes (else export_changed). --bench belongs to later work and fails with
-# bench_unavailable.
+# sanitized staged bytes (else export_changed).
+#
+# --bench CPUSET (CPUSET = the owner's reserved cores, digits, commas and ranges) runs the child as a
+# reference-profile benchmark: --cpuset-cpus CPUSET --memory 4g --memory-swap 4g and the host directory
+# BOXSET_BENCH_CONFIG (an absolute path, read from the environment at run time and never written
+# anywhere) mounted read-only at /config. It is valid only with --write of a fresh
+# docs/spikes/data/bench-<UTC YYYYMMDDTHHMMSSZ>/samples root and never with --capture; every other
+# form is rejected before Docker with `dev-run: bench_invalid side=<cpuset|write|samples|config|daemon>`
+# or `dev-run: bench_unavailable side=config` (variable unset or empty), exit 125; the daemon must be
+# a unix socket of this machine that runs this machine's kernel (the host /proc and /sys are what is
+# observed), and no endpoint is ever printed. The container itself is proven to be this machine's: the pid
+# the daemon reports must be a task of this /proc whose cgroup names the container, and its /config must be
+# the device and inode every observation reads (a renamed and recreated path fails). A /proc mounted with
+# hidepid, a second /proc mount or any mount over a task entry (bench_invalid side=proc), whoever the caller, is rejected before Docker. The host, never the
+# child, observes the run: RUN/before.json (after the container exists, before it starts),
+# RUN/during.json (every observation while it runs, once a second) and RUN/after.json (after it
+# stopped) are aggregates of fixed numbers, enums and booleans only (schema: bench/parser/eligibility.go;
+# no task listing, command line, environment, CPU list, path or host name). They are written from the
+# host and published beside RUN/samples, never mounted into or writable by the child. Each
+# observation reads the threads of this machine and the /config filesystem and entries again; it
+# is complete or it fails: a /proc walk cut short, an unreadable live task, an unscannable /config
+# (an unreadable directory is not an empty one) or a sampler that failed after any observation is
+# bench_evidence_failed, and nothing is published (a task that vanished meanwhile is not a failure).
+# The mount of /config is compared in memory; the owner value is never written to the scratch. After a
+# child exit 0 only the stopped container's regular samples.jsonl is exported (the corpus rules: one
+# regular file, at most 32 MiB, through the redactor) together with the three records, into the
+# fresh RUN directory; a nonzero child, an observation that could not be read (bench_evidence_failed)
+# or any export failure publishes nothing. Observation is not a reservation: the owner reserves the
+# cores, and `bench/parser -judge RUN` (the next invocation, from a refreshed image) decides.
 # Bootstrap before the redactor exists prints only a fixed reason word; recovery:
 # docs/spikes/s5-version-admission.md.
 #
@@ -76,7 +104,7 @@ LC_ALL=C
 export LC_ALL
 umask 022
 
-CAP=65536
+CAP=262144
 DRAFTS='s5-admission.md s5-tools.md'
 WRITE_CHAIN='docs docs/spikes docs/spikes/issue-drafts'
 WCAP=65536
@@ -99,6 +127,12 @@ CAPSTREAM=2162688
 CHAL=
 CAPMADE=0
 CAPDONE=0
+BENCHCPU=
+BENCHLIST=
+BENCHRUN=
+BENCHCFG=
+SAMPLER=
+CID=
 
 die() {
 	printf 'dev-run: %s\n' "$1" >&2
@@ -106,13 +140,84 @@ die() {
 }
 
 usage() {
-	printf '%s\n' 'usage: scripts/dev-run.sh [--ref] [--write docs/spikes/issue-drafts|testdata/parser] [--capture DIR] [--timeout SECONDS] -- COMMAND [ARG...]' >&2
+	printf '%s\n' 'usage: scripts/dev-run.sh [--ref] [--write docs/spikes/issue-drafts|testdata/parser|docs/spikes/data/bench-<UTC>/samples] [--capture DIR] [--bench CPUSET] [--timeout SECONDS] -- COMMAND [ARG...]' >&2
 	die usage
 }
+
+# backing_nvme SYSROOT SOURCE: CFG_NVME (1 or 0) for the block device SOURCE (/dev/<name>) as SYSROOT's sysfs
+# shows it; status 1 when any fact cannot be read (the disks are never named). The members are the slaves of
+# an md or device-mapper block (the block itself without slaves); a partition resolves to its parent disk.
+# Every disk must be non-rotational, local (a pci or platform device path, no network transport word) and
+# NVMe (vendor text, or a device path component naming nvme but not nvmf). Production passes the literal /sys.
+backing_nvme() {
+	[ $# = 2 ] || return 1
+	case $2 in /dev/*) _bc=${2#/dev/} ;; *) return 1 ;; esac
+	case $_bc in '' | . | .. | *[!A-Za-z0-9._-]*) return 1 ;; esac
+	_bk=$1/block/$_bc
+	[ -d "$_bk" ] || return 1
+	if [ -d "$_bk/slaves" ]; then
+		_bm=$(timeout 30 find "$_bk/slaves" -mindepth 1 -maxdepth 1 -print 2>/dev/null) || return 1
+		[ -n "$_bm" ] || return 1
+	else
+		_bm=$_bk
+	fi
+	_nl='
+'
+	_bd=
+	while IFS= read -r _bi; do
+		[ -d "$_bi" ] || return 1
+		_br=$(timeout 30 readlink -f -- "$_bi" 2>/dev/null) || return 1
+		[ ! -e "$_bi/partition" ] || _br=${_br%/*}
+		case $_nl$_bd in *"$_nl$_br$_nl"*) ;; *) _bd=$_bd$_br$_nl ;; esac
+	done <<EOF
+$_bm
+EOF
+	[ -n "$_bd" ] || return 1
+	CFG_NVME=1
+	while IFS= read -r _bx; do
+		[ -n "$_bx" ] || continue
+		_rv=
+		[ -r "$_bx/queue/rotational" ] || return 1
+		read -r _rv <"$_bx/queue/rotational" 2>/dev/null || [ -n "$_rv" ] || return 1
+		[ "$_rv" = 0 ] || CFG_NVME=0
+		[ -L "$_bx/device" ] || return 1
+		_dl=$(timeout 30 readlink -f -- "$_bx/device" 2>/dev/null) || return 1
+		[ -e "$_dl" ] || return 1
+		_loc=0
+		_rem=0
+		_nv=0
+		_bo=$IFS
+		IFS=/
+		set -- $_dl
+		IFS=$_bo
+		for _c in "$@"; do
+			case $_c in pci* | platform*) _loc=1 ;; esac
+			case $_c in iscsi* | fc* | srp* | rbd* | nbd* | nvmf*) _rem=1 ;; esac
+			case $_c in *nvmf*) ;; *nvme*) _nv=1 ;; esac
+		done
+		[ "$_loc$_rem" = 10 ] || CFG_NVME=0
+		_vn=
+		[ ! -r "$_bx/device/vendor" ] || read -r _vn <"$_bx/device/vendor" 2>/dev/null || :
+		case $_vn in *[Nn][Vv][Mm][Ee]*) _nv=1 ;; esac
+		[ "$_nv" = 1 ] || CFG_NVME=0
+	done <<EOF
+$_bd
+EOF
+}
+# Self-check, not a usage form: --backing-nvme-check SYSROOT /dev/NAME prints nvme=1, nvme=0 or unreadable.
+if [ "${1:-}" = --backing-nvme-check ]; then
+	{ [ $# = 3 ] && backing_nvme "$2" "$3"; } || {
+		printf 'unreadable\n'
+		exit 1
+	}
+	printf 'nvme=%s\n' "$CFG_NVME"
+	exit 0
+fi
 
 # Removes only what this invocation created: its labelled container (the label
 # carries the random run id) and its scratch directory, if still ours.
 cleanup() {
+	[ -z "$SAMPLER" ] || : >"$T/f/stop" 2>/dev/null
 	if [ -n "$RUNID" ]; then
 		_ids=$(timeout 30 docker ps -aq --filter "label=boxset.dev-run=$RUNID" 2>/dev/null)
 		[ -z "$_ids" ] || timeout 60 docker rm -f $_ids >/dev/null 2>&1
@@ -144,8 +249,9 @@ while [ $# -gt 0 ]; do
 		shift
 		;;
 	--bench)
-		[ $# -ge 2 ] || usage
+		{ [ $# -ge 2 ] && [ "$HAVE_BENCH" = 0 ]; } || usage
 		HAVE_BENCH=1
+		BENCHCPU=$2
 		shift
 		;;
 	--write)
@@ -168,9 +274,50 @@ done
 shift
 [ $# -gt 0 ] || usage
 
+# bench_ids LIST: IDS = the CPU ids of a list such as 0-3,8 (comma-separated N or N-M of at most four
+# digits without leading zeros, N <= M, at most 1024 ids in all); status 1 for anything else. Builtins
+# only, so it also runs before any host tool is reachable.
+bench_ids() {
+	IDS=
+	_bn=0
+	case $1 in '' | [,-]* | *[,-]) return 1 ;; esac
+	case $1 in *[!0-9,-]*) return 1 ;; esac
+	_bo=$IFS
+	IFS=,
+	set -- $1
+	IFS=$_bo
+	for _bp in "$@"; do
+		_ba=${_bp%%-*}
+		_bb=${_bp#*-}
+		{ [ -n "$_ba" ] && [ -n "$_bb" ]; } || return 1
+		case $_ba$_bb in *[!0-9]*) return 1 ;; esac
+		case $_ba in 0?*) return 1 ;; esac
+		case $_bb in 0?*) return 1 ;; esac
+		{ [ "${#_ba}" -le 4 ] && [ "${#_bb}" -le 4 ] && [ "$_ba" -le "$_bb" ]; } || return 1
+		_bi=$_ba
+		while [ "$_bi" -le "$_bb" ]; do
+			_bn=$((_bn + 1))
+			[ "$_bn" -le 1024 ] || return 1
+			IDS="$IDS $_bi"
+			_bi=$((_bi + 1))
+		done
+	done
+}
 if [ "$HAVE_BENCH" = 1 ]; then
 	[ "$HAVE_CAPTURE" = 0 ] || die capture_flag_invalid
-	die bench_unavailable
+	bench_ids "$BENCHCPU" || die 'bench_invalid side=cpuset'
+	BENCHLIST=$IDS
+	[ "$HAVE_WRITE" = 1 ] || die 'bench_invalid side=write'
+	case $WRITE in
+	docs/spikes/data/bench-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z/samples) ;;
+	*) die 'bench_invalid side=samples' ;;
+	esac
+	BENCHRUN=${WRITE%/samples}
+	BENCHCFG=${BOXSET_BENCH_CONFIG:-}
+	[ -n "$BENCHCFG" ] || die 'bench_unavailable side=config'
+	case $BENCHCFG in /*) ;; *) die 'bench_invalid side=config' ;; esac
+	case $BENCHCFG in *[!A-Za-z0-9_./+@=-]* | */ | *//* | */./* | */../* | */. | */..) die 'bench_invalid side=config' ;; esac
+	{ [ -d "$BENCHCFG" ] && [ ! -L "$BENCHCFG" ]; } || die 'bench_invalid side=config'
 fi
 case $TIMEOUT in
 '' | 0* | *[!0-9]*) die timeout_invalid ;;
@@ -185,11 +332,22 @@ if [ "$HAVE_WRITE" = 1 ]; then
 		WCAP=33554432
 		STREAMCAP=33751040
 		;;
+	docs/spikes/data/bench-*/samples)
+		[ "$HAVE_BENCH" = 1 ] || die write_path_invalid
+		DRAFTS='samples.jsonl'
+		WRITE_CHAIN='docs docs/spikes docs/spikes/data'
+		WCAP=33554432
+		STREAMCAP=33751040
+		;;
 	*) die write_path_invalid ;;
 	esac
 fi
 
 { [ -f deploy/dev/Dockerfile ] && [ -f scripts/dev-run.sh ] && [ -f .dockerignore ]; } || die not_repo_root
+# The benchmark run directory is fresh: it must not exist yet.
+if [ "$HAVE_BENCH" = 1 ]; then
+	{ [ ! -e "$BENCHRUN" ] && [ ! -L "$BENCHRUN" ]; } || die 'bench_invalid side=samples'
+fi
 
 # chain_ok PATH: every component of the relative PATH is a real directory, not a link.
 chain_ok() {
@@ -287,11 +445,61 @@ fi
 for _t in docker mktemp timeout od tr rm mv mkdir cat find sha256sum chmod grep head tar env sed wc; do
 	command -v "$_t" >/dev/null 2>&1 || die host_tool_missing
 done
+if [ "$HAVE_BENCH" = 1 ]; then
+	for _t in awk date df sort id timeout stat readlink; do
+		command -v "$_t" >/dev/null 2>&1 || die host_tool_missing
+	done
+	# The benchmark counts competing tasks in /proc: that view must be positively the whole machine's, and
+	# a share of the kernel's task count is not such a proof (one hidden task is a tiny share). So the mount
+	# table is the proof: exactly one mount at /proc, of type proc, with no hidepid other than 0/off and no
+	# subset=pid (whoever the caller is; root is not proof), and no mount of any kind over a task entry
+	# (/proc/<pid>, /proc/self, /proc/thread-self or anything below them) that could mask a task's tree. No
+	# /proc mount line at all is not proof either. The proof is repeated around every observation, so a mask
+	# applied after startup is rejected too; each observation also compares the tasks it read with the
+	# kernel's own total, only as a sanity bound against a gross failure, never as proof.
+	bench_proc_ok() {
+		awk '
+	{ for (i = 1; i <= NF && $i != "-"; i++) ; if (i > NF) next
+	  mp = $5
+	  if (mp ~ /^\/proc\/([0-9]+|self|thread-self)(\/|$)/) bad = 1
+	  if (mp != "/proc") next
+	  n++
+	  if ($(i + 1) != "proc") bad = 1
+	  s = $6 "," $(i + 3)
+	  c = split(s, o, ",")
+	  for (j = 1; j <= c; j++) {
+	    if (o[j] ~ /^hidepid=/ && o[j] != "hidepid=0" && o[j] != "hidepid=off") bad = 1
+	    if (o[j] ~ /^subset=/) bad = 1
+	  }
+	}
+	END { exit (n == 1 && !bad) ? 0 : 1 }' /proc/self/mountinfo 2>/dev/null
+	}
+	# bench_must CMD...: a benchmark step that must succeed: status 4 is the proc proof failing, anything
+	# else nonzero is an unreadable or incomplete observation.
+	bench_must() {
+		"$@"
+		_bm=$?
+		[ "$_bm" != 4 ] || die 'bench_invalid side=proc'
+		[ "$_bm" = 0 ] || die bench_evidence_failed
+	}
+	bench_proc_ok || die 'bench_invalid side=proc'
+fi
 # The daemon the caller selected (context, DOCKER_HOST) is resolved with the
 # caller's own configuration and then pinned; the private configuration below
 # must reach the same daemon or the run stops.
 DID=$(timeout 30 docker info --format '{{.ID}}' 2>/dev/null) && [ -n "$DID" ] || die docker_unavailable
 DH=$(timeout 30 docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null) && [ -n "$DH" ] || die docker_unavailable
+# The benchmark observes this machine's /proc and /sys: its daemon must be a unix socket of this machine
+# that runs this machine's kernel, else the run is rejected before anything is measured or built. The
+# endpoint is never printed.
+bench_local_daemon() {
+	case $DH in unix:///*) ;; *) return 1 ;; esac
+	[ -S "${DH#unix://}" ] || return 1
+	_dk=$(timeout 30 docker info --format '{{.KernelVersion}}' 2>/dev/null) || return 1
+	_lk=$(cat /proc/sys/kernel/osrelease 2>/dev/null) || return 1
+	{ [ -n "$_lk" ] && [ "$_dk" = "$_lk" ]; } || return 1
+}
+[ "$HAVE_BENCH" = 0 ] || bench_local_daemon || die 'bench_invalid side=daemon'
 
 # --- run-private scratch -------------------------------------------------------
 T=$(mktemp -d "${TMPDIR:-/tmp}/boxset-dev-run.XXXXXX" 2>/dev/null) || die temp_dir_failed
@@ -383,17 +591,29 @@ fi
 # create_ctr CHILD_ARGV...: docker create of the owned container, never with a mount; the image is
 # followed by the byte-exact child argv.
 create_ctr() {
-	timeout 60 docker create --name "$CTR" --label "boxset.dev-run=$RUNID" --network none \
-		--cap-drop ALL --security-opt no-new-privileges --log-driver=none --user 1000:1000 --workdir /src \
-		--env-file "$T/lit" "$IMG" "$@" >/dev/null 2>&1
+	if [ "$HAVE_BENCH" = 1 ]; then
+		timeout 60 docker create --name "$CTR" --label "boxset.dev-run=$RUNID" --network none \
+			--cap-drop ALL --security-opt no-new-privileges --log-driver=none --user 1000:1000 --workdir /src \
+			--cpuset-cpus "$BENCHCPU" --memory 4g --memory-swap 4g \
+			--mount "type=bind,source=$BENCHCFG,target=/config,readonly" \
+			--env-file "$T/lit" "$IMG" "$@" >/dev/null 2>&1
+	else
+		timeout 60 docker create --name "$CTR" --label "boxset.dev-run=$RUNID" --network none \
+			--cap-drop ALL --security-opt no-new-privileges --log-driver=none --user 1000:1000 --workdir /src \
+			--env-file "$T/lit" "$IMG" "$@" >/dev/null 2>&1
+	fi
 }
 create_ctr "$@" || die create_failed
 [ "$(timeout 30 docker inspect --format '{{.HostConfig.LogConfig.Type}}' "$CTR" 2>/dev/null)" = none ] || die log_driver_invalid
-# Effective mounts: none, whatever the flags (the reference text is delivered by copy, never mounted).
-timeout 30 docker inspect --format '{{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}} {{.RW}}{{println}}{{end}}' "$CTR" 2>/dev/null |
-	LC_ALL=C sort >"$T/mnt" || die mounts_invalid
-sed -i -e '/^$/d' "$T/mnt" || die mounts_invalid
-[ ! -s "$T/mnt" ] || die mounts_invalid
+# Effective mounts: none (the reference text is delivered by copy, never mounted), or with --bench
+# exactly the one read-only /config bind of the owner's directory.
+_mnt=$(timeout 30 docker inspect --format '{{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}} {{.RW}}{{println}}{{end}}' "$CTR" 2>/dev/null) || die mounts_invalid
+if [ "$HAVE_BENCH" = 1 ]; then
+	[ "$_mnt" = "bind $BENCHCFG /config false" ] || die mounts_invalid
+else
+	[ -z "$_mnt" ] || die mounts_invalid
+fi
+_mnt=
 # Effective environment: every created-container line is a literal above or the
 # image's own, and every literal survived unchanged (nothing injected, nothing replaced).
 timeout 30 docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CTR" >"$T/eff" 2>/dev/null || die env_invalid
@@ -470,10 +690,415 @@ INPUTS=$(sha256sum <"$T/inputs") || die inputs_unavailable
 INPUTS=${INPUTS%% *}
 printf 'dev-run: image=%s inputs=%s timeout=%ss container=%s log=none%s\n' "$IMG" "$INPUTS" "$TIMEOUT" "$CTR" "$([ "$HAVE_REF" = 0 ] || printf ' ref=objects')" >&2
 
+# --- benchmark host evidence (--bench) -----------------------------------------------------
+# The host observes; the child never sees or writes these. Every record is aggregates of fixed
+# numbers, enums and booleans (bench/parser/eligibility.go owns the schema): no CPU list, task
+# listing, command line, environment, path or host name. A value that cannot be read fails closed
+# (bench_evidence_failed, nothing published); a value that reads but is not eligible is recorded and
+# the judge decides.
+# bench_topology: TOPO_CPUS, TOPO_CORES, TOPO_TPC (largest SMT sibling count of a member), TOPO_SIBOUT
+# (siblings that are not members) and TOPO_NUMA of the reserved set. An unreadable CPU zeroes cores,
+# threads and nodes, which the judge rejects.
+SYSCPU=/sys/devices/system/cpu
+bench_topology() {
+	TOPO_CPUS=0
+	TOPO_TPC=0
+	TOPO_SIBOUT=0
+	TOPO_SIBLIST=
+	_unk=0
+	: >"$T/f/cores" && : >"$T/f/nodes" || return 1
+	for _c in $BENCHLIST; do
+		_d=$SYSCPU/cpu$_c
+		TOPO_CPUS=$((TOPO_CPUS + 1))
+		_pk=$(cat "$_d/topology/physical_package_id" 2>/dev/null) || _unk=1
+		_co=$(cat "$_d/topology/core_id" 2>/dev/null) || _unk=1
+		_sl=$(cat "$_d/topology/thread_siblings_list" 2>/dev/null) || _unk=1
+		case $_pk$_co in '' | *[!0-9]*) _unk=1 ;; esac
+		printf '%s:%s\n' "$_pk" "$_co" >>"$T/f/cores" || return 1
+		if bench_ids "$_sl"; then
+			_k=0
+			for _s in $IDS; do
+				_k=$((_k + 1))
+				case " $BENCHLIST " in *" $_s "*) ;; *) TOPO_SIBOUT=$((TOPO_SIBOUT + 1)); TOPO_SIBLIST="$TOPO_SIBLIST $_s" ;; esac
+			done
+			[ "$_k" -le "$TOPO_TPC" ] || TOPO_TPC=$_k
+		else
+			_unk=1
+		fi
+		find "$_d" -maxdepth 1 -name 'node[0-9]*' -printf '%f\n' 2>/dev/null >>"$T/f/nodes"
+	done
+	TOPO_CORES=$(sort -u "$T/f/cores" | wc -l | tr -d ' ')
+	TOPO_NUMA=$(sort -u "$T/f/nodes" | wc -l | tr -d ' ')
+	if [ "$_unk" = 1 ]; then
+		TOPO_CORES=0
+		TOPO_TPC=0
+		TOPO_NUMA=0
+	fi
+}
+# bench_overlap: "ALLOWED RUNNABLE SEEN": the user threads outside this run's container (CID) whose
+# allowed CPU list meets the reserved set, how many of them are runnable, and how many threads were
+# read. Kernel threads (no address space), threads that exited while being read and the scanner
+# itself (this function's own shell and everything below it) are not counted. The enumeration is
+# complete or the call fails: the list of threads goes through a scratch file, the status of
+# `find` is kept, and its diagnostics may only be "No such file or directory" (a task that vanished
+# while it was walked); a timeout, any other diagnostic, a thread that is still there but cannot be
+# read, or a read that ends early fails the observation (nothing is counted from it).
+bench_overlap() {
+	timeout 30 find /proc -mindepth 4 -maxdepth 4 -path '/proc/[0-9]*/task/[0-9]*/status' -print >"$T/f/tasks" 2>"$T/f/terr"
+	_frc=$?
+	case $_frc in 0 | 1) ;; *) return 1 ;; esac
+	[ "$_frc" = 0 ] || [ -s "$T/f/terr" ] || return 1
+	[ "$(grep -c -v -E '^([^ ]*/)?find: .*: No such file or directory$' "$T/f/terr")" = 0 ] || return 1
+	_ovo=$(awk -v set="$BENCHLIST" -v sibs="$TOPO_SIBLIST" -v cid="$CID" -v cgroot=/sys/fs/cgroup '
+function exists(path) { return system("test -e \x27" path "\x27") == 0 }
+# inlist: whether CPU c is in a CPU list such as 0-3,8.
+function inlist(list, c,   i, k, p, rg, lo, hi) {
+	k = split(list, p, ",")
+	for (i = 1; i <= k; i++) {
+		lo = p[i]
+		hi = lo
+		if (index(lo, "-")) {
+			split(p[i], rg, "-")
+			lo = rg[1]
+			hi = rg[2]
+		}
+		if (c + 0 >= lo + 0 && c + 0 <= hi + 0 && p[i] != "") return 1
+	}
+	return 0
+}
+function intersects(list,   c) {
+	for (c in want) if (inlist(list, c)) return 1
+	return 0
+}
+# meets: a reserved CPU in both the affinity list and the effective cpuset list.
+function meets(list, eff,   c) {
+	for (c in want) if (inlist(list, c) && inlist(eff, c)) return 1
+	return 0
+}
+# effcpus: the effective cpuset list of the cgroup a cgroup file names (cgroup v1 cpuset line or v2), found
+# at the nearest ancestor that has the file; ALL when no ancestor has one (no cpuset restriction); GONE
+# when the task vanished. An existing file that cannot be read, or a cgroup file that fails every read of
+# a live task, fails the scan (bad).
+function effcpus(cgf,   line, rc, try, v1, v2, key, base, suffix, p, f, e) {
+	for (try = 1; try <= 3; try++) {
+		v1 = ""
+		v2 = ""
+		while ((rc = (getline line < cgf)) > 0) {
+			if (line ~ /^0::/) v2 = substr(line, 4)
+			else if (line ~ /^[0-9]+:([^:]*,)?cpuset(,[^:]*)?:/) {
+				v1 = line
+				sub(/^[^:]*:[^:]*:/, "", v1)
+			}
+		}
+		close(cgf)
+		if (rc >= 0) break
+		if (!exists(cgf)) return "GONE"
+		if (try == 3) {
+			bad = 1
+			return "GONE"
+		}
+	}
+	if (v1 != "") {
+		key = "1" v1
+		base = cgroot "/cpuset"
+		suffix = "/cpuset.effective_cpus"
+		p = v1
+	} else if (v2 != "") {
+		key = "2" v2
+		base = cgroot
+		suffix = "/cpuset.cpus.effective"
+		p = v2
+	} else return "ALL"
+	sub(/ \(deleted\)$/, "", p)
+	if (key in cache) return cache[key]
+	cache[key] = "ALL"
+	for (;;) {
+		f = base p suffix
+		e = ""
+		rc = (getline e < f)
+		if (rc >= 0) {
+			close(f)
+			cache[key] = e
+			break
+		}
+		if (exists(f)) {
+			bad = 1
+			break
+		}
+		if (p == "") break
+		sub(/\/[^\/]*$/, "", p)
+	}
+	return cache[key]
+}
+# readthread: up to three reads of one task. A task that is gone before or after a failed read is a
+# vanished task, not a failure; one that fails every read while it is still there is an unreadable
+# live task and fails the scan (bad).
+function readthread(path,   line, f, tg, pp, st, vm, al, rc, try) {
+	for (try = 1; try <= 3; try++) {
+		tg = ""
+		pp = ""
+		st = ""
+		vm = 0
+		al = ""
+		while ((rc = (getline line < path)) > 0) {
+			split(line, f, /[ \t]+/)
+			if (f[1] == "Tgid:") tg = f[2]
+			else if (f[1] == "PPid:") pp = f[2]
+			else if (f[1] == "State:") st = f[2]
+			else if (f[1] == "VmSize:") vm = 1
+			else if (f[1] == "Cpus_allowed_list:") al = f[2]
+		}
+		close(path)
+		if (rc >= 0 && tg != "" && al != "") break
+		if (!exists(path)) return
+		if (try == 3) {
+			bad = 1
+			return
+		}
+	}
+	seen++
+	if (!(tg in par)) par[tg] = pp
+	if (vm && intersects(al)) {
+		n++
+		who[n] = tg
+		state[n] = st
+		alw[n] = al
+		cgf[n] = substr(path, 1, length(path) - 6) "cgroup"
+	}
+	# A running user thread, wherever its affinity allows: if it runs on an SMT sibling outside the set it
+	# competes for a reserved core (checked in END from the CPU it last ran on).
+	if (vm && st == "R") {
+		m++
+		rwho[m] = tg
+		rstat[m] = substr(path, 1, length(path) - 6) "stat"
+	}
+}
+function inside(pid,   d) {
+	for (d = 0; (pid in par) && d < 64; d++) {
+		if (pid == scan) return 1
+		pid = par[pid]
+	}
+	return 0
+}
+BEGIN {
+	k = split(set, ids, " ")
+	for (i = 1; i <= k; i++) want[ids[i]] = 1
+	getline self < "/proc/self/stat"
+	split(self, sf, " ")
+	scan = sf[4]
+}
+{ readthread($0) }
+# cgroupof: 1 when the process is in the container of this run, 0 when it is not, -1 when it is gone;
+# a process that fails every read while it is still there fails the scan (bad).
+function cgroupof(pid,   cg, line, rc, mine, try) {
+	cg = "/proc/" pid "/cgroup"
+	for (try = 1; try <= 3; try++) {
+		mine = 0
+		while ((rc = (getline line < cg)) > 0) if (cid != "" && index(line, cid)) mine = 1
+		close(cg)
+		if (rc >= 0) return mine
+		if (!exists(cg)) return -1
+	}
+	bad = 1
+	return -1
+}
+# lastcpu: the CPU a thread is running on, when it is still running (field 39 of its stat file, read after
+# the last closing parenthesis of the command name), else empty. A thread that is gone is skipped; one
+# that still exists but cannot be read fails the scan (bad). No CPU number leaves this function but as a
+# comparison against the sibling set.
+function lastcpu(sf,   line, rc, rec, s, f, try, nf) {
+	for (try = 1; try <= 3; try++) {
+		# The whole record: the command name may hold spaces and newlines, so every line is read before
+		# the fields after the final closing parenthesis are taken. A record that does not end in the
+		# expected fields (the state a single letter, the CPU a number, and one numeric field after the CPU so
+		# that the CPU token is delimited and cannot be a truncated number) is incomplete.
+		rec = ""
+		nf = 0
+		while ((rc = (getline line < sf)) > 0) rec = (nf++ ? rec "\n" : "") line
+		close(sf)
+		if (rc >= 0 && nf > 0) {
+			s = rec
+			while (index(s, ")")) s = substr(s, index(s, ")") + 1)
+			split(s, f, " ")
+			if (f[1] ~ /^[A-Za-z]$/ && f[37] ~ /^[0-9]+$/ && f[38] ~ /^-?[0-9]+$/) break
+		}
+		if (!exists(sf)) return ""
+		if (try == 3) {
+			bad = 1
+			return ""
+		}
+	}
+	if (f[1] != "R") return ""
+	return f[37]
+}
+END {
+	for (j = 1; j <= n; j++) {
+		if (inside(who[j])) continue
+		cgm = cgroupof(who[j])
+		if (cgm != 0) continue
+		# Affinity alone is not competing work: the task counts only where its effective cgroup cpuset
+		# (and its affinity) still contain a reserved CPU. A cgroup that cannot be read fails the scan.
+		eff = effcpus(cgf[j])
+		if (eff == "GONE") continue
+		if (eff != "ALL" && !meets(alw[j], eff)) continue
+		a++
+		if (state[j] == "R") r++
+	}
+	ns = split(sibs, sl, " ")
+	for (i = 1; i <= ns; i++) sibset[sl[i]] = 1
+	for (j = 1; j <= m && ns > 0; j++) {
+		if (inside(rwho[j])) continue
+		if (cgroupof(rwho[j]) != 0) continue
+		cpu = lastcpu(rstat[j])
+		if (cpu != "" && (cpu in sibset)) sb++
+	}
+	if (bad) exit 2
+	print a + 0, r + 0, seen + 0, sb + 0
+}' "$T/f/tasks") || return 1
+	printf '%s\n' "$_ovo"
+}
+# bench_config: CFG_EXT4, CFG_NVME and CFG_EMPTY (1 or 0) of the read-only /config's backing directory,
+# read now. A failed read of any kind (df, or the directory scan: an unreadable directory is not an empty
+# one) fails the call; empty is only a scan that succeeded and found no entry. Names found are never kept.
+bench_config() {
+	_dfo=$(timeout 30 df --output=source,fstype -- "$BENCHCFG" 2>/dev/null) || return 1
+	set -- $(printf '%s\n' "$_dfo" | awk 'NR == 2 { print $1, $2 }')
+	[ $# = 2 ] || return 1
+	CFG_EXT4=0
+	[ "$2" != ext4 ] || CFG_EXT4=1
+	backing_nvme /sys "$1" || return 1
+	_cid=$(timeout 30 stat -c '%d:%i' -- "$BENCHCFG" 2>/dev/null) || return 1
+	[ "$_cid" = "$CFG_ID" ] || return 1
+	_first=$(timeout 30 find "$BENCHCFG" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) || return 1
+	CFG_EMPTY=0
+	[ -n "$_first" ] || CFG_EMPTY=1
+	_first=
+}
+# bench_obs FILE: appends one observation line `unix allowed runnable load_milli mem_available_kib
+# swap_in swap_out ext4 nvme empty`; status 1 (nothing appended) when any value cannot be read. The
+# /config facts are read again at every observation, so a change between stages reaches the record.
+bench_obs() {
+	_of=$1
+	_u=$(date -u +%s) || return 1
+	_la=$(awk '{ printf "%d", $1 * 1000 }' /proc/loadavg 2>/dev/null) || return 1
+	_mem=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo 2>/dev/null) || return 1
+	_sw=$(awk '/^pswpin / { i = $2 } /^pswpout / { o = $2 } END { print i + 0, o + 0 }' /proc/vmstat 2>/dev/null) || return 1
+	# The mount table is proven again around every scan: a mask mounted after startup (a task hidden behind
+	# a tmpfs, or a restricted /proc) is rejected (status 4), never covered by the task-count bound.
+	bench_proc_ok || return 4
+	_ov=$(bench_overlap) || return 1
+	bench_proc_ok || return 4
+	bench_config || return 1
+	set -- $_ov
+	{ [ $# = 4 ] && [ "$3" -ge 1 ]; } 2>/dev/null || return 1
+	# The view must be the whole machine's: the tasks read are (nearly) all the kernel counts.
+	_tot=$(awk '{ split($4, a, "/"); print a[2] }' /proc/loadavg 2>/dev/null) || return 1
+	case $_tot in '' | *[!0-9]*) return 1 ;; esac
+	[ $(($3 * 100)) -ge $((_tot * 97)) ] || return 1
+	printf '%s %s %s %s %s %s %s %s %s\n' "$_u" "$1 $2" "$_la" "$_mem" "$_sw" "$CFG_EXT4" "$CFG_NVME" "$CFG_EMPTY" "$4" >>"$_of"
+}
+# bench_static: the container id and its limits as Docker created it, set once as CID and FACT_*.
+bench_static() {
+	CID=$(timeout 30 docker inspect --format '{{.Id}}' "$CTR" 2>/dev/null) || return 1
+	case $CID in '' | *[!0-9a-f]*) return 1 ;; esac
+	[ "${#CID}" = 64 ] || return 1
+	_lim=$(timeout 30 docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.CpusetCpus}}' "$CTR" 2>/dev/null) || return 1
+	set -- $_lim
+	[ $# = 3 ] || return 1
+	case $1$2 in '' | *[!0-9]*) return 1 ;; esac
+	FACT_MEM=$1
+	FACT_SWAP=$2
+	FACT_CPUSET=false
+	[ "$3" != "$BENCHCPU" ] || FACT_CPUSET=true
+	FACT_RO=true
+	CFG_ID=$(timeout 30 stat -c '%d:%i' -- "$BENCHCFG" 2>/dev/null) || return 1
+	case $CFG_ID in [0-9]*:[0-9]*) ;; *) return 1 ;; esac
+	# The reserved set's SMT siblings outside it, for the sibling-runnable count of every observation.
+	bench_topology
+}
+# bench_emit STAGE OBSFILE OUTFILE: the stage record from its observation lines (every field a
+# nonnegative integer, else status 1) and the topology read now. The /config facts are true only when
+# true at every observation of the stage.
+bench_emit() {
+	bench_topology || return 1
+	awk -v stage="$1" -v run="${BENCHRUN##*/}" -v image="$IMG" -v inputs="$INPUTS" \
+		-v cpus="$TOPO_CPUS" -v cores="$TOPO_CORES" -v tpc="$TOPO_TPC" -v sibout="$TOPO_SIBOUT" -v numa="$TOPO_NUMA" \
+		-v memlim="$FACT_MEM" -v swaplim="$FACT_SWAP" -v cpusetok="$FACT_CPUSET" -v ro="$FACT_RO" '
+NF != 11 { bad = 1; next }
+{
+	for (i = 1; i <= 11; i++) if ($i !~ /^[0-9]+$/) bad = 1
+	n++
+	if (n == 1) { first = $1; mem = $5; si = $6; so = $7; e4 = 1; nv = 1; em = 1 }
+	last = $1
+	ei = $6
+	eo = $7
+	if ($2 + 0 > am) am = $2 + 0
+	if ($3 + 0 > rm) rm = $3 + 0
+	if ($4 + 0 > lm) lm = $4 + 0
+	if ($5 + 0 < mem + 0) mem = $5
+	if ($8 != 1) e4 = 0
+	if ($9 != 1) nv = 0
+	if ($10 != 1) em = 0
+	if ($11 + 0 > sm) sm = $11 + 0
+}
+END {
+	if (bad || n < 1) exit 1
+	printf "{\"schema\":1,\"stage\":\"%s\",\"run\":\"%s\",\"image\":\"%s\",\"inputs\":\"%s\",", stage, run, image, inputs
+	printf "\"start_unix\":%.0f,\"end_unix\":%.0f,\"observations\":%.0f,", first, last, n
+	printf "\"cpus\":%.0f,\"cores\":%.0f,\"threads_per_core_max\":%.0f,\"siblings_outside_set\":%.0f,\"numa_nodes\":%.0f,", cpus, cores, tpc, sibout, numa
+	printf "\"foreign_allowed_max\":%.0f,\"foreign_runnable_max\":%.0f,\"sibling_runnable_max\":%.0f,\"load1_milli_max\":%.0f,\"mem_available_kib_min\":%.0f,", am, rm, sm, lm, mem
+	printf "\"swap_in_start\":%.0f,\"swap_in_end\":%.0f,\"swap_out_start\":%.0f,\"swap_out_end\":%.0f,", si, ei, so, eo
+	printf "\"mem_limit_bytes\":%.0f,\"memswap_limit_bytes\":%.0f,\"cpuset_matches\":%s,", memlim, swaplim, cpusetok
+	printf "\"config_fs\":\"%s\",\"config_nvme\":%s,\"config_empty\":%s,\"config_readonly\":%s}\n", e4 ? "ext4" : "other", nv ? "true" : "false", em ? "true" : "false", ro
+}' "$2" >"$3"
+}
+# bench_prove: the container runs on this machine's kernel and has the observed directory mounted. The
+# daemon reports the pid of the container's init in its own pid namespace; that pid must be a task of
+# this /proc whose cgroup names this very container (a forwarded socket to another machine, even one
+# with the same kernel release, cannot show that), and its /config must be the device and inode the
+# facts are read from. Status 3: not this machine's container; 1: anything else unproven. The
+# container must be seen running; one that already exited cannot be observed.
+bench_prove() {
+	_try=0
+	while :; do
+		_st=$(timeout 30 docker inspect --format '{{.State.Pid}} {{.State.Running}}' "$CTR" 2>/dev/null) || return 1
+		set -- $_st
+		[ $# = 2 ] || return 1
+		if [ "$2" = true ] && [ "$1" -gt 0 ] 2>/dev/null; then break; fi
+		_try=$((_try + 1))
+		[ "$_try" -lt 50 ] || return 1
+		sleep 0.2
+	done
+	_pid=$1
+	grep -Fq -- "$CID" "/proc/$_pid/cgroup" 2>/dev/null || return 3
+	_mid=$(timeout 30 stat -c '%d:%i' -- "/proc/$_pid/root/config" 2>/dev/null) || return 1
+	[ "$_mid" = "$CFG_ID" ] || return 1
+}
+# bench_sampler: one observation per second into during.obs until the runner leaves the stop file. An
+# observation that fails ends it with status 1 (3 when the container is not this machine's), which the
+# runner checks before anything is published.
+bench_sampler() {
+	bench_prove || exit $?
+	while [ ! -e "$T/f/stop" ]; do
+		bench_obs "$T/f/during.obs" || exit $?
+		sleep 1
+	done
+}
+if [ "$HAVE_BENCH" = 1 ]; then
+	mkdir -m 0700 -- "$T/f" || die bench_evidence_failed
+	bench_must bench_static
+	bench_must bench_obs "$T/f/before.obs"
+	bench_must bench_emit before "$T/f/before.obs" "$T/f/before.json"
+fi
+
 # --- run -------------------------------------------------------------------------
 # Output comes only from the attached stream. The left side of the pipeline
 # reports its status through a fresh scratch file (POSIX sh keeps only the last
 # command's status); a missing or non-numeric value is a failure.
+if [ "$HAVE_BENCH" = 1 ]; then
+	bench_sampler >/dev/null 2>&1 </dev/null &
+	SAMPLER=$!
+fi
 rm -f -- "$T/st"
 { timeout --foreground --kill-after=5s "${TIMEOUT}s" docker start -a "$CTR" 2>&1 </dev/null; printf '%s' "$?" >"$T/st"; } | "$R" -cap "$CAP"
 RS=$?
@@ -508,6 +1133,21 @@ case $STATE in
 *) die status_unknown ;;
 esac
 case $CHILD in '' | *[!0-9]*) die status_unknown ;; esac
+if [ "$HAVE_BENCH" = 1 ]; then
+	# The stopped container is observed last: the sampler ends after its current observation.
+	: >"$T/f/stop" || die bench_evidence_failed
+	wait "$SAMPLER" 2>/dev/null
+	_sst=$?
+	SAMPLER=
+	# A sampler that failed after any observation must not be covered by the observations made now.
+	[ "$_sst" != 3 ] || die 'bench_invalid side=daemon'
+	[ "$_sst" = 4 ] && die 'bench_invalid side=proc'
+	[ "$_sst" = 0 ] || die bench_evidence_failed
+	bench_must bench_obs "$T/f/during.obs"
+	bench_must bench_emit during "$T/f/during.obs" "$T/f/during.json"
+	bench_must bench_obs "$T/f/after.obs"
+	bench_must bench_emit after "$T/f/after.obs" "$T/f/after.json"
+fi
 
 # --- export (stopped container), checked removal, publish ----------------------------
 # cp_out SRC: `docker cp` of one path of the stopped child as a tar stream on stdout. Its
@@ -696,6 +1336,12 @@ if [ "$HAVE_CAPTURE" = 1 ] && [ "$CHILD" = 0 ]; then
 	done
 	CAPOK=1
 fi
+if [ "$HAVE_BENCH" = 1 ] && [ -f "$T/p/samples.jsonl" ]; then
+	# The fresh run directory is created now and never reused: an existing one stops the publication.
+	write_chain_ok || die write_root_invalid
+	mkdir -p -- "${BENCHRUN%/*}" || die publish_failed
+	mkdir -- "$BENCHRUN" 2>/dev/null || die 'bench_invalid side=samples'
+fi
 if [ "$HAVE_WRITE" = 1 ]; then
 	for _n in $DRAFTS; do
 		[ -f "$T/p/$_n" ] || continue
@@ -710,6 +1356,21 @@ if [ "$HAVE_WRITE" = 1 ]; then
 			die publish_failed
 		fi
 	done
+fi
+if [ "$HAVE_BENCH" = 1 ] && [ -f "$T/p/samples.jsonl" ]; then
+	# The host's own records, beside (never inside) the exported samples directory.
+	for _n in before during after; do
+		_sz=$(wc -c <"$T/f/$_n.json" | tr -d ' ')
+		case $_sz in '' | *[!0-9]*) die bench_evidence_failed ;; esac
+		[ "$_sz" -le 65536 ] || die bench_evidence_failed
+		_part=$(mktemp "$BENCHRUN/.$_n.part.XXXXXX") || die publish_failed
+		if ! { [ -f "$_part" ] && [ ! -L "$_part" ] && [ -O "$_part" ]; }; then die publish_failed; fi
+		if ! { cat "$T/f/$_n.json" >"$_part" && chmod 0644 "$_part" && mv -f -T -- "$_part" "$BENCHRUN/$_n.json"; }; then
+			rm -f -- "$_part"
+			die publish_failed
+		fi
+	done
+	printf 'DEV-RUN-BENCH-PUBLISHED run=%s files=4\n' "${BENCHRUN##*/}"
 fi
 if [ "$CAPOK" = 1 ]; then
 	chain_ok "${CAPTURE%/*}" || die capture_root_changed

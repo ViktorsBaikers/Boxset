@@ -4,8 +4,9 @@ Status: quality parsing for the series and movie sides, title parsing for both k
 with the language and release group parsing each runs) and custom-format compilation, evaluation and batch evaluation are
 implemented. Quality and title parsing are checked against the complete extracted source test corpora, including the series
 episode title cases (daily, absolute, anime, multi-episode, season pack, special, Unicode, title-only) in
-`internal/parse/title_series.go`, `language_series.go` and `releasegroup_series.go`. The production latency benchmark is later
-work. Nothing here is a performance claim and no ARM latency claim is made.
+`internal/parse/title_series.go`, `language_series.go` and `releasegroup_series.go`. The production latency benchmark and its
+eligibility judge are implemented (see "Production latency benchmark"); no eligible measurement has been run here, so nothing in
+this report is a performance claim, and no ARM latency claim is made.
 
 ## What exists
 
@@ -19,6 +20,8 @@ work. Nothing here is a performance claim and no ARM latency claim is made.
 | Emulation | `scripts/parse-emulated.sh` | Cross-compiled tests under `qemu-aarch64` and `qemu-arm` |
 | Runner | `scripts/dev-run.sh --ref`, `--write testdata/parser` | Pinned Git-object reference text delivered by copy into the created container; fixed corpus write table with a raw-to-sanitized identity check |
 | Producer | `deploy/dev/redact/ref_archive.go` | Private `-ref-archive` mode of the host redactor: lists and reads only the pinned Git objects and writes a bounded archive |
+| Benchmark | `bench/parser/main.go`, `eligibility.go` | Production per-call latency CLI (`-out`) and the final judge (`-judge`); the host-evidence schema and its eligibility rules |
+| Benchmark runner | `scripts/dev-run.sh --bench CPUSET`, `scripts/dev-run-smoke.sh --benchmark-evidence` | Reference-profile child limits, read-only `/config`, host-written before/during/after records; the evidence controls |
 
 Sources (GPL-3.0; the corpus headers and the ported Go files carry only the licence identifier GPL-3.0 and name no project):
 the series reference commit `57816c149d02f95543973fefb4780c4495f8121c` and the movie reference commit `df2faa64c75e6081556d11232dc46523e7264ea1`.
@@ -109,6 +112,15 @@ zero value. The source's own generated-name tests (an MD5 chain, random 32- and 
 no `ReleaseHash`, `ReleaseTitle` or `SimpleReleaseTitle`, so `TestMovieCorpusPublicParseTitleReleaseFields` fixes them by hand
 through the public `ParseTitle` (an anime hash, a `1280x720` name that has no hash, a non-ASCII title index), and the language
 member table is checked against an independent literal table in `TestLanguageVocabularyMatchesIndependentMemberTable`.
+
+Pattern guards. A pattern is not run on a text its own source shows it cannot match. `NewParser` reads each built-in pattern for
+facts every match must satisfy: the fewest characters, the literal texts (with the word boundaries the pattern puts around them)
+and the adjacent character pairs, with what a character class matches asked of regexp2 itself; the guard of a pattern with a
+start anchor also names the start. A pattern without a usable fact has no guard, and a text that is not ASCII is always left to
+regexp2. A pattern ruled out answers as an unmatched regexp would and the budget is still checked before and after it, so the clock
+reads, the reasons and the results are those of running it; after a first match the same facts about the rest of the text, or a
+start anchor, show that no further match exists. The guards are built with the tables, immutable, hold no result and no cache, and
+a pattern replaced after construction (the hostile tests do) has none.
 
 Measured limit (one dev-image run): a 4096-byte name whose bulk is a trailing dotted word parsed in about 18 ms. A name whose
 title, or whose German tag, is thousands of characters long exceeds the 50 ms match timeout in the source's unanchored
@@ -319,3 +331,149 @@ comparison in `docs/spikes/s5-version-admission.md` (ordered layers, `Config` SH
 
 `TestCorpusFull` pins the exact per-file inventories and source commits; changing a reference commit means re-extracting and
 updating that table together.
+
+## Production latency benchmark
+
+`bench/parser` measures full `ParseTitle` calls on the wall clock and `-judge` decides whether a recorded run proves the accepted
+budgets: pooled p50 at most 100000 ns and pooled p99 at most 1000000 ns (nearest rank; no mean stands in for the p99), plus, when a
+comparable earlier run is given with `-base`, no more than 10% regression of either. Without a comparable base the budgets are an
+absolute baseline only. No ARM latency claim is made; `GOARCH` other than `amd64` is INVALID.
+
+Measuring (`-rounds 30 -seed 1 -out DIR`, built `CGO_ENABLED=0`) loads every enabled title case of both corpora through the corpus
+reader and `TimeContext.Materialize`, constructs the parser once (reported as `compile_ns`, never part of a sample), runs one
+discarded warmup pass, then 30 rounds, each every materialized name once in a seeded shuffle. Each sample is one `ParseTitle` call
+including validation, quality, language and release group work and the budget checks. It writes exactly `DIR/samples.jsonl`,
+opened with truncate in place, every write and close checked; a write error prints `parserbench: write_failed file=samples.jsonl`
+and exits 1. The header of that file records the run, the SHA-256 of the image input manifest, of both corpora, of `go.mod` plus
+`go.sum` and of the parser and corpus-reader sources, the hash of the materialized names, the Go version, platform, build settings
+and the UTC offset and dates of the run. Every timed call must reach the same outcome class as its warmup call (the measurement stops
+with `outcome_changed` otherwise, and with `parse_failed` for an error that is not the parser's own reason). Measuring prints a
+diagnostic line and never a verdict; `-inputs` belongs to measuring only, the judge always reads the image's own manifest.
+
+### Owner setup
+
+The owner reserves the cores; nothing here, and no agent, changes host scheduling, and a container's own cpuset is never taken as
+proof of host exclusivity.
+
+1. Reserve four physical cores of one NUMA node, giving `--bench` one logical CPU of each distinct physical core, and keep the other SMT
+   siblings of those cores idle (reserve them at the kernel or cgroup level too, for example an isolated CPU set), so that no other user
+   thread is allowed to run on the set or on those siblings, and start the runner from a shell whose own affinity excludes
+   all of them. The cpuset is given to `--bench` as digits, commas and ranges (`0-3`, `2,4-5`; at most 1024 ids, no leading zeros).
+2. Provision `BOXSET_BENCH_CONFIG`: an empty directory on a local NVMe ext4 filesystem (local NVMe is proved from the backing disks,
+   md slaves included: each local, non-rotational and reporting NVMe in its sysfs vendor or transport; the runner records only the
+   boolean), given as an absolute path of letters, digits and `_ . / + @ = -` without a trailing slash,
+   `.`/`..` component or link. The runner reads both owner values from the environment at run time and never writes either into a
+   file, a log or the image.
+3. Keep at least 4 GiB of memory available, no swap activity during the run, and a plain `/proc` that shows every task (no `hidepid`
+   other than 0, no `subset=pid`, no mount over a task entry; being root does not replace this). The runner needs host root access to the daemon's tasks
+   (`/proc/<pid>/root`), which is how it proves that the container it measured runs on this machine with the observed `/config`.
+
+```sh
+run="docs/spikes/data/bench-$(date -u +%Y%m%dT%H%M%SZ)"
+scripts/dev-run.sh --bench "$BOXSET_BENCH_CPUSET" --write "$run/samples" -- sh -c 'CGO_ENABLED=0 go build -trimpath -o /tmp/parserbench ./bench/parser && /tmp/parserbench -rounds 30 -seed 1 -out "$1"' parserbench "$run/samples"
+scripts/dev-run.sh -- sh -c 'CGO_ENABLED=0 go build -trimpath -o /tmp/parserbench ./bench/parser && /tmp/parserbench -judge "$1"' parserbench "$run"
+```
+
+`--bench CPUSET` is valid only with `--write` of a fresh `docs/spikes/data/bench-<UTC YYYYMMDDTHHMMSSZ>/samples` root and never with
+`--capture`. It applies `--cpuset-cpus CPUSET --memory 4g --memory-swap 4g` and mounts `BOXSET_BENCH_CONFIG` read-only at
+`/config`; every other form is rejected before Docker with exit 125:
+
+| Reason | Recovery |
+| --- | --- |
+| `capture_flag_invalid` | `--bench` and `--capture` never combine. |
+| `bench_invalid side=cpuset` | The value is not a list of ids or ranges as above. |
+| `bench_invalid side=write` | `--bench` needs `--write "$run/samples"`. |
+| `bench_invalid side=samples` | The root is not exactly `docs/spikes/data/bench-<UTC>/samples`, or the run directory already exists: choose a fresh UTC stamp. |
+| `bench_unavailable side=config` | `BOXSET_BENCH_CONFIG` is unset or empty. |
+| `bench_invalid side=config` | The value is not an absolute directory path of the allowed characters, or is a link. |
+| `bench_invalid side=daemon` | The Docker endpoint is not a unix socket of this machine, its daemon runs another kernel, or the container the daemon reports is not a task of this machine's `/proc` whose cgroup names that container (a socket forwarded to another machine, even with the same kernel release). Select the local daemon (no endpoint is printed). |
+| `host_tool_missing` | `awk`, `date`, `df`, `sort`, `id`, `stat` and `timeout` must be on the host `PATH`. |
+| `mounts_invalid` | The created container's mounts are not exactly the one read-only `/config` bind. |
+| `bench_evidence_failed` | A host observation could not be read or is incomplete: `/proc` or `/sys`, Docker's limits, the `/config` filesystem or directory scan (an unreadable directory is not an empty one), the mounted `/config` directory no longer being the device and inode that was observed first and that the running container has mounted (read through `/proc/<pid>/root`), a `/proc` walk that was cut short, that met a live task it could not read (a task that vanished meanwhile is fine) or that read under 97% of the kernel's own task count, a container that was not seen running or that exited before it could be observed, or a sampler that failed after any observation. Nothing was published; fix the host access and run again with a new stamp. |
+| `bench_invalid side=proc` | The mount table does not show one plain `/proc`: it is mounted with `hidepid` (anything but 0/off) or `subset=pid`, more than one mount sits at `/proc` (or one that is not type proc), a mount of any kind sits over a task entry (`/proc/<pid>`, `/proc/self`, `/proc/thread-self` or below), or no `/proc` mount is found: a competing task for the reserved cores could be hidden. Run from a `/proc` that shows every task; being root does not replace this, and a share of the kernel's task count is not accepted as proof. |
+
+After a child exit 0 the runner exports only the stopped container's regular `samples.jsonl` (the corpus rules: one regular file,
+at most 32 MiB, through the redactor) and publishes it with the host's records, all four under the fresh run directory:
+`RUN/samples/samples.jsonl`, `RUN/before.json` (after the container exists, before it starts), `RUN/during.json` (every
+observation while it runs, once a second) and `RUN/after.json` (after it stopped). A nonzero child publishes nothing and keeps its
+status. The three records are written from the host, are not mounted into the child and cannot be written by it. Each is a single
+line of fixed numbers, enums and booleans (the schema and the rules are owned by `bench/parser/eligibility.go`): the topology of
+the reserved set (counts of logical CPUs, cores, SMT siblings, NUMA nodes), the most non-benchmark user threads that were allowed
+to run, or runnable, on a reserved CPU, load, minimum available memory, the cumulative swap-in and swap-out page counters at the
+start and end of the stage, the container's memory limits and whether its cpuset was applied, and the `/config` filesystem. They
+hold no CPU list, task listing, command line, environment, path or host name, at most 64 KiB each and 192 KiB together. The runner's
+merged child output is separately bounded to 256 KiB (enough for the verbose `go test -v` run of this package); more than that is
+`output_overflow`, exit 125. The record cap is unchanged.
+
+The next runner invocation builds its image with the published records: `.dockerignore` re-includes exactly
+`docs/spikes/data/bench-*/samples/samples.jsonl` and `bench-*/before.json`, `during.json` and `after.json`, and the image makes
+those files and every directory below `docs/spikes/data` root-owned and read-only (`docs/spikes/data` itself and the ancestors stay
+root-owned and sticky), so the child can overwrite, unlink or replace none of them. `-judge RUN_DIR` reads them from that image
+and only from it: the run must be `docs/spikes/data/bench-<UTC>` of the image it runs in, its four files and its run and samples
+directories must be root-owned and unwritable, and every file must be byte for byte what the image's input manifest
+(`/usr/local/share/boxset/inputs.sha256`) lists for its place under `/src`. It exits 0 and prints `PARSER-LATENCY-PASS eligible=VALID …` only when
+the evidence is eligible and both budgets hold; 1 `PARSER-LATENCY-FAIL reason=…` when it is eligible and a budget (`p50_budget`,
+`p99_budget`) or the regression bound (`p50_regression`, `p99_regression`) is breached; 3 `PARSER-LATENCY-INVALID reason=…`
+whenever the evidence cannot support a claim, which is decided first. With `-base RUN_DIR` (another run of the same image) a base
+is compared only when it is itself complete, eligible and tied to its own run, inputs, clean production build and dates, and measured the same
+corpora and case inputs on linux/amd64 with 30 rounds; another lock or parser source, date or compile time does not matter, and an
+incomparable base is reported as `base=incomparable`, never compared. Measuring never prints the pass line. A published run
+is data: do not edit it, and commit it only on purpose.
+
+### INVALID and its recovery
+
+Every INVALID is fixed by getting a new, complete, eligible run; a record is never edited.
+
+| Reason | Meaning and recovery |
+| --- | --- |
+| `record_missing`, `samples_missing` | A record or `samples.jsonl` is not in the image the judge was built with: the run was not published, was published after the image was built, or is not under `docs/spikes/data/bench-*`. Publish, then judge from the next invocation. |
+| `record_nonregular`, `samples_nonregular` | The entry is a link or not a regular file. Run again. |
+| `record_oversized`, `samples_oversized` | A record is over 64 KiB (192 KiB together) or `samples.jsonl` is over 32 MiB. Run again. |
+| `record_unreadable`, `samples_unreadable`, `samples_malformed`, `record_malformed`, `record_incomplete`, `samples_incomplete`, `record_stage` | The file is not the schema's bounded exact form, lacks a key (including `go`, `utc_offset_sec` and `compile_ns` of the samples header), has an extra key, holds a `null` for a required value, holds the wrong stage, or `samples.jsonl` is truncated, has a repeated or missing item, a non-positive duration or an extra line. Run again from the same commit. |
+| `identity_mismatch`, `run_mismatch`, `inputs_mismatch` | The run directory name, image or input manifest hash differ between the three records, or between them and the samples. Run again; never mix files of two runs. |
+| `run_location`, `image_manifest`, `image_mismatch`, `record_mutable` | The run directory is not exactly `docs/spikes/data/bench-<UTC>` of the image the judge runs in, the image manifest cannot be read, a record's bytes are not the digest the image's manifest lists for its place in `/src` (a look-alike, or a file that changed), or a record, the run or samples directory, or an ancestor can be written by someone other than root (the ancestors may only be sticky). Judge a run that the next runner invocation imported. |
+| `order`, `incomplete_sampling` | The three stages are not in time order, or fewer than one observation before and after, or two during the run. A very short child cannot be observed; use the full command. |
+| `date_rollover` | The run crossed a UTC midnight, the UTC offset is not 0, or the dates of the samples and the records differ. Run again away from midnight. |
+| `topology`, `smt`, `numa` | `topology`: the reserved set is not four CPUs on four distinct physical cores, or its counts changed during the run, or a CPU could not be read. `smt`: two members of the set share a physical core (a sibling inside the set), or a user thread outside the benchmark container was running on an SMT sibling of a member that is not itself a member (`sibling_runnable_max` above 0, one count per observation, no CPU number and no thread name recorded). Siblings outside the set are valid while idle (`threads_per_core_max` of 2 with `siblings_outside_set` above 0 and `sibling_runnable_max` 0): the owner keeps them idle. The load is taken from the CPU a running thread last ran on, read from the complete `stat` record of the thread (its name may contain spaces and newlines; a record that does not end in the expected fields fails the observation), so keep the runner, Docker and every other job off those siblings too. `numa`: the set spans more than one NUMA node. Reserve four whole physical cores of one node, one thread of each in the set (step 1). |
+| `overlap` | A user thread outside the benchmark container could run on a reserved CPU, or was runnable on one. A thread counts only where both its affinity and its effective cgroup cpuset (`cpuset.cpus.effective`, or `cpuset.effective_cpus` on cgroup v1, taken from the nearest ancestor cgroup that has the file; no such file means no cpuset restriction) contain a reserved CPU, so an affinity mask that still names the set does not count once its cgroup excludes it, while a runnable or allowed thread whose effective cpuset includes the set does. A cgroup that cannot be read fails the observation (`bench_evidence_failed`). Reserve the cores at the kernel or cgroup level (for example by restricting the slices' cpusets) and start the runner outside them. No CPU list or cpuset value is recorded or printed. |
+| `swap` | Host swap-in or swap-out pages changed between the first and last observation. Free memory and run again. |
+| `memory` | The container's memory or memory-plus-swap limit is not exactly 4 GiB, or less than 4 GiB was available. |
+| `container` | Docker did not apply the cpuset it was given. |
+| `filesystem` | `/config` is not an empty, read-only, directly NVMe-backed ext4 directory. |
+| `rounds`, `platform`, `build` | The samples are not 30 rounds of a linux/amd64 production build with cgo off and without the race detector. |
+| `corpus_changed`, `lock_changed`, `source_changed`, `names_changed`, `reference_invalid` | The corpora, `go.mod`/`go.sum` or the parser sources the judge sees differ from those measured, the materialized names or case identities differ, or the judge cannot read them. Measure again from the commit that is being judged. |
+
+`scripts/dev-run-smoke.sh --benchmark-evidence` proves the evidence path without the owner's reservation: it gives the real runner a
+synthetic one-core cpuset and an empty config directory of its own, in a scratch copy of the repository. A child there tries to
+overwrite, append to, unlink, replace, `chmod`, move or remove the imported records of an earlier run and every ancestor, to write
+`/config` and to create entries beside the records (all 26 attempts are denied, the records' digests are unchanged, the decoy
+files the `.dockerignore` does not admit are absent from the image, and every imported file is root-owned 0444 and directory 0555)
+and writes the synthetic control samples; the runner publishes exactly its own four files, which the smoke checks for shape,
+bound and absence of any path text, and the owner config path never reaches the runner's scratch (a passive Docker shim reads the
+scratch at the container's removal for it, and prints nothing). The host evidence faults each fail closed with the fixed reason
+and publish nothing: a sampler that fails after a good observation, a `/proc` walk cut short after one readable task or returning
+well under the kernel's own task count, an unreadable live task, an unscannable `/config`, a `/config` read that fails after the first
+observation succeeded, the mounted directory renamed and its path recreated while the child runs, a Docker endpoint that is not a
+unix socket of this machine, a daemon that runs another kernel, a daemon whose container is not a task of this machine (a forwarded
+socket to a machine with the same kernel release) and a `/proc` that can hide tasks (`hidepid` 2, 4 or `ptraceable`, each for an
+unprivileged caller and for root, and a mount over one competing task's `/proc` entry that hides it from root as well while the
+share of the kernel's task count stays above 97%, applied before the run, after the runner's startup check and before its first
+observation, and after a successful observation while the child is still running (the child waits on a gate file the host creates in `/config`, and the mask is applied only when a completed observation exists and the daemon lists the container running, then the gate is released), since the mount table is proven again around every observation); a task
+that vanished while `/proc` was walked does not fail the run, a `/config` that gains an entry after the child ran shows in the
+after record and one that changes only while the child runs shows in the during record, and the final judge, given otherwise eligible
+records that are empty before and after but not during, answers INVALID `filesystem`. The final judge's image also gets two
+disposable faults (a record, or only the run directory, left writable by UID 1000 with the same bytes): the child confirms the write
+access and the judge answers `record_mutable`, never a pass.
+As the next invocations from refreshed images, the final judge, whose child first fails (as UID
+1000) to overwrite, append to, unlink, replace, `chmod`, move or remove any record it is about to read, its run and samples
+directories and every ancestor (31 attempts denied, bytes, owners, modes and inodes unchanged), then rejects the real host-written
+records (one core), a run that is not in the image, a missing record, a hostile record, an oversized record, an after-state
+swapped for another stage, a record of another run, a link and an overlapping workload, a complete look-alike the child makes
+inside the data directory (its own, writable files) and one outside the image, each INVALID with exit 3 and never a pass line, and, with
+independently written valid records beside the same samples, passes.
+
+Proof status. The deterministic eligibility, verdict and provenance checks (`TestEligibility…`, `TestLatencyGate…`) and the full
+corpus measurement with its write-failure control (`TestBenchmarkCorpus`, excluded under `-race`) are unit tests and make no
+performance claim; their durations are synthetic or diagnostic. NOT-RUN here: the eligible measurement itself, which needs the
+owner's reservation and `BOXSET_BENCH_CONFIG`; until a run of the command above is judged PASS, AC-021 stays open and an INVALID
+or FAIL run never closes it.

@@ -110,6 +110,7 @@ type Parser struct {
 	movie       *movieTable
 	movieTitle  *movieTitleTable
 	seriesTitle *seriesTitleTable
+	guards      guards // the guards of the patterns of every table
 	formats     formatState
 }
 
@@ -123,6 +124,10 @@ func NewParser(options Options) (*Parser, error) {
 	if p.location == nil {
 		p.location = time.Local
 	}
+	build.Lock()
+	defer build.Unlock()
+	build.guards, build.sets = guards{}, map[setKey]cset{}
+	defer func() { build.guards, build.sets = nil, nil }()
 	var err error
 	if p.series, err = newSeriesTable(); err != nil {
 		return nil, err
@@ -136,6 +141,7 @@ func NewParser(options Options) (*Parser, error) {
 	if p.seriesTitle, err = newSeriesTitleTable(p.series); err != nil {
 		return nil, err
 	}
+	p.guards = build.guards
 	return p, nil
 }
 
