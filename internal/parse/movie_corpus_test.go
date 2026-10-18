@@ -379,10 +379,11 @@ func TestMovieCorpusPublicParseTitleNonASCIIName(t *testing.T) {
 	}
 }
 
-// cleanMovieTitle against literals of the normalization cases and of
+// Parser.CleanMovieTitle against literals of the normalization cases and of
 // the accent case, fixed by hand. A letter whose decomposition is not handled is
 // an error, not a wrong string.
 func TestMovieCorpusCleanMovieTitleMatchesLiterals(t *testing.T) {
+	p := newTestParser(t, nil)
 	for in, want := range map[string]string{
 		"Conan": "conan", "Castle (2009)": "castle2009", "Parenthood.2010": "parenthood2010",
 		"Law_and_Order_SVU": "lawordersvu", "CaPitAl": "capital", "peri.od": "period",
@@ -395,13 +396,13 @@ func TestMovieCorpusCleanMovieTitleMatchesLiterals(t *testing.T) {
 		"Carniv\u00E0le": "carnivale", "Carniva\u0300le": "carnivale",
 		"Amélie": "amelie", "Crème Brûlée": "cremebrulee", "Ångström": "angstroem",
 	} {
-		if got, err := cleanMovieTitle(in); err != nil || got != want {
-			t.Errorf("cleanMovieTitle(%q) = %q, %v; want %q", in, got, err, want)
+		if got, err := p.CleanMovieTitle(in); err != nil || got != want {
+			t.Errorf("CleanMovieTitle(%q) = %q, %v; want %q", in, got, err, want)
 		}
 	}
 	for _, in := range []string{"Bjørn", "Łódź", "Енола", "Phở"} {
-		if got, err := cleanMovieTitle(in); err == nil {
-			t.Errorf("cleanMovieTitle(%q) = %q: a letter outside the handled decompositions must be an error", in, got)
+		if got, err := p.CleanMovieTitle(in); err == nil {
+			t.Errorf("CleanMovieTitle(%q) = %q: a letter outside the handled decompositions must be an error", in, got)
 		}
 	}
 }

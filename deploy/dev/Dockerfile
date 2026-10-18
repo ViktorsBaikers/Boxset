@@ -9,7 +9,7 @@
 # with the deny-by-default root `.dockerignore`.
 
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS base
-ARG DEBIAN_SNAPSHOT=20261005T000000Z
+ARG DEBIAN_SNAPSHOT=20261018T000000Z
 RUN set -eu; \
     printf '%s\n' \
       'Types: deb' \
@@ -87,11 +87,12 @@ ARG APT_PACKAGES="\
     libcups2t64=2.4.10-3+deb13u2 \
     libdbus-1-3=1.16.2-2 \
     libdrm2=2.4.124-2 \
-    libexpat1=2.8.3-1~deb13u1 \
+    libexpat1=2.9.0-1~deb13u1 \
     libfontconfig1=2.15.0-2.3 \
     libfreetype6=2.13.3+dfsg-1+deb13u1 \
     libgbm1=25.0.7-2+deb13u1 \
     libglib2.0-0t64=2.84.4-3~deb13u5 \
+    liblzma5=5.8.1-1+deb13u2 \
     libnspr4=2:4.36-1 \
     libnss3=2:3.110-1+deb13u4 \
     libpango-1.0-0=1.56.3-1 \

@@ -6421,15 +6421,15 @@ reset; sedx "$PKGJ" "s/\"svelte\": \"5.57.2\"/\"svelte\": \"~5.57.2\"/"; admit
 want floating-tilde 1 "ADMISSION-BLOCKED ADM-115"
 reset; sedx "$PKGJ" "s/\"svelte\": \"5.57.2\"/\"svelte\": \"*\"/"; admit
 want floating-star 1 "ADMISSION-BLOCKED ADM-115"
-reset; sedx "$REP" "/^| ADM-022 /s/| 2.8.3-1~deb13u1 |/| >=2.8.3-1~deb13u1 |/"; admit
+reset; sedx "$REP" "/^| ADM-022 /s/| 2.9.0-1~deb13u1 |/| >=2.9.0-1~deb13u1 |/"; admit
 want apt-range-row 1 "ADMISSION-BLOCKED ADM-022: floating"
-reset; sedx "$REP" "/^| ADM-022 /s/| 2.8.3-1~deb13u1 |/| * |/"; admit
+reset; sedx "$REP" "/^| ADM-022 /s/| 2.9.0-1~deb13u1 |/| * |/"; admit
 want apt-wildcard-row 1 "ADMISSION-BLOCKED ADM-022: floating"
-reset; sedx "$DF" "s/    libexpat1=2.8.3-1~deb13u1 /    libexpat1>=2.8.3-1~deb13u1 /"; admit
+reset; sedx "$DF" "s/    libexpat1=2.9.0-1~deb13u1 /    libexpat1>=2.9.0-1~deb13u1 /"; admit
 want apt-range-dockerfile 1 "ADMISSION-BLOCKED ADM-022"
-reset; sedx "$DF" "s/    libexpat1=2.8.3-1~deb13u1 /    libexpat1=* /"; admit
+reset; sedx "$DF" "s/    libexpat1=2.9.0-1~deb13u1 /    libexpat1=* /"; admit
 want apt-wildcard-dockerfile 1 "ADMISSION-BLOCKED ADM-022"
-reset; sedx "$DF" "s/    libexpat1=2.8.3-1~deb13u1 /    libexpat1=2.8.3 /"; admit
+reset; sedx "$DF" "s/    libexpat1=2.9.0-1~deb13u1 /    libexpat1=2.8.3 /"; admit
 want literal-tilde-version-mismatch 1 "ADMISSION-BLOCKED ADM-022"
 reset; d=$(dago 366); sedx "$REP" "/^| ADM-004 /s/ 2026-10-10 / $d /"; admit
 want annual-366-days 1 "ADMISSION-BLOCKED ADM-004: maintenance_stale"

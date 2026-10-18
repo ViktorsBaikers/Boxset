@@ -484,13 +484,7 @@ func TestCleanUnhandledAccentDoesNotEchoTheName(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			const in = "Bjørn"
 			got, err := clean(in)
-			var re *ReasonError
-			if !errors.As(err, &re) || re.Reason.Code != codeAccentUnhandled {
-				t.Fatalf("error = %v, want *ReasonError %s", err, codeAccentUnhandled)
-			}
-			if _, ok := re.Reason.Params["codepoint"]; !ok || len(re.Reason.Params) != 1 {
-				t.Fatalf("params = %v, want one codepoint", re.Reason.Params)
-			}
+			wantReason(t, err, codeAccentUnhandled, map[string]int64{"codepoint": 248})
 			if got != "" {
 				t.Errorf("returned %q", got)
 			}
