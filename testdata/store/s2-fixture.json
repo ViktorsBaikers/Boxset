@@ -1,0 +1,81 @@
+{
+  "note": "Synthetic S2 world: overlapping memberships, a 4K persona and source imports over five canonical titles. Naming and search languages differ in every library, and the series libraries differ in monitoring. No owner media or live instance is involved.",
+  "libraries": [
+    {"name": "Movies",    "monitored": true,  "naming_language": "en", "search_language": "fr", "profile": "HD-1080p",    "template": [{"key": "hd", "primary": true}]},
+    {"name": "Kids",      "monitored": false, "naming_language": "en", "search_language": "es", "profile": "Kids-1080p",  "template": [{"key": "hd", "primary": true}]},
+    {"name": "UHD",       "monitored": true,  "naming_language": "de", "search_language": "nl", "profile": "UHD-2160p",   "template": [{"key": "uhd", "primary": true}]},
+    {"name": "Collector", "monitored": true,  "naming_language": "en", "search_language": "it", "profile": "Remux-1080p", "template": [{"key": "hd", "primary": true}, {"key": "dc"}]},
+    {"name": "Series",    "monitored": true,  "naming_language": "en", "search_language": "sv", "profile": "HD-1080p",    "template": [{"key": "hd", "primary": true}]}
+  ],
+  "personas": [
+    {"key": "4k", "slot_key": "uhd"}
+  ],
+  "steps": [
+    {"op": "membership", "library": "Movies",    "metadata_id": "tmdb:603", "kind": "movie", "name": "Synthetic Movie A"},
+    {"op": "membership", "library": "Kids",      "metadata_id": "tmdb:603", "kind": "movie", "name": "Synthetic Movie A"},
+    {"op": "membership", "library": "UHD",       "metadata_id": "tmdb:603", "kind": "movie", "name": "Synthetic Movie A"},
+    {"op": "persona",    "library": "Movies",    "persona": "4k", "metadata_id": "tmdb:603", "kind": "movie", "name": "Synthetic Movie A"},
+    {"op": "membership", "library": "Collector", "metadata_id": "tmdb:603", "kind": "movie", "name": "Synthetic Movie A"},
+    {"op": "import",     "library": "UHD",       "instance": "movie-uhd", "source_id": "42", "slot_key": "uhd", "metadata_id": "tmdb:603", "kind": "movie", "name": "Synthetic Movie A"},
+    {"op": "import",     "library": "Movies",    "instance": "movie-hd",  "source_id": "7",  "slot_key": "hd",  "metadata_id": "tmdb:604", "kind": "movie", "name": "Synthetic Movie C"},
+    {"op": "import",     "library": "Collector", "instance": "movie-hd",  "source_id": "7",  "slot_key": "hd",  "metadata_id": "tmdb:604", "kind": "movie", "name": "Synthetic Movie C"},
+    {"op": "import",     "library": "UHD",       "instance": "movie-uhd", "source_id": "50", "slot_key": "uhd", "metadata_id": "tmdb:700", "kind": "movie", "name": "Synthetic Movie B"},
+    {"op": "membership", "library": "Series",    "metadata_id": "tvdb:9001", "kind": "series", "name": "Synthetic Series"},
+    {"op": "episodes",   "metadata_id": "tvdb:9001", "seasons": [{"season": 1, "episodes": 3}, {"season": 2, "episodes": 2}]},
+    {"op": "persona",    "library": "Kids",      "persona": "4k", "metadata_id": "tvdb:9001", "kind": "series", "name": "Synthetic Series"},
+    {"op": "slot_episode", "metadata_id": "tvdb:9001", "slot_key": "hd", "season": 1, "number": 1, "monitored": true, "state": "on_disk", "size_bytes": 1000},
+    {"op": "import",     "library": "Series",    "instance": "series-uhd", "source_id": "7", "slot_key": "uhd", "metadata_id": "tvdb:9001", "kind": "series", "name": "Synthetic Series"},
+    {"op": "persona",    "library": "Kids",      "persona": "4k", "metadata_id": "tvdb:9002", "kind": "series", "name": "Synthetic Series B"},
+    {"op": "membership", "library": "Series",    "metadata_id": "tvdb:9002", "kind": "series", "name": "Synthetic Series B"},
+    {"op": "episodes",   "metadata_id": "tvdb:9002", "seasons": [{"season": 1, "episodes": 3}, {"season": 2, "episodes": 2}]},
+
+    {"op": "import",     "library": "UHD",       "instance": "movie-uhd", "source_id": "42", "slot_key": "uhd", "metadata_id": "tmdb:700", "kind": "movie", "name": "Synthetic Movie B", "conflict": true},
+    {"op": "import",     "library": "UHD",       "instance": "movie-uhd", "source_id": "43", "slot_key": "uhd", "metadata_id": "tmdb:603", "kind": "movie", "name": "Synthetic Movie A", "conflict": true},
+    {"op": "membership", "library": "Movies",    "metadata_id": "tmdb:603", "kind": "series", "name": "Synthetic Movie A", "conflict": true}
+  ],
+  "expect": {
+    "titles": 5,
+    "slots": 9,
+    "sync_map": 4,
+    "library_titles": [
+      {"library": "Movies",    "metadata_id": "tmdb:603"},
+      {"library": "Movies",    "metadata_id": "tmdb:604"},
+      {"library": "Kids",      "metadata_id": "tmdb:603"},
+      {"library": "Kids",      "metadata_id": "tvdb:9001"},
+      {"library": "Kids",      "metadata_id": "tvdb:9002"},
+      {"library": "UHD",       "metadata_id": "tmdb:603"},
+      {"library": "UHD",       "metadata_id": "tmdb:700"},
+      {"library": "Collector", "metadata_id": "tmdb:603"},
+      {"library": "Collector", "metadata_id": "tmdb:604"},
+      {"library": "Series",    "metadata_id": "tvdb:9001"},
+      {"library": "Series",    "metadata_id": "tvdb:9002"}
+    ],
+    "title_slots": {
+      "tmdb:603": [
+        {"key": "hd",  "primary": true,  "owner": "local",      "monitored": true,  "naming_language": "en", "search_language": "fr", "profile": "HD-1080p"},
+        {"key": "uhd", "primary": false, "owner": "local",      "monitored": true,  "naming_language": "de", "search_language": "nl", "profile": "UHD-2160p"},
+        {"key": "dc",  "primary": false, "owner": "local",      "monitored": true,  "naming_language": "en", "search_language": "it", "profile": "Remux-1080p"}
+      ],
+      "tmdb:604": [
+        {"key": "hd",  "primary": true,  "owner": "unresolved", "monitored": true,  "naming_language": "en", "search_language": "fr", "profile": "HD-1080p"}
+      ],
+      "tmdb:700": [
+        {"key": "uhd", "primary": true,  "owner": "unresolved", "monitored": true,  "naming_language": "de", "search_language": "nl", "profile": "UHD-2160p"}
+      ],
+      "tvdb:9001": [
+        {"key": "hd",  "primary": true,  "owner": "local",      "monitored": true,  "naming_language": "en", "search_language": "sv", "profile": "HD-1080p"},
+        {"key": "uhd", "primary": false, "owner": "local",      "monitored": false, "naming_language": "en", "search_language": "es", "profile": "Kids-1080p"}
+      ],
+      "tvdb:9002": [
+        {"key": "uhd", "primary": true,  "owner": "local",      "monitored": false, "naming_language": "en", "search_language": "es", "profile": "Kids-1080p"},
+        {"key": "hd",  "primary": false, "owner": "local",      "monitored": true,  "naming_language": "en", "search_language": "sv", "profile": "HD-1080p"}
+      ]
+    },
+    "slot_episodes": [
+      {"metadata_id": "tvdb:9001", "slot_key": "hd",  "rows": 5, "monitored": 5, "on_disk": 1},
+      {"metadata_id": "tvdb:9001", "slot_key": "uhd", "rows": 5, "monitored": 0, "on_disk": 0},
+      {"metadata_id": "tvdb:9002", "slot_key": "hd",  "rows": 5, "monitored": 5, "on_disk": 0},
+      {"metadata_id": "tvdb:9002", "slot_key": "uhd", "rows": 5, "monitored": 0, "on_disk": 0}
+    ]
+  }
+}
