@@ -25,10 +25,13 @@ type AcquisitionRequest struct {
 // AcquisitionOutcome names the acquisition a request converged on. Created
 // reports a new acquisition row. Attached lists, in request order, the slots
 // this call newly attached; a slot that was already attached is not repeated.
+// Paused holds one Pause per requested slot that was not eligible, in request
+// order, and is repeated on a replay. When no slot is eligible AcquisitionID is 0.
 type AcquisitionOutcome struct {
 	AcquisitionID int64
 	Attached      []SlotID
 	Created       bool
+	Paused        []Pause
 }
 
 // FileRecord is one file of a slot, named by a storage root and a relative path.
@@ -40,10 +43,12 @@ type FileRecord struct {
 }
 
 // RequestAcquisition converges on the one acquisition of (ClientID, ReleaseKey)
-// and attaches every requested slot to it. The UNIQUE constraints decide the
-// race, so any number of equivalent requests, replays and second copies of the
-// release share one acquisition row and one download_slot row per slot. A
-// different release or client is a different acquisition.
+// and attaches every eligible requested slot to it. The UNIQUE constraints
+// decide the race, so any number of equivalent requests, replays and second
+// copies of the release share one acquisition row and one download_slot row
+// per eligible slot. A different release or client is a different acquisition.
+// A slot that is remote-owned, unresolved, under an identity conflict or with
+// an empty indexer intersection is paused (see Pause) and never attached.
 func (l *Library) RequestAcquisition(ctx context.Context, req AcquisitionRequest) (AcquisitionOutcome, error) {
 	if err := req.validate(); err != nil {
 		return AcquisitionOutcome{}, err
@@ -60,13 +65,37 @@ func (l *Library) RequestAcquisition(ctx context.Context, req AcquisitionRequest
 }
 
 // requestAcquisition is RequestAcquisition inside the caller's transaction.
-// Every slot is checked before the first write.
+// Every slot is loaded before the first write; each is then evaluated for a
+// pause. Only eligible slots attach, and no acquisition row is made when none is.
 func requestAcquisition(ctx context.Context, tx *sql.Tx, req AcquisitionRequest) (AcquisitionOutcome, error) {
 	var out AcquisitionOutcome
-	for _, s := range req.Slots {
-		if err := needSlot(ctx, tx, s); err != nil {
+	slots := make([]slotRow, 0, len(req.Slots))
+	seen := make(map[SlotID]bool, len(req.Slots))
+	for _, id := range req.Slots {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		s, err := loadSlot(ctx, tx, id)
+		if err != nil {
 			return out, err
 		}
+		slots = append(slots, s)
+	}
+	var eligible []SlotID
+	for _, s := range slots {
+		p, err := evaluateSlot(ctx, tx, s)
+		if err != nil {
+			return out, err
+		}
+		if p != nil {
+			out.Paused = append(out.Paused, *p)
+			continue
+		}
+		eligible = append(eligible, s.id)
+	}
+	if len(eligible) == 0 {
+		return out, nil
 	}
 	res, err := tx.ExecContext(ctx, `INSERT INTO acquisition (client_id, release_key) VALUES (?, ?)
 		ON CONFLICT (client_id, release_key) DO NOTHING`, req.ClientID, req.ReleaseKey)
@@ -82,7 +111,7 @@ func requestAcquisition(ctx context.Context, tx *sql.Tx, req AcquisitionRequest)
 		req.ClientID, req.ReleaseKey).Scan(&out.AcquisitionID); err != nil {
 		return out, err
 	}
-	for _, s := range req.Slots {
+	for _, s := range eligible {
 		res, err := tx.ExecContext(ctx, `INSERT INTO download_slot (acquisition_id, slot_id) VALUES (?, ?)
 			ON CONFLICT (acquisition_id, slot_id) DO NOTHING`, out.AcquisitionID, s)
 		if err != nil {

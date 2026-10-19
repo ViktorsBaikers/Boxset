@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -27,9 +28,10 @@ const (
 )
 
 var (
-	// ErrIdentityConflict is returned before any write when an identity would
-	// merge or move: a known source pointing elsewhere, a second source for one
-	// slot in one instance, or one metadata_id with two kinds.
+	// ErrIdentityConflict is returned when an identity would merge or move: a
+	// known source pointing elsewhere, a second source for one slot in one
+	// instance, one metadata_id with two kinds, or a file path held by another
+	// slot. Nothing it names is changed; an import conflict also leaves one hold.
 	ErrIdentityConflict = errors.New("library: identity conflict")
 	// ErrInvalidInput is returned before any write for malformed input.
 	ErrInvalidInput = errors.New("library: invalid input")
@@ -118,11 +120,14 @@ type MembershipResult struct {
 }
 
 // ImportResult reports the title and the one slot a source record maps to.
+// Pause is set, and TitleID and SlotID are 0, when the record is an identity
+// conflict (the call also returns ErrIdentityConflict).
 type ImportResult struct {
 	TitleID      TitleID
 	SlotID       SlotID
 	TitleCreated bool
 	SlotCreated  bool
+	Pause        *Pause
 }
 
 // Slot is one wanted version of a title. MediaState and SizeBytes describe a
@@ -259,17 +264,42 @@ func (l *Library) ApplyPersona(ctx context.Context, req PersonaRequest) (Members
 
 // ImportSource maps one source title of a connected instance to its slot. A
 // new slot starts unresolved; an existing slot keeps its owner. A known source
-// that points elsewhere, or a second source for one slot in one instance, is
-// ErrIdentityConflict with nothing written. Replaying a mapped record changes nothing.
+// that points elsewhere, a second source for one slot in one instance, and a
+// metadata id that already exists as the other kind are identity conflicts:
+// one identity_conflict hold per source and affected target is recorded (a
+// replay adds none): the slot, or for a kind clash the whole title, that the conflict
+// affects so that acquiring it pauses. The result carries the Pause and the
+// error wraps ErrIdentityConflict. No title, slot, sync_map or owner row
+// changes. Replaying a mapped record changes nothing.
 func (l *Library) ImportSource(ctx context.Context, rec SourceRecord) (ImportResult, error) {
 	if err := rec.validate(); err != nil {
 		return ImportResult{}, err
 	}
 	var out ImportResult
+	var conflict error
 	err := l.db.Write(ctx, func(tx *sql.Tx) error {
 		def, err := loadDefaults(ctx, tx, rec.LibraryID)
 		if err != nil {
 			return err
+		}
+		// pause commits the hold and reports the conflict after the commit. The
+		// hold names the affected title and slot (0 for none) so evaluateSlot finds it.
+		pause := func(cause, msg string, title, slot int64, extra map[string]string) error {
+			params := map[string]string{
+				"cause": cause, "instance": rec.InstanceID, "source_kind": rec.Kind, "source_id": rec.SourceID,
+				"metadata_id": rec.MetadataID, "slot_key": rec.SlotKey,
+			}
+			maps.Copy(params, extra)
+			scope := fmt.Sprintf("import:%s/%s/%s@title:%d", rec.InstanceID, rec.Kind, rec.SourceID, title) // one hold per source and affected target
+			if slot != 0 {
+				scope = fmt.Sprintf("import:%s/%s/%s@slot:%d", rec.InstanceID, rec.Kind, rec.SourceID, slot)
+			}
+			if err := putHold(ctx, tx, ReasonIdentityConflict, scope, TitleID(title), SlotID(slot), params); err != nil {
+				return err
+			}
+			out = ImportResult{Pause: &Pause{Reason: ReasonIdentityConflict, Params: params}}
+			conflict = fmt.Errorf("%w: %s", ErrIdentityConflict, msg)
+			return nil
 		}
 		var titleID, slotID int64
 		var metadataID, kind, slotKey string
@@ -280,8 +310,9 @@ func (l *Library) ImportSource(ctx context.Context, rec SourceRecord) (ImportRes
 		switch {
 		case err == nil:
 			if metadataID != rec.MetadataID || kind != rec.Kind || slotKey != rec.SlotKey {
-				return fmt.Errorf("%w: %s source %s of %s maps to %s/%s, not %s/%s",
-					ErrIdentityConflict, rec.Kind, rec.SourceID, rec.InstanceID, metadataID, slotKey, rec.MetadataID, rec.SlotKey)
+				return pause("source_remapped",
+					fmt.Sprintf("%s source %s of %s maps to %s/%s, not %s/%s", rec.Kind, rec.SourceID, rec.InstanceID, metadataID, slotKey, rec.MetadataID, rec.SlotKey),
+					titleID, slotID, map[string]string{"mapped_metadata_id": metadataID, "mapped_slot_key": slotKey})
 			}
 			if err := addMembership(ctx, tx, rec.LibraryID, titleID); err != nil {
 				return err
@@ -291,16 +322,33 @@ func (l *Library) ImportSource(ctx context.Context, rec SourceRecord) (ImportRes
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
-		// New source. The slot it names may already be mapped from another source of this instance.
-		var taken int
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM sync_map m
-			JOIN slot s ON s.id = m.slot_id JOIN title t ON t.id = s.title_id
-			WHERE m.instance_id = ? AND t.metadata_id = ? AND s.slot_key = ?)`,
-			rec.InstanceID, rec.MetadataID, rec.SlotKey).Scan(&taken); err != nil {
+		// New source. The metadata id may already be the other kind: that conflicts with
+		// the whole title, whether or not this instance already maps the slot it names.
+		var otherTitle int64
+		var otherKind string
+		err = tx.QueryRowContext(ctx, `SELECT id, kind FROM title WHERE metadata_id = ?`, rec.MetadataID).Scan(&otherTitle, &otherKind)
+		switch {
+		case err == nil && otherKind != rec.Kind:
+			return pause("title_kind_mismatch",
+				fmt.Sprintf("%s is a %s, not a %s", rec.MetadataID, otherKind, rec.Kind),
+				otherTitle, 0, map[string]string{"mapped_kind": otherKind})
+		case err != nil && !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
-		if taken == 1 {
-			return fmt.Errorf("%w: slot %s/%s already has a source in %s", ErrIdentityConflict, rec.MetadataID, rec.SlotKey, rec.InstanceID)
+		// The slot it names may already be mapped from another source of this instance.
+		var heldBy string
+		var heldTitle, heldSlot int64
+		err = tx.QueryRowContext(ctx, `SELECT m.source_id, m.title_id, m.slot_id FROM sync_map m
+			JOIN slot s ON s.id = m.slot_id JOIN title t ON t.id = s.title_id
+			WHERE m.instance_id = ? AND t.metadata_id = ? AND s.slot_key = ?`,
+			rec.InstanceID, rec.MetadataID, rec.SlotKey).Scan(&heldBy, &heldTitle, &heldSlot)
+		switch {
+		case err == nil:
+			return pause("slot_has_source",
+				fmt.Sprintf("slot %s/%s already has a source in %s", rec.MetadataID, rec.SlotKey, rec.InstanceID),
+				heldTitle, heldSlot, map[string]string{"mapped_source_id": heldBy})
+		case !errors.Is(err, sql.ErrNoRows):
+			return err
 		}
 		res, refs, err := enroll(ctx, tx, rec.LibraryID, def, rec.MetadataID, rec.Kind, rec.Name, []string{rec.SlotKey}, OwnerUnresolved)
 		if err != nil {
@@ -316,7 +364,7 @@ func (l *Library) ImportSource(ctx context.Context, rec SourceRecord) (ImportRes
 	if err != nil {
 		return ImportResult{}, err
 	}
-	return out, nil
+	return out, conflict
 }
 
 // SetLibraryDefaults changes the defaults of slots created from now on. No existing slot changes.

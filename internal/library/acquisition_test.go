@@ -12,8 +12,8 @@ import (
 	"github.com/ViktorsBaikers/Boxset/internal/store"
 )
 
-// acqTables are the tables an acquisition, a membership or a removal may touch.
-var acqTables = []string{"title", "slot", "library_title", "acquisition", "download_slot", "file"}
+// acqTables are the tables an acquisition, a membership, a removal or a pause may touch.
+var acqTables = []string{"title", "slot", "library_title", "acquisition", "download_slot", "file", "review_hold"}
 
 // countTables counts the rows of each table inside tx.
 func countTables(tx *sql.Tx, tables []string) (map[string]int, error) {
@@ -165,20 +165,25 @@ func TestRacingEquivalentRequestsOneAcquisition(t *testing.T) {
 
 func TestDistinctReleasesStayDistinct(t *testing.T) {
 	w := applyS2(t)
-	hd, uhd := w.slotID("tmdb:603", "hd"), w.slotID("tmdb:603", "uhd")
+	// The fixture's conflicting imports put tmdb:603/uhd under an identity conflict, so dc stands in for it.
+	hd, dc := w.slotID("tmdb:603", "hd"), w.slotID("tmdb:603", "dc")
 
-	a := mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseA, Slots: []SlotID{uhd}})
+	a := mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseA, Slots: []SlotID{dc}})
 	b := mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseB, Slots: []SlotID{hd}})
-	c := mustRequest(t, w.lib, AcquisitionRequest{ClientID: "sab", ReleaseKey: releaseA, Slots: []SlotID{uhd}})
+	c := mustRequest(t, w.lib, AcquisitionRequest{ClientID: "sab", ReleaseKey: releaseA, Slots: []SlotID{dc}})
 
 	ids := map[int64]bool{a.AcquisitionID: true, b.AcquisitionID: true, c.AcquisitionID: true}
 	if len(ids) != 3 || !a.Created || !b.Created || !c.Created {
 		t.Fatalf("outcomes %+v %+v %+v: want three distinct created acquisitions", a, b, c)
 	}
 	// The same slot may serve two acquisitions; the pair is the key.
-	d := mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseB, Slots: []SlotID{uhd}})
-	if d.AcquisitionID != b.AcquisitionID || d.Created || !slices.Equal(d.Attached, []SlotID{uhd}) {
-		t.Fatalf("outcome %+v: want release B, not created, uhd attached", d)
+	d := mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseB, Slots: []SlotID{dc}})
+	if d.AcquisitionID != b.AcquisitionID || d.Created || !slices.Equal(d.Attached, []SlotID{dc}) {
+		t.Fatalf("outcome %+v: want release B, not created, dc attached", d)
+	}
+	uhd := w.slotID("tmdb:603", "uhd")
+	if p := mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseB, Slots: []SlotID{uhd}}); p.AcquisitionID != 0 || len(p.Attached) != 0 || len(p.Paused) != 1 || p.Paused[0].Reason != ReasonIdentityConflict {
+		t.Fatalf("outcome %+v: want the conflicted uhd paused, not attached", p)
 	}
 	if got := queryInt(t, w.db, `SELECT count(*) FROM acquisition`); got != 3 {
 		t.Fatalf("acquisition rows = %d, want 3", got)
@@ -194,15 +199,16 @@ func TestDistinctReleasesStayDistinct(t *testing.T) {
 func TestDistinctReleasesStayDistinctUnderRace(t *testing.T) {
 	w := applyS2(t)
 	ctx := t.Context()
-	hd, uhd, dc := w.slotID("tmdb:603", "hd"), w.slotID("tmdb:603", "uhd"), w.slotID("tmdb:603", "dc")
+	// tmdb:603/uhd is under the fixture's identity conflict, so the series hd slot takes its place.
+	hd, dc, shd := w.slotID("tmdb:603", "hd"), w.slotID("tmdb:603", "dc"), w.slotID("tvdb:9001", "hd")
 	ids := []struct {
 		client, release string
 		reqs            [][]SlotID // equivalent requests, each selecting part of want
 		want            []SlotID
 	}{
-		{"qbit", releaseA, [][]SlotID{{uhd}, {dc}, {uhd, dc}, {dc, uhd}}, []SlotID{uhd, dc}},
+		{"qbit", releaseA, [][]SlotID{{shd}, {dc}, {shd, dc}, {dc, shd}}, []SlotID{shd, dc}},
 		{"qbit", releaseB, [][]SlotID{{hd}, {dc}, {hd, dc}, {dc, hd}}, []SlotID{hd, dc}},
-		{"sab", releaseA, [][]SlotID{{uhd}, {uhd}}, []SlotID{uhd}},
+		{"sab", releaseA, [][]SlotID{{shd}, {shd}}, []SlotID{shd}},
 	}
 	const perIdentity = 16
 	type result struct {
@@ -282,10 +288,11 @@ func TestDistinctReleasesStayDistinctUnderRace(t *testing.T) {
 
 func TestSecondCopyOfReleaseConverges(t *testing.T) {
 	w := applyS2(t)
-	hd, uhd, dc := w.slotID("tmdb:603", "hd"), w.slotID("tmdb:603", "uhd"), w.slotID("tmdb:603", "dc")
+	// tmdb:603/uhd is under the fixture's identity conflict, so the series hd slot takes its place.
+	hd, dc, shd := w.slotID("tmdb:603", "hd"), w.slotID("tmdb:603", "dc"), w.slotID("tvdb:9001", "hd")
 
-	first := mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseA, Slots: []SlotID{hd, uhd}})
-	second := mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseA, Slots: []SlotID{dc, uhd}})
+	first := mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseA, Slots: []SlotID{hd, shd}})
+	second := mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseA, Slots: []SlotID{dc, shd}})
 	if second.AcquisitionID != first.AcquisitionID || second.Created {
 		t.Fatalf("second copy %+v did not converge on %+v", second, first)
 	}
@@ -303,8 +310,8 @@ func TestSecondCopyOfReleaseConverges(t *testing.T) {
 func TestMembershipRemovalPreservesShared(t *testing.T) {
 	w := applyS2(t)
 	ctx := t.Context()
-	hd, uhd := w.slotID("tmdb:603", "hd"), w.slotID("tmdb:603", "uhd")
-	mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseA, Slots: []SlotID{hd, uhd}})
+	hd, shd := w.slotID("tmdb:603", "hd"), w.slotID("tvdb:9001", "hd") // tmdb:603/uhd is under the fixture's identity conflict
+	mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseA, Slots: []SlotID{hd, shd}})
 	if err := w.lib.RecordFile(ctx, FileRecord{SlotID: hd, RootKey: "movies", RelativePath: "Synthetic Movie A/a.mkv", SizeBytes: 4096}); err != nil {
 		t.Fatalf("RecordFile: %v", err)
 	}
@@ -339,8 +346,8 @@ func TestMembershipRemovalPreservesShared(t *testing.T) {
 func TestReplayConverges(t *testing.T) {
 	w := applyS2(t)
 	ctx := t.Context()
-	hd, uhd := w.slotID("tmdb:603", "hd"), w.slotID("tmdb:603", "uhd")
-	req := AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseA, Slots: []SlotID{hd, uhd}}
+	hd, shd := w.slotID("tmdb:603", "hd"), w.slotID("tvdb:9001", "hd") // tmdb:603/uhd is under the fixture's identity conflict
+	req := AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseA, Slots: []SlotID{hd, shd}}
 	rec := FileRecord{SlotID: hd, RootKey: "movies", RelativePath: "Synthetic Movie A/a.mkv", SizeBytes: 4096}
 
 	first := mustRequest(t, w.lib, req)

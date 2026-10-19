@@ -67,6 +67,26 @@ var crashScenarios = map[string]crashScenario{
 			return errors.New("crash scenario was not killed")
 		})
 	},
+	// requests one acquisition for a slot that pauses (and so writes a hold) and
+	// a slot that attaches. args: paused slot id, eligible slot id.
+	"hold-acquisition": func(ctx context.Context, l *Library, args []string, ready func(tx *sql.Tx)) error {
+		var slots []SlotID
+		for _, a := range args {
+			id, err := strconv.ParseInt(a, 10, 64)
+			if err != nil {
+				return err
+			}
+			slots = append(slots, SlotID(id))
+		}
+		return l.db.Write(ctx, func(tx *sql.Tx) error {
+			if _, err := requestAcquisition(ctx, tx, AcquisitionRequest{ClientID: "qbit", ReleaseKey: crashRelease, Slots: slots}); err != nil {
+				return err
+			}
+			ready(tx)
+			time.Sleep(2 * time.Minute) // the parent kills first; this only bounds an orphan
+			return errors.New("crash scenario was not killed")
+		})
+	},
 }
 
 const (
@@ -206,4 +226,53 @@ func TestKilledWriterLeavesNoPartialRows(t *testing.T) {
 	if got := acqCounts(t, db); !maps.Equal(got, want) {
 		t.Fatalf("after replay counts = %v, want %v", got, want)
 	}
+}
+
+// A writer killed after it inserted a hold and an eligible attachment, before it
+// committed, leaves neither; replaying the request lands one acquisition and one hold.
+func TestKilledWriterLeavesNoPartialRowsWithHold(t *testing.T) {
+	w := applyS2(t)
+	ctx := t.Context()
+	paused, eligible := w.slotID("tmdb:604", "hd"), w.slotID("tmdb:603", "hd") // unresolved owner pauses; local attaches
+	file := FileRecord{SlotID: eligible, RootKey: "movies", RelativePath: "Synthetic Movie A/a.mkv", SizeBytes: 4096}
+	if err := w.lib.RecordFile(ctx, file); err != nil {
+		t.Fatalf("RecordFile: %v", err)
+	}
+	before := acqSnapshot(t, w.db)
+	beforeCounts := acqCounts(t, w.db)
+
+	seen := killChild(t, "hold-acquisition", dbPath(t, w.db), strconv.FormatInt(int64(paused), 10), strconv.FormatInt(int64(eligible), 10))
+
+	// The child really wrote the hold, the acquisition and its download_slot row.
+	want := maps.Clone(beforeCounts)
+	want["review_hold"]++
+	want["acquisition"]++
+	want["download_slot"]++
+	if !maps.Equal(seen, want) {
+		t.Fatalf("child saw %v inside its transaction, want %v", seen, want)
+	}
+
+	db, err := store.Open(ctx, dbPath(t, w.db), store.Options{})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if after := acqSnapshot(t, db); !maps.EqualFunc(before, after, slices.Equal) {
+		t.Fatalf("killed writer left rows: before %v after %v", before, after)
+	}
+	requireFileRows(t, db, []string{fileRow(file)})
+
+	// Replay converges: one acquisition and one hold land, and a second replay adds nothing.
+	l := New(db)
+	for i := range 2 {
+		out := mustRequest(t, l, AcquisitionRequest{ClientID: "qbit", ReleaseKey: crashRelease, Slots: []SlotID{paused, eligible}})
+		wantAttached := 1 - i
+		if out.Created != (i == 0) || len(out.Attached) != wantAttached || len(out.Paused) != 1 || out.Paused[0].SlotID != paused || out.Paused[0].Reason != ReasonOwnershipUnresolved {
+			t.Fatalf("replay %d outcome %+v, want created=%v, %d attached, the unresolved slot paused", i, out, i == 0, wantAttached)
+		}
+	}
+	if got := acqCounts(t, db); !maps.Equal(got, want) {
+		t.Fatalf("after replay counts = %v, want %v", got, want)
+	}
+	requireFileRows(t, db, []string{fileRow(file)})
 }
