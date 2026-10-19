@@ -98,14 +98,3 @@ scope, so a title case cannot be counted as quality and a quality name cannot st
 | Version digit that does not parse as an integer (non-ASCII decimal digit matched by `\d`) | The parse returns `title_unrecognized` with no value. |
 | Platform path semantics | Linux: only NUL is invalid in a path, only `/` separates when a file extension is read. |
 | `Quality` shape | `Source`, `Resolution`, `Modifier` are exposed in addition to `Code` and the detections because the movie fixtures assert them. |
-
-
-[codebase-memory] Coverage note: this file is not reliably represented in the graph (status=excluded, kind=not_indexed_dir: excluded subtree, freshness=missing). action=read_source_and_reindex. (best-effort signal)
-
-[codebase-memory] Coverage note: this file is not reliably represented in the graph (status=excluded, kind=not_indexed_dir: excluded subtree, freshness=missing). action=read_source_and_reindex. (best-effort signal)
-
-[codebase-memory] Coverage note: this file is not reliably represented in the graph (status=excluded, kind=not_indexed_dir: excluded subtree, freshness=missing). action=read_source_and_reindex. (best-effort signal)
-
-[codebase-memory] Coverage note: this file is not reliably represented in the graph (status=excluded, kind=not_indexed_dir: excluded subtree, freshness=missing). action=read_source_and_reindex. (best-effort signal)
-
-[codebase-memory] Coverage note: this file is not reliably represented in the graph (status=excluded, kind=not_indexed_dir: excluded subtree, freshness=missing). action=read_source_and_reindex. (best-effort signal)
