@@ -2,15 +2,15 @@
 # Host-side contract driver for scripts/dev-run.sh, repository root only:
 #   scripts/dev-run-test.sh
 # Runs the real runner (a SHA-256-identical copy) against an isolated checkout of
-# the current allowlisted inputs and asserts the runner trust boundary: exact argv
-# and statuses, the protected fixed-name write maps (live 32 MiB cap, identity,
-# ancestors, trusted supervisor, quiescence, staged publication, rollback and the
-# commit point), binary-safe redaction, host loss, the capture handoff (real pinned
-# chrome-headless-shell provider, validator, authority and lifetime controls), the
-# validator and redactor unit tests through the same runner, and the toolchain
-# admission mutation, support-block and lock-export controls. Every rejecting
-# mutant runs the same named assertion twice: RED against the SHA-bound mutant and
-# GREEN against the original (a fault copy changes only its injected seam).
+# the current allowlisted inputs and asserts what the shell lifecycle executes: exact argv
+# and statuses, the host deadline (status 124, the identity line and no reason word), the
+# stock child identity, the issue-draft publication (the child creates its own names; a name
+# it never created stays absent), the refused write roots, binary-safe redaction, the capture
+# handoff (real pinned chrome-headless-shell provider, validator and lifetime controls), the
+# validator and redactor unit tests through the same runner, and the toolchain admission
+# mutation, support-block and lock-export controls. Every rejecting mutant runs the same
+# named assertion twice: RED against the SHA-bound mutant and GREEN against the original (a
+# mutant or fault copy is a shell copy of the runner that changes one token of it).
 # Exit: 0 all controls pass; 1 an assertion failed; 3 the browser provider is
 # unavailable (T31-PROVIDER-UNAVAILABLE).
 #   --tools-failure and --benchmark-evidence belong to later slices.
@@ -19,8 +19,8 @@
 #   probes, the driver clock reader, the host-loss result classes, registration and watcher and the bounded terminal helper on a virtual
 #   clock, the logging-shim receipts and natural-cell premise, the clock-recovery diagnostic and the hash-record oracle.
 #   It is the exact deterministic command root runs before the full proof, which also begins with it.
-# The runner is a bootstrap that execs the native lifecycle controller (deploy/dev/redact, controller.go): every runner mutant and fault
-# copy is a compiled copy of that package (gvariant, in a private build context); only bootstrap controls remain shell copies (variant).
+# The runner is the shell lifecycle: it uses deploy/dev/redact only as -check, -cap and -tail and never execs -run, so no controller source is mutated
+# here; a runner mutant is a shell copy (variant) that changes a token of scripts/dev-run.sh, or a compiled copy of the host helper's main.go (gvariant).
 set -u
 set -f
 LC_ALL=C
@@ -82,6 +82,7 @@ mkdir -p "$MUT" "$BAR" "$TMP/hl"
 { true >"$TMP/unknown" && true >"$TMP/infra" && true >"$TMP/rerr"; } || exit 125
 # Only containers named in a runner's own `container=` stderr line are ever
 # removed here; there is no global label diff and no foreign deletion.
+# shellcheck disable=SC2154 # c is the trap body's own loop variable
 trap 'for c in $OWNED $(cat "$TMP/owned.list" 2>/dev/null); do docker rm -f "$c" >/dev/null 2>&1; done; rm -rf "$TMP"' EXIT
 trap 'exit 125' HUP INT TERM
 
@@ -127,7 +128,7 @@ rrx() { # rrx DIR RUNNER ARGS...: sets RS; stdout $TMP/rout, stderr $TMP/rerr
 # itself (an earlier refusal speaks too): a control that expects the child to run is reached only when the runner's identity line, printed immediately
 # before the child starts, is there; a control that expects the runner's own fixed refusal is reached only when that exact word is spoken. Anything else
 # leaves the case unreached, so every credit of it is refused.
-RUNNER_STARTED_RE='^dev-run: image=sha256:[0-9a-f]{64} inputs=[0-9a-f]{64} timeout=[0-9]+s container=boxset-dev-[0-9a-f]{16}$'
+RUNNER_STARTED_RE='^dev-run: image=sha256:[0-9a-f]{64} inputs=[0-9a-f]{64} timeout=[0-9]+s container=boxset-dev-run-[0-9a-f]{16} log=none$'
 plain_target() {
 	if [ -n "${1:-}" ]; then
 		grep -Fq "dev-run: $1" "$TMP/rerr" 2>/dev/null && reached
@@ -190,8 +191,8 @@ ctl_begin() {
 	rg_reset
 	reached
 }
-cname() { grep -o 'container=boxset-dev-[0-9a-f]*' "$TMP/rerr" | head -n 1 | cut -d= -f2; }
-runid() { cname | sed 's/^boxset-dev-//'; }
+cname() { grep -o 'container=boxset-dev-run-[0-9a-f]\{16\}' "$TMP/rerr" | head -n 1 | cut -d= -f2; }
+runid() { cname | sed 's/^boxset-dev-run-//'; }
 
 # cstate_to SECONDS NAME: present | absent | unknown. Only an empty answer (absent) or the exact requested name
 # (present) from a status-0 query is an observation; a failed or timed-out query and any other output are unknown,
@@ -263,13 +264,12 @@ variant() {
 	done
 	return 0
 }
-# gvariant NAME FILE OLD NEW...: a SHA-bound compiled copy of the host helper (deploy/dev/redact). A private context holds copies
-# of the isolated checkout's .dockerignore, go.mod and deploy/dev/redact/; every replacement is applied to FILE (controller.go or main.go)
-# inside it, read back, and the changed file's SHA is recorded in $MUT/NAME.csha. $MUT/NAME.sh is a runner copy whose only change is the
-# helper-build context operand, which now points at that context: callbacks keep their cwd (the isolated checkout) and the work image
-# still builds from it. A partly built copy is removed and can never run or earn a RED; one that does not compile ends in
-# redact_unavailable, which is infrastructure (INFRA_RE), never RED.
-GCTX_OLD='--output "type=local,dest=$TMPD/bin" . >/dev/null 2>&1 || die redact_unavailable'
+# gvariant NAME FILE OLD NEW...: a SHA-bound compiled copy of the host helper (deploy/dev/redact), the only Go the runner executes (-check, -cap, -tail). A private
+# context holds copies of the isolated checkout's .dockerignore, go.mod and deploy/dev/redact/; every replacement is applied to FILE (main.go) inside it, read
+# back, and the changed file's SHA is recorded in $MUT/NAME.csha. $MUT/NAME.sh is a runner copy whose only change is the helper-build context operand, which now
+# points at that context: callbacks keep their cwd (the isolated checkout) and the work image still builds from it. A partly built copy is removed and can never
+# run or earn a RED; one that does not compile ends in redact_unavailable, which is infrastructure (INFRA_RE), never RED.
+GCTX_OLD='--output "type=local,dest=$T/bin" . >/dev/null 2>&1 || die redact_unavailable'
 gvariant() {
 	_gvn=$1
 	_gvf=$2
@@ -292,15 +292,10 @@ gvariant() {
 		return 1
 	fi
 	cp "$SRC/scripts/dev-run.sh" "$MUT/$_gvn.sh" && chmod +x "$MUT/$_gvn.sh" || return 1
-	if ! mutate_file "$MUT/$_gvn.sh" "$GCTX_OLD" "--output \"type=local,dest=\$TMPD/bin\" $MUT/ctx-$_gvn >/dev/null 2>&1 || die redact_unavailable"; then
+	if ! mutate_file "$MUT/$_gvn.sh" "$GCTX_OLD" "--output \"type=local,dest=\$T/bin\" $MUT/ctx-$_gvn >/dev/null 2>&1 || die redact_unavailable"; then
 		rm -f "$MUT/$_gvn.sh"
 		return 1
 	fi
-}
-# gobar SECONDS: the Go statements of an inserted barrier at a real statement of the controller: its own PID goes to $BAR/helper.pid, $BAR/ready is created and
-# $BAR/go releases it, polled for at most SECONDS. There is no production hook: the statements exist only in a compiled copy.
-gobar() {
-	printf '%s' '_ = os.WriteFile("'$BAR'/helper.pid", []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); _ = os.WriteFile("'$BAR'/ready", nil, 0o644); for i := 0; i < '"$1"'; i++ { if _, err := os.Stat("'$BAR'/go"); err == nil { break }; time.Sleep(time.Second) }'
 }
 # fiso NAME: an isolated checkout copy for Dockerfile/source fault copies; sets FISO.
 fiso() {
@@ -339,7 +334,7 @@ intended_refusal() {
 	grep -Fxq "dev-run: $1" "$2" 2>/dev/null
 }
 infra_failure() { [ -s "$TMP/infra" ] || grep -Eq "$INFRA_RE" "$TMP/rerr" 2>/dev/null || grep -Eq "$CTRL_FATAL_RE" "$TMP/rerr" 2>/dev/null; }
-s5_done() { grep -Eq '^S5-ADMISSION-(PASS|FAIL) ' "$TMP/rout"; }
+s5_done() { grep -Eq '^S5-(ADMISSION-(PASS|FAIL)|MANIFEST-ONLY-PASS) ' "$TMP/rout"; }
 rg_reset() {
 	OBS=
 	SETUP=0
@@ -440,6 +435,7 @@ HL_TAINT_FAIL=
 hl_taint() { # hl_taint KEY unknown|setup DETAIL
 	{ printf '%s %s\n' "$2" "$3" >>"$HLD/$1.taint"; } 2>/dev/null || HL_TAINT_FAIL="$HL_TAINT_FAIL $1"
 }
+# shellcheck disable=SC2034 # HR_T and HR_D are the reading and deadline bound of a deferred result, set for the reporters of a host-loss proof
 hl_result() { # hl_result KEY: sets HR_R HR_T HR_D (missing: never registered; unobserved: the watcher never read its registration)
 	HR_R=missing
 	HR_T=0
@@ -990,7 +986,7 @@ sc_pt() { # sc_pt KIND [FILE]: 1 when the real plain `pass` credited a control w
 			plain_target
 			;;
 		started)
-			printf 'dev-run: image=sha256:%s inputs=%s timeout=600s container=boxset-dev-0123456789abcdef\n' "$_ptz" "$_ptz" >"$TMP/rerr"
+			printf 'dev-run: image=sha256:%s inputs=%s timeout=600s container=boxset-dev-run-0123456789abcdef log=none\n' "$_ptz" "$_ptz" >"$TMP/rerr"
 			plain_target
 			;;
 		word)
@@ -1272,9 +1268,6 @@ sc_cf1() { # sc_cf1 GONE LAT UNK [FILE]: rc:final:SETUP:unknown record:budget fi
 		printf '%s\n' 1000000000000 >"$SIMD/t"
 		. "$_scf"
 		sim_install "$SIMD"
-		SIM_PAUSE=0
-		SIM_PN=0
-		SIM_WHERE=after
 		SIM_GONE=$1
 		SIM_LAT=$2
 		SIM_UNK=$3
@@ -1594,7 +1587,7 @@ dlogs_same() { # dlogs_same NAME: both logs of NAME are still the pre-created re
 bg_ctr() {
 	_i=0
 	while [ "$_i" -lt 900 ]; do
-		_c=$(grep -o 'container=boxset-dev-[0-9a-f]*' "$TMP/$1.err" 2>/dev/null | head -n 1 | cut -d= -f2)
+		_c=$(grep -o 'container=boxset-dev-run-[0-9a-f]\{16\}' "$TMP/$1.err" 2>/dev/null | head -n 1 | cut -d= -f2)
 		if [ -n "$_c" ]; then
 			printf '%s\n' "$_c" >>"$TMP/owned.list"
 			printf '%s' "$_c"
@@ -1679,9 +1672,6 @@ printf 'OWNER_SECRET_CANARY=do-not-leak\n' >"$ISO/.env"
 printf 'canary\n' >"$ISO/prototypes/canary.txt"
 printf 'canary\n' >"$ISO/design/canary.txt"
 printf 'outside canary\n' >"$CANARY/canary.txt"
-clock_acquire clock_build || exit 125
-REALDOCKER=$(command -v docker)
-dshim_write "$TMP/dshim" "$REALDOCKER" "$CLOCK -clock" || exit 125
 ctl_begin
 expect "runner copy is SHA-256 identical" "$(fhash "$SRC/scripts/dev-run.sh")" "$(fhash "$ISO/scripts/dev-run.sh")"
 REV=$(grep '^ARG PLAYWRIGHT_CHROMIUM_REVISION=' "$ISO/deploy/dev/Dockerfile")
@@ -1704,27 +1694,30 @@ case "$(cat "$TMP/rout")" in
 stdoutstderr | stderrstdout) pass "both streams are captured, 12 bytes, order not asserted" ;;
 *) fail "stdout and stderr" "got '$(cat "$TMP/rout")'" ;;
 esac
-expect "dev-run prints image, inputs, timeout and container identity" "$(grep -Ec '^dev-run: image=sha256:[0-9a-f]{64} inputs=[0-9a-f]{64} timeout=600s container=boxset-dev-[0-9a-f]{16}$' "$TMP/rerr")" 1
+expect "dev-run prints image, inputs, timeout and container identity" "$(grep -Ec '^dev-run: image=sha256:[0-9a-f]{64} inputs=[0-9a-f]{64} timeout=600s container=boxset-dev-run-[0-9a-f]{16} log=none$' "$TMP/rerr")" 1
 
-# pre-deadline child 124 and 137 propagate; the deadline is observed, not guessed
+# pre-deadline child 124 and 137 propagate; the deadline is observed, not guessed. The shell's host-deadline branch sets status 124 and prints no
+# reason word, so neither a child's own 124 nor the deadline carries a word: both are the identity line alone.
 rr -s 124 --timeout 1 -- sh -c 'exit 124'
 expect "child exit 124 before the deadline propagates" "$RS" 124
 noreason "child exit 124 is not reported as a timeout" timeout
-rr -s 137 --timeout 1 -- sh -c 'kill -KILL $$'
+# The image's /bin/sh is dash and the child is PID 1 of its namespace, which no member of that namespace can signal: a PID 1 `kill -KILL $$` exits 0.
+# The killed process is therefore a nested shell.
+rr -s 137 --timeout 5 -- sh -c 'sh -c "kill -KILL \$\$"'
 expect "child kill -KILL (137) before the deadline propagates" "$RS" 137
 noreason "child 137 is not reported as a timeout" timeout
-a_pre_deadline() { # holds when a child exit 124 is not rewritten into a deadline
+a_pre_deadline() { # holds when a child exit 124 is neither rewritten nor reported: status 124 and the identity line alone
 	rrx "$ISO" "$1" --timeout 10 -- sh -c 'exit 124'
-	OBS="status $RS, $(grep -c 'dev-run: timeout' "$TMP/rerr") timeout lines"
-	[ "$RS" = 124 ] && grep -Fq 'dev-run: image=' "$TMP/rerr" && reached
-	[ "$RS" = 124 ] && ! grep -Fq 'dev-run: timeout' "$TMP/rerr"
+	OBS="status $RS, $(grep -c . "$TMP/rerr") stderr lines"
+	[ "$RS" = 124 ] && grep -Eq "$RUNNER_STARTED_RE" "$TMP/rerr" && reached
+	[ "$RS" = 124 ] && [ "$(grep -c . "$TMP/rerr")" = 1 ]
 }
-gvariant mut-elapsed-heuristic controller.go 'if fi, err := os.Stat(c.tmpd + "/tmo"); err == nil && fi.Size() > 0 {' 'if fi, err := os.Stat(c.tmpd + "/tmo"); r.status == 124 || r.status == 137 || err == nil && fi.Size() > 0 {'
-redgreen "elapsed-heuristic deadline mutant" a_pre_deadline "$MUT/mut-elapsed-heuristic.sh" "$RUNNER"
+holds "child exit 124 before the deadline stays 124 with the identity line alone (no deadline word)" a_pre_deadline "$RUNNER"
 
-rr -w timeout -s 124 --timeout 3 -- sh -c 'setsid sh -c "sleep 120" & sleep 120'
+rr -s 124 --timeout 3 -- sh -c 'setsid sh -c "sleep 120" & sleep 120'
 expect "real deadline exits 124" "$RS" 124
-reason "deadline reason word" timeout
+expect "the deadline prints the identity line once" "$(grep -Ec "$RUNNER_STARTED_RE" "$TMP/rerr")" 1
+noreason "the deadline prints no reason word" timeout
 gone "$(cname)" "no container survives the deadline (detached grandchild included)"
 
 # ===== 2. identity, trust and the protected supervisor (T26) =========================================
@@ -1743,17 +1736,6 @@ if true 2>/dev/null >/etc/ld.so.preload; then tampered 16; fi
 if echo x 2>/dev/null >>/usr/local/share/boxset/inputs.sha256; then tampered 17; fi
 touch /tmp/done
 n=0; while [ ! -e /tmp/exit ] && [ "$n" -lt 600 ]; do sleep 1; n=$((n + 1)); done'
-# bg_wait_or_exit CTR FILE: FILE exists, or the background runner ended first (status 1)
-bg_wait_or_exit() {
-	_bei=0
-	while [ "$_bei" -lt 600 ]; do
-		if cx_obs "$1" "$2"; then return 0; fi
-		kill -0 "$BG_PID" 2>/dev/null || return 1
-		sleep 1
-		_bei=$((_bei + 1))
-	done
-	return 1
-}
 a_no_tamper() { # holds when the child cannot alter any supervisor binary or manifest. A successful attempt is the child's own receipt (/tmp/tampered, its code in /tmp/tamper.code), written with unaffected primitives while the child stays live
 	# and held: the parent observes that exact success, and the independent hashes, before any release or cleanup. A generic early end of the child is not evidence.
 	bg_run tamper "$1" -- sh -c "$TAMPER"
@@ -1798,1077 +1780,77 @@ a_no_tamper() { # holds when the child cannot alter any supervisor binary or man
 	[ "$RS" = 0 ] && [ "$_pre" = "$_post" ]
 }
 holds "child cannot write, truncate, replace or chmod supervisor binaries, preload or manifest; hashes unchanged" a_no_tamper "$RUNNER"
-gvariant mut-root-child controller.go 'childUser = "1000:1000"' 'childUser = "0:0"'
-rrp -w supervisor_untrusted "$ISO" "$MUT/mut-root-child.sh" -- true
-expect "a -u 0:0 child is refused before the child runs" "$RS" 125
-reason "root child reason" supervisor_untrusted
-gvariant mut-root-child-nopreflight controller.go 'childUser = "1000:1000"' 'childUser = "0:0"' 'func (c *ctl) supervisorPreflight() bool {' 'func (c *ctl) supervisorPreflight() bool {
-	return true'
-redgreen "root-child with the trust preflight removed rewrites /usr/bin/stat" a_no_tamper "$MUT/mut-root-child-nopreflight.sh" "$RUNNER"
 
-fiso fault-usr
-printf '\nRUN touch /usr/bin/zz-writable && chmod 0666 /usr/bin/zz-writable\n' >>"$FISO/deploy/dev/Dockerfile"
-rrp -w supervisor_untrusted "$FISO" "$FISO/scripts/dev-run.sh" -- true
-expect "a Dockerfile fault copy leaving one other-writable file under /usr is refused" "$RS" 125
-reason "other-writable /usr reason" supervisor_untrusted
-rm -rf "$FISO"
+# ===== 3. issue-draft publication and the refused write roots (T26) ==========================================
+# --write publishes only the fixed names the child created under /src/docs/spikes/issue-drafts (s5-admission.md and s5-tools.md, at most
+# 64 KiB each) once the container stopped. /src/docs/spikes is 1777, so the child creates the root directory and its files itself; a name it never
+# created is not an error and is not published. The root is an ordinary directory of the image: no mounted map and no precreated file. Every other path is
+# dev-run: write_path_invalid (status 125, before Docker, no child).
+DRAFTDIR=$ISO/docs/spikes/issue-drafts
+MKD='mkdir -p /src/docs/spikes/issue-drafts'
+rm -rf "$DRAFTDIR"
+rr --write docs/spikes/issue-drafts -- sh -c "$MKD && printf draft >/src/docs/spikes/issue-drafts/s5-admission.md"
+expect "initially absent draft root publishes s5-admission.md" "$RS:$(cat "$DRAFTDIR/s5-admission.md" 2>/dev/null)" "0:draft"
+expect "a draft name the child never created stays absent and the run exits 0" "$([ -e "$DRAFTDIR/s5-tools.md" ] && echo present || echo absent):$(find "$DRAFTDIR" -mindepth 1 -printf '%f ' 2>/dev/null)" "absent:s5-admission.md "
+rm -rf "$DRAFTDIR"
+rr --write docs/spikes/issue-drafts -- sh -c "$MKD && printf adm >/src/docs/spikes/issue-drafts/s5-admission.md && printf tools >/src/docs/spikes/issue-drafts/s5-tools.md"
+expect "both draft names the child created are published with its bytes" "$RS:$(cat "$DRAFTDIR/s5-admission.md" 2>/dev/null):$(cat "$DRAFTDIR/s5-tools.md" 2>/dev/null)" "0:adm:tools"
+rm -rf "$DRAFTDIR"
+rr --write docs/spikes/issue-drafts -- true
+expect "a child that creates no draft publishes nothing and leaves no draft root" "$RS:$([ -e "$DRAFTDIR" ] && echo present || echo absent)" "0:absent"
+mkdir -p "$DRAFTDIR"
+printf 'prior\n' >"$DRAFTDIR/s5-admission.md"
+chmod 0600 "$DRAFTDIR/s5-admission.md"
+rr --write docs/spikes/issue-drafts -- sh -c "$MKD && printf new >/src/docs/spikes/issue-drafts/s5-admission.md"
+expect "a published draft replaces the prior draft with the child's bytes and mode 0644" "$RS:$(cat "$DRAFTDIR/s5-admission.md" 2>/dev/null):$(find "$DRAFTDIR/s5-admission.md" -printf '%m' 2>/dev/null)" "0:new:644"
+rm -rf "$DRAFTDIR"
+rr -s 7 --write docs/spikes/issue-drafts -- sh -c "$MKD && printf draft >/src/docs/spikes/issue-drafts/s5-admission.md; exit 7"
+expect "nonzero child: the draft is published and the status kept" "$RS:$(cat "$DRAFTDIR/s5-admission.md" 2>/dev/null)" "7:draft"
+rm -rf "$DRAFTDIR"
+rr -w draft_overflow --write docs/spikes/issue-drafts -- sh -c "$MKD && yes a | head -c 65537 >/src/docs/spikes/issue-drafts/s5-admission.md"
+expect "a draft over 64 KiB is refused" "$RS" 125
+reason "draft overflow reason" draft_overflow
+expect "an oversize draft publishes nothing" "$([ -e "$DRAFTDIR" ] && echo present || echo absent)" absent
+rm -rf "$DRAFTDIR"
+rr --write docs/spikes/issue-drafts -- sh -c "$MKD && yes a | head -c 65536 >/src/docs/spikes/issue-drafts/s5-admission.md"
+expect "an exactly 64 KiB draft publishes" "$RS:$(wc -c <"$DRAFTDIR/s5-admission.md" 2>/dev/null | tr -d ' ')" "0:65536"
+rm -rf "$DRAFTDIR"
 
-# Groups predicate (T26): each role's identity status is presented through the child_status/pid1_status
-# seams of fault copies. Empty and the sole primary GID are accepted (the child runs); a missing Groups
-# line, a repeated primary, any other GID, an unparseable token and the other role's primary GID are
-# refused with supervisor_untrusted before the child. A run option that adds a group is refused likewise.
-# The same assertion fails on the matching predicate mutant.
-a_grp_ok() { # holds when the intended identity runs the child
-	rrx "$ISO" "$1" -- sh -c 'printf ok'
-	OBS="status $RS, output '$(cat "$TMP/rout")', $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1)"
-	{ { [ "$RS" = 0 ] && [ "$(cat "$TMP/rout")" = ok ]; } || { [ "$RS" = 125 ] && grep -Fq 'dev-run: supervisor_untrusted' "$TMP/rerr"; }; } && reached
-	[ "$RS" = 0 ] && [ "$(cat "$TMP/rout")" = ok ]
-}
-a_grp_refused() { # holds when the identity is refused before the child
-	rrx "$ISO" "$1" -- sh -c 'printf ran'
-	OBS="status $RS, output '$(cat "$TMP/rout")', $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1)"
-	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: supervisor_untrusted' "$TMP/rerr"; } || [ "$(cat "$TMP/rout")" = ran ]; } && reached
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: supervisor_untrusted' "$TMP/rerr" && [ -z "$(cat "$TMP/rout")" ]
-}
-GRP_CHILD_OLD='return r.text()'
-GRP_PID1_OLD='return c.supCall(10, "/usr/bin/cat", "/proc/1/status").text()'
-GRP_PRED='!ok || !(len(g) == 0 || (len(g) == 1 && g[0] == id))'
-gseam() { # gseam ROLE MODE GROUPS: the Go identity-status seam presenting a rewritten (set) or removed (missing) Groups line
-	_gsk='if strings.HasPrefix(l, "Groups:") {'
-	[ "$2" != set ] || _gsk=$_gsk'
-			kept = append(kept, "Groups:\t'"$3"'")'
-	_gsk=$_gsk'
-			continue
-		}'
-	case $1 in
-	child) _gsh='t, ok := r.text()' ;;
-	pid1) _gsh='t, ok := c.supCall(10, "/usr/bin/cat", "/proc/1/status").text()' ;;
-	esac
-	printf '%s\n\tvar kept []string\n\tfor _, l := range strings.Split(t, "\\n") {\n\t\t%s\n\t\tkept = append(kept, l)\n\t}\n\treturn strings.Join(kept, "\\n"), ok' "$_gsh" "$_gsk"
-}
-grp_case() { # grp_case ROLE NAME EXPECT(ok|refused) MODE GROUPS MUTANT
-	case $1 in
-	child) _gco=$GRP_CHILD_OLD ;;
-	pid1) _gco=$GRP_PID1_OLD ;;
-	esac
-	_gcn=$(gseam "$1" "$4" "$5")
-	case $6 in
-	reject-empty) _gcr='!ok || !(len(g) == 1 && g[0] == id)' ;;
-	primary-rejected) _gcr='!ok || !(len(g) == 0)' ;;
-	missing-as-empty) _gcr='!(len(g) == 0 || (len(g) == 1 && g[0] == id))' ;;
-	accept-any) _gcr='len(g) < 0' ;;
-	*)
-		fail "Groups $1 $2 ($6 mutant)" "unknown mutant kind"
-		return
-		;;
-	esac
-	# The seam copy and the mutant are compiled copies of the same package, each read back by mutate_file; the mutant must differ from its seam copy before anything runs.
-	if ! gvariant "grp-$1-$2" controller.go "$_gco" "$_gcn" || ! gvariant "mut-grp-$1-$2" controller.go "$_gco" "$_gcn" "$GRP_PRED" "$_gcr"; then return; fi
-	if [ "$(cat "$MUT/grp-$1-$2.csha")" = "$(cat "$MUT/mut-grp-$1-$2.csha")" ]; then
-		fail "Groups $1 $2 ($6 mutant)" "the mutant is byte-identical to its seam copy"
-		return
-	fi
-	if [ "$3" = ok ]; then _gca=a_grp_ok; else _gca=a_grp_refused; fi
-	redgreen "Groups $1 $2 ($6 mutant)" "$_gca" "$MUT/mut-grp-$1-$2.sh" "$MUT/grp-$1-$2.sh"
-}
-for _role in child pid1; do
-	if [ "$_role" = child ]; then _p=1000 _o2=65534; else _p=65534 _o2=1000; fi
-	grp_case "$_role" empty ok set '' reject-empty
-	grp_case "$_role" primary ok set "$_p" primary-rejected
-	grp_case "$_role" missing refused missing '' missing-as-empty
-	grp_case "$_role" extra refused set "$_p 4242" accept-any
-	grp_case "$_role" duplicate refused set "$_p $_p" accept-any
-	grp_case "$_role" malformed refused set x accept-any
-	grp_case "$_role" other-role refused set "$_o2" accept-any
-done
-gvariant fault-groupadd controller.go '"--tmpfs", scratchTmpfs}' '"--tmpfs", scratchTmpfs, "--group-add", "4242"}'
-gvariant mut-groupadd-accept controller.go '"--tmpfs", scratchTmpfs}' '"--tmpfs", scratchTmpfs, "--group-add", "4242"}' "$GRP_PRED" 'len(g) < 0'
-redgreen "run option --group-add 4242 (Groups predicate accepting any entry reaches the child)" a_grp_refused "$MUT/mut-groupadd-accept.sh" "$MUT/fault-groupadd.sh"
-
-# ===== 3. protected maps: preflight facts, in-container denials, caps (T26) ==============================
-MAPFACTS='grep " /src/testdata/parser tmpfs " /proc/self/mounts >/tmp/m || exit 21
-set -- $(cat /tmp/m)
-case ",$4," in *,rw,*) ;; *) exit 22 ;; esac
-for tok in nosuid nodev noexec size=32768k nr_inodes=8 mode=755 uid=65534 gid=65534; do case ",$4," in *",$tok,"*) ;; *) exit 23 ;; esac; done
-for n in series.jsonl movie.jsonl; do
-	[ "$(stat -c "%u:%g %a %h %F %s" /src/testdata/parser/$n)" = "65534:65534 666 1 regular empty file 0" ] || exit 24
-done
-[ "$(ls -A /src/testdata/parser | wc -l)" = 2 ] || exit 25
-for d in / /src /src/testdata; do
-	set -- $(stat -c "%u %a" $d)
-	[ "$1" = 0 ] || exit 26
-done'
-rr --write testdata/parser -- sh -c "$MAPFACTS"
-expect "write map: tmpfs options, two precreated empty 0666 65534 single-link files, root-owned ancestors" "$RS" 0
-
-DENIALS='before=$(stat -c %i /src/testdata/parser/series.jsonl /src/testdata/parser/movie.jsonl)
-if touch /src/testdata/parser/probe 2>/dev/null; then exit 31; fi
-if ln -s /src/escape.bin /src/testdata/parser/x 2>/dev/null; then exit 32; fi
-if mkdir /src/testdata/parser/d 2>/dev/null; then exit 33; fi
-if mkfifo /src/testdata/parser/f 2>/dev/null; then exit 34; fi
-if rm /src/testdata/parser/series.jsonl 2>/dev/null; then exit 35; fi
-if mv /src/testdata/parser/series.jsonl /src/testdata/parser/t 2>/dev/null; then exit 36; fi
-if ln -sf /src/escape.bin /src/testdata/parser/series.jsonl 2>/dev/null; then exit 37; fi
-if chmod 0644 /src/testdata/parser/series.jsonl 2>/dev/null; then exit 38; fi
-if ln /src/testdata/parser/series.jsonl /tmp/h 2>/dev/null; then exit 39; fi
-if mv /src/testdata /src/t2 2>/dev/null; then exit 40; fi
-if rmdir /src/testdata/parser 2>/dev/null; then exit 41; fi
-if mv /src/docs/spikes /src/x 2>/dev/null; then exit 42; fi
-[ "$(stat -c %i /src/testdata/parser/series.jsonl /src/testdata/parser/movie.jsonl)" = "$before" ] || exit 43
-[ ! -e /src/escape.bin ] || exit 44
-printf kept >/src/testdata/parser/series.jsonl || exit 45'
-rr --write testdata/parser -- sh -c "$DENIALS"
-expect "child cannot create, link, rename, unlink, chmod or replace anything on a write-root path" "$RS" 0
-expect "the in-place write still publishes" "$(cat "$ISO/testdata/parser/series.jsonl" 2>/dev/null)" kept
-expect "zero-byte movie.jsonl publishes nothing" "$([ -e "$ISO/testdata/parser/movie.jsonl" ] && echo present || echo absent)" absent
-rm -rf "$ISO/testdata"
-
-DRAFTMAP="$(printf '%s' "$MAPFACTS" | sed 's|/src/testdata/parser|/src/docs/spikes/issue-drafts|g; s|series.jsonl|s5-admission.md|g; s|movie.jsonl|s5-tools.md|g; s| /src/testdata; do| /src/docs /src/docs/spikes; do|')"
-rr --write docs/spikes/issue-drafts -- sh -c "$DRAFTMAP"
-expect "draft map has the same protected shape with s5-admission.md and s5-tools.md" "$RS" 0
-
-# allowed writes, cold roots (require-pre-existing-root mutant RED)
-a_cold_root() { # holds when an absent approved write root is created and published
-	rm -rf "$ISO/testdata"
-	rrx "$ISO" "$1" --write testdata/parser -- sh -c 'printf cold >/src/testdata/parser/series.jsonl'
-	OBS="status $RS, host content '$(cat "$ISO/testdata/parser/series.jsonl" 2>/dev/null)'"
-	{ { [ "$RS" = 0 ] && [ -n "$(cat "$ISO/testdata/parser/series.jsonl" 2>/dev/null)" ]; } || { [ "$RS" = 125 ] && grep -Fq 'dev-run: write_root_create_failed' "$TMP/rerr"; }; } && reached
-	[ "$RS" = 0 ] && [ "$(cat "$ISO/testdata/parser/series.jsonl" 2>/dev/null)" = cold ]
-}
-gvariant mut-require-root controller.go 'if err := c.repoRoot.Mkdir(cur, 0o755); err != nil {' 'if err := errors.New("creation disabled"); err != nil {'
-redgreen "require-pre-existing-root mutant" a_cold_root "$MUT/mut-require-root.sh" "$RUNNER"
-rr --write docs/spikes/issue-drafts -- sh -c 'printf draft >/src/docs/spikes/issue-drafts/s5-admission.md'
-expect "initially absent draft root publishes s5-admission.md" "$RS:$(cat "$ISO/docs/spikes/issue-drafts/s5-admission.md" 2>/dev/null)" "0:draft"
-rm -rf "$ISO/testdata" "$ISO/docs/spikes/issue-drafts"
-
-# refused paths change nothing
+# refused paths: no child, no publication, nothing changed on the host
 before=$(tree_hash)
-for w in '../x' '/tmp/x' 'testdata/parser/../../x' './testdata/parser' 'testdata/parser/' 'testdata//parser' docs testdata 'docs/spikes/data'; do
+for w in testdata/parser '../x' '/tmp/x' 'testdata/parser/../../x' './testdata/parser' 'testdata/parser/' 'testdata//parser' docs testdata docs/spikes 'docs/spikes/data' 'docs/spikes/issue-drafts/' 'docs/spikes/data/bench-20260101T000000Z/samples'; do
 	rr -w write_path_invalid --write "$w" -- true
-	if [ "$RS" = 125 ]; then pass "write path '$w' refused ($(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | head -n 1))"; else fail "write path '$w'" "status $RS"; fi
+	if [ "$RS" = 125 ] && ! grep -Eq "$RUNNER_STARTED_RE" "$TMP/rerr"; then pass "write path '$w' refused ($(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | head -n 1))"; else fail "write path '$w'" "status $RS"; fi
 done
 expect "refused paths changed nothing on the host" "$(tree_hash)" "$before"
-mkdir -p "$ISO/testdata"
-ln -s "$CANARY" "$ISO/testdata/parser"
-rr -w write_root_symlink --write testdata/parser -- true
-expect "symlinked write root refused" "$RS" 125
-reason "symlink root reason" write_root_symlink
-rm -f "$ISO/testdata/parser"
+# a symlinked write root or ancestor is refused before Docker as write_root_invalid
 mkdir -p "$ISO/docs/spikes"
+ln -s "$CANARY" "$DRAFTDIR"
+rr -w write_root_invalid --write docs/spikes/issue-drafts -- true
+expect "symlinked write root refused" "$RS" 125
+reason "symlink root reason" write_root_invalid
+rm -f "$DRAFTDIR"
 mv "$ISO/docs/spikes" "$ISO/docs/spikes.real"
 ln -s "$CANARY" "$ISO/docs/spikes"
-rr -w write_root_symlink --write docs/spikes/issue-drafts -- true
+rr -w write_root_invalid --write docs/spikes/issue-drafts -- true
 expect "symlinked ancestor refused" "$RS" 125
-reason "symlink ancestor reason" write_root_symlink
+reason "symlink ancestor reason" write_root_invalid
 rm -f "$ISO/docs/spikes"
 mv "$ISO/docs/spikes.real" "$ISO/docs/spikes"
 expect "canary directory untouched by refusals" "$(find "$CANARY" | LC_ALL=C sort | tr '\n' ' ')" "$CANARY $CANARY/canary.txt "
-rm -rf "$ISO/testdata" "$ISO/docs/spikes/issue-drafts"
+rm -rf "$DRAFTDIR"
 
-# preflight mutants: faults change only the start seam and the original refuses
-a_refuse_root() { # holds when the runner refuses a wrongly shaped write map before the child
-	rrx "$ISO" "$1" --write testdata/parser -- sh -c 'touch /tmp/ran'
-	OBS="status $RS, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1)"
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: write_root_invalid' "$TMP/rerr" && reached
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: write_root_invalid' "$TMP/rerr"
-}
-gvariant fault-size64 controller.go 'size=33554432,nr_inodes=8,mode=0755,uid=65534' 'size=67108864,nr_inodes=8,mode=0755,uid=65534'
-gvariant fault-nosize controller.go 'size=33554432,nr_inodes=8,mode=0755,uid=65534' 'nr_inodes=8,mode=0755,uid=65534'
-gvariant fault-childowned controller.go 'size=33554432,nr_inodes=8,mode=0755,uid=65534,gid=65534"' 'size=33554432,nr_inodes=8,mode=0700,uid=1000,gid=1000"'
-gvariant fault-noprecreate controller.go '!c.precreate("/src/"+c.write, c.mapNames)' 'false'
-for f in fault-size64 fault-nosize fault-childowned fault-noprecreate; do
-	holds "$f is refused with write_root_invalid before the child" a_refuse_root "$MUT/$f.sh"
-done
-fiso fault-ancestor
-mutate_file "$FISO/deploy/dev/Dockerfile" 'chmod 1777 "$d"' 'chmod 0777 "$d"'
-rrp -w write_root_invalid "$FISO" "$FISO/scripts/dev-run.sh" --write testdata/parser -- touch /tmp/ran
-expect "Dockerfile fault copy without the 1777 ancestor rule gives write_root_invalid" "$RS" 125
-reason "ancestor rule reason" write_root_invalid
-a_ancestor_refused() { # a_ancestor_refused RUNNER: with the Dockerfile fault copy (no 1777 ancestor rule) the runner refuses before the child
-	rrx "$FISO" "$1" --write testdata/parser -- sh -c 'printf ran'
-	OBS="status $RS, child output '$(cat "$TMP/rout")', $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1)"
-	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: write_root_invalid' "$TMP/rerr"; } || [ "$(cat "$TMP/rout")" = ran ]; } && reached
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: write_root_invalid' "$TMP/rerr" && [ -z "$(cat "$TMP/rout")" ]
-}
-gvariant mut-no-ancestor-check controller.go 'if len(f) != 5 || !ancestorOK(f[2], f[3], f[4]) {' 'if len(f) != 5 {'
-redgreen "ancestor-preflight-removed mutant (Dockerfile without the 1777 ancestor rule) reaches the child" a_ancestor_refused "$MUT/mut-no-ancestor-check.sh" "$FISO/scripts/dev-run.sh"
-rm -rf "$FISO"
-
-# exact limit, live +1, split +1, refuse-then-truncate, swallow-then-exit-0, sparse
-rm -rf "$ISO/testdata"
-mkdir -p "$ISO/testdata/parser"
-printf 'prior movie\n' >"$ISO/testdata/parser/movie.jsonl"
-priorR=$(fhash "$ISO/testdata/parser/movie.jsonl")
-zero32=$(head -c 33554432 /dev/zero | sha256sum | cut -d' ' -f1)
-rr --write testdata/parser -- sh -c 'head -c 33554432 /dev/zero >/src/testdata/parser/series.jsonl'
-expect "exact 33554432-byte write publishes" "$RS:$(wc -c <"$ISO/testdata/parser/series.jsonl" | tr -d ' '):$(fhash "$ISO/testdata/parser/series.jsonl")" "0:33554432:$zero32"
-noreason "exact limit adds no write_cap_reached" write_cap_reached
-rm -f "$ISO/testdata/parser/series.jsonl"
-CAPSH='head -c 33554433 /dev/zero >/src/testdata/parser/series.jsonl && printf PRODUCED'
-rr -s 1 --write testdata/parser -- sh -c "$CAPSH"
-expect "live +1: producer fails at the refused byte, status 1 unchanged" "$RS" 1
-if grep -Fq PRODUCED "$TMP/rout"; then fail "live +1 sentinel" "completion sentinel was produced"; else pass "live +1: PRODUCED never printed"; fi
-grep -Fqi 'space' "$TMP/rout" && pass "live +1: the producer's ENOSPC error is in the redacted output" || fail "live +1 ENOSPC" "$(head -c 300 "$TMP/rout")"
-expect "live +1: exactly the cap line and nothing else from the runner about the root" "$(grep -c 'dev-run: write_cap_reached root=testdata/parser' "$TMP/rerr")" 1
-expect "live +1: nothing published, prior movie.jsonl unchanged" "$(fhash "$ISO/testdata/parser/movie.jsonl"):$([ -e "$ISO/testdata/parser/series.jsonl" ] && echo present || echo absent)" "$priorR:absent"
-gone "$(cname)" "live +1: owned container absent after the run (status-checked)"
-rr -s 1 --write testdata/parser -- sh -c 'head -c 16777216 /dev/zero >/src/testdata/parser/series.jsonl && head -c 16777217 /dev/zero >/src/testdata/parser/movie.jsonl && printf PRODUCED'
-expect "split +1 across both map files gives status 1, no sentinel, cap line" "$RS:$(grep -c PRODUCED "$TMP/rout"):$(grep -c 'write_cap_reached root=testdata/parser' "$TMP/rerr")" "1:0:1"
-expect "split +1 publishes nothing" "$(fhash "$ISO/testdata/parser/movie.jsonl"):$([ -e "$ISO/testdata/parser/series.jsonl" ] && echo present || echo absent)" "$priorR:absent"
-rr -s 1 --write testdata/parser -- sh -c 'head -c 33554433 /dev/zero >/src/testdata/parser/series.jsonl && printf PRODUCED; s=$?; truncate -s 0 /src/testdata/parser/series.jsonl; exit $s'
-expect "refuse-then-truncate: status 1, no sentinel, no cap line, nothing published" "$RS:$(grep -c PRODUCED "$TMP/rout"):$(grep -c write_cap_reached "$TMP/rerr"):$([ -e "$ISO/testdata/parser/series.jsonl" ] && echo present || echo absent):$(fhash "$ISO/testdata/parser/movie.jsonl")" "1:0:0:absent:$priorR"
-rr --write testdata/parser -- sh -c 'head -c 33554433 /dev/zero >/src/testdata/parser/series.jsonl; exit 0'
-expect "swallow-then-exit-0 publishes exactly 33554432 bytes, never more" "$RS:$(wc -c <"$ISO/testdata/parser/series.jsonl" | tr -d ' ')" "0:33554432"
-rm -f "$ISO/testdata/parser/series.jsonl"
-rr -w write_audit_failed --write testdata/parser -- sh -c 'truncate -s 33554433 /src/testdata/parser/series.jsonl'
-expect "a sparse 33554433-byte map file is write_audit_failed with zero host writes" "$RS:$([ -e "$ISO/testdata/parser/series.jsonl" ] && echo present || echo absent)" "125:absent"
-reason "sparse reason" write_audit_failed
-rr -w write_audit_failed --write testdata/parser -- sh -c 'truncate -s 20971520 /src/testdata/parser/series.jsonl; truncate -s 20971520 /src/testdata/parser/movie.jsonl'
-expect "two 20 MiB sparse files exceeding the cap together are write_audit_failed" "$RS:$(fhash "$ISO/testdata/parser/movie.jsonl")" "125:$priorR"
-
-# unprotected-map mutant: child-owned staging root, no precreation, no preflight
-a_map_bound() { # holds when container writable-layer growth stays below 1 MiB through the map
-	bg_run mapb "$1" --write testdata/parser -- sh -c 'ln -s /src/escape.bin /src/testdata/parser/series.jsonl 2>/dev/null; head -c 33554433 /dev/zero >/src/testdata/parser/series.jsonl 2>/dev/null; touch /tmp/ready; n=0; while [ ! -e /tmp/go ] && [ "$n" -lt 600 ]; do sleep 1; n=$((n + 1)); done'
-	_c=$(bg_ctr mapb) || { OBS="no container"; SETUP=1; return 1; }
-	if ! bg_wait "$_c" /tmp/ready; then OBS="not ready"; SETUP=1; kill -KILL "$BG_PID" 2>/dev/null; return 1; fi
-	_sz=$(timeout 30 docker inspect -s -f '{{.SizeRw}}' "$_c" 2>/dev/null) || _sz=
-	bg_touch "$_c" /tmp/go || SETUP=1
-	bg_end mapb
-	OBS="SizeRw ${_sz:-unknown}"
-	case $_sz in '' | *[!0-9]*) SETUP=1; return 1 ;; esac
-	reached
-	[ "$_sz" -lt 1048576 ] && [ ! -e "$ISO/escape.bin" ]
-}
-gvariant mut-unprotected-map controller.go 'size=33554432,nr_inodes=8,mode=0755,uid=65534,gid=65534"' 'size=33554432,nr_inodes=8,mode=0700,uid=1000,gid=1000"' '!c.precreate("/src/"+c.write, c.mapNames)' 'false' '!c.writePreflight()' 'false'
-redgreen "unprotected-map mutant (child-owned root, no precreation, no preflight)" a_map_bound "$MUT/mut-unprotected-map.sh" "$RUNNER"
-rm -rf "$ISO/testdata"
-# the live map seen from the host: while the producer is held before completion the host write root stays exactly as it was. The child's write is first observed inside the container (the
-# target premise); an unsafe bind or unstaged implementation shows it on the host at that same moment. Nothing is written outside the isolated, test-owned roots.
-canary_state() { { find "$CANARY" | LC_ALL=C sort; find "$CANARY" -type f -exec sha256sum {} + | LC_ALL=C sort; } | sha256sum; } # names and content hashes of everything outside the checkout
-live_host() { (cd "$ISO/testdata/parser" 2>/dev/null && { find . | LC_ALL=C sort; find . -type f -exec sha256sum {} + | LC_ALL=C sort; }) | sha256sum; }
-a_live_hostwrite() { # a_live_hostwrite RUNNER: holds when nothing reaches the host write root before the producer completes
-	rm -rf "$ISO/testdata"
-	mkdir -p "$ISO/testdata/parser"
-	printf 'prior movie\n' >"$ISO/testdata/parser/movie.jsonl"
-	_lh0=$(live_host)
-	_lc0=$(canary_state)
-	bg_run live "$1" --write testdata/parser -- sh -c "printf transient >/src/testdata/parser/series.jsonl; $CBAR; printf done >/src/testdata/parser/series.jsonl"
-	_c=$(bg_ctr live) || { OBS="no container"; SETUP=1; return 1; }
-	if ! bg_wait "$_c" /tmp/ready; then OBS="not ready"; SETUP=1; kill -KILL "$BG_PID" 2>/dev/null; bg_end live; return 1; fi
-	_lw=$(cx "$_c" /usr/bin/cat /src/testdata/parser/series.jsonl 2>/dev/null)
-	_lh1=$(live_host)
-	_lc1=$(canary_state)
-	bg_touch "$_c" /tmp/go || SETUP=1
-	bg_end live
-	OBS="the producer, held before completion, wrote '$_lw' into its map; host write root unchanged: $([ "$_lh0" = "$_lh1" ] && echo yes || echo NO), canary unchanged: $([ "$_lc0" = "$_lc1" ] && echo yes || echo NO)"
-	[ "$_lw" = transient ] || { SETUP=1; return 1; }
-	reached
-	[ "$_lh0" = "$_lh1" ] && [ "$_lc0" = "$_lc1" ]
-}
-BIND_OLD='args = append(args, "--tmpfs", "/src/"+c.write+writeTmpfsOpts)'
-gvariant mut-live-bind controller.go "$BIND_OLD" '_ = os.Chmod(c.repo+"/"+c.write, 0o777)
-		args = append(args, "--mount", "type=bind,source="+c.repo+"/"+c.write+",target=/src/"+c.write)' '!c.writePreflight()' 'false'
-redgreen "live-map unsafe bind (the host write root is exposed before completion)" a_live_hostwrite "$MUT/mut-live-bind.sh" "$RUNNER"
-rm -rf "$ISO/testdata"
-
-# drafts: nonzero child publishes its redacted draft; corpus root publishes nothing
-mkdir -p "$ISO/testdata/parser" "$ISO/docs/spikes/issue-drafts"
-printf 'old\n' >"$ISO/testdata/parser/series.jsonl"
-rr -s 5 --write testdata/parser -- sh -c 'printf new >/src/testdata/parser/series.jsonl; exit 5'
-expect "nonzero child: corpus root publishes nothing and keeps the status" "$RS:$(cat "$ISO/testdata/parser/series.jsonl")" "5:old"
-rr -s 7 --write docs/spikes/issue-drafts -- sh -c 'printf draft >/src/docs/spikes/issue-drafts/s5-admission.md; exit 7'
-expect "nonzero child: the draft is published and the status kept" "$RS:$(cat "$ISO/docs/spikes/issue-drafts/s5-admission.md")" "7:draft"
-rm -f "$ISO/docs/spikes/issue-drafts/s5-admission.md"
-
-# issue-drafts root filled through s5-tools.md with a nonzero child (cap-ignoring publication mutant RED). Like the draft-length controls below it is reached only by its own positive receipt (DRCPT)
-# written by a compiled copy at the seam under test: an unrelated exporter, audit or redaction failure speaks the same fixed word, leaves the receipt absent or different and earns neither polarity.
-DRCPT=$TMP/draft.receipt
-drcpt() { printf '%s' '{ f, _ := os.OpenFile("'$DRCPT'", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644); fmt.Fprintf(f, '"$1"'); f.Close() }'; }
-neither_polarity() { # neither_polarity NAME FN RUNNER: the same assertion FN on RUNNER earns neither RED nor GREEN: the failure it meets is not its target
-	_npn=$1
-	_npf=$2
-	rg_reset
-	_npc=0
-	"$_npf" "$3" || _npc=$?
-	_npr=n
-	_npg=n
-	rg_verdict red "$_npc" && _npr=R
-	rg_verdict green "$_npc" && _npg=G
-	META=1
-	expect "$_npn" "$_npr$_npg" nn
-	META=0
-}
-a_full_draft_root() { # holds when a full draft root publishes nothing
-	rm -f "$ISO/docs/spikes/issue-drafts/s5-admission.md" "$ISO/docs/spikes/issue-drafts/s5-tools.md"
-	: >"$DRCPT" || { OBS="the seam receipt could not be created"; SETUP=1; return 1; }
-	rrx "$ISO" "$1" --write docs/spikes/issue-drafts -- sh -c 'printf draft >/src/docs/spikes/issue-drafts/s5-admission.md; head -c 33554432 /dev/zero >/src/docs/spikes/issue-drafts/s5-tools.md 2>/dev/null; exit 1'
-	OBS="status $RS, seam receipt '$(cat "$DRCPT")', admission draft $([ -e "$ISO/docs/spikes/issue-drafts/s5-admission.md" ] && echo published || echo absent)"
-	# the target: the runner's own audit found the protected map full (free 0) under a nonzero child, read at the cap seam
-	[ "$(cat "$DRCPT")" = "free 0 cs 1" ] && reached
-	[ "$RS" = 1 ] && grep -Fq 'dev-run: write_cap_reached root=docs/spikes/issue-drafts' "$TMP/rerr" && [ ! -e "$ISO/docs/spikes/issue-drafts/s5-admission.md" ] && [ ! -e "$ISO/docs/spikes/issue-drafts/s5-tools.md" ]
-}
-DCAP_OLD='	if cs != 0 {
-		if free == "0" {'
-DCAP_NEW='	'"$(drcpt '"free %s cs %d\n", free, cs')"'
-	if cs != 0 {
-		if free == "0" {'
-gvariant fault-draft-full controller.go "$DCAP_OLD" "$DCAP_NEW"
-gvariant mut-cap-ignoring controller.go "$DCAP_OLD" "$DCAP_NEW" 'if free == "0" {' 'if free == "0" && false {'
-redgreen "cap-ignoring publication mutant" a_full_draft_root "$MUT/mut-cap-ignoring.sh" "$MUT/fault-draft-full.sh"
-
-# redaction changes draft length: expanding and shrinking drafts keep a valid current-run draft. The target of both is the receipt of the size comparison: the audited raw size and the redacted part size.
-DSIZE_OLD='return err == nil && fi.Size() >= 1 && fi.Size() <= capDraft'
-DSIZE_RCPT='if err == nil {
-			'"$(drcpt '"part %d raw %d\n", fi.Size(), size')"'
-		}
-		'
-gvariant fault-draft-size controller.go "$DSIZE_OLD" "$DSIZE_RCPT$DSIZE_OLD"
-gvariant mut-raw-eq-emitted controller.go "$DSIZE_OLD" "${DSIZE_RCPT}return err == nil && fi.Size() == size"
-a_draft_expand() { # holds when a 7-byte selected value expands to 10 bytes and the draft is kept
-	rm -f "$ISO/docs/spikes/issue-drafts/s5-admission.md"
-	: >"$DRCPT" || { OBS="the seam receipt could not be created"; SETUP=1; return 1; }
-	(cd "$ISO" && BOXSET_TEST_SECRET=ADM-003 "$1" --write docs/spikes/issue-drafts -- sh -c 'printf "blocked ADM-003 end" >/src/docs/spikes/issue-drafts/s5-admission.md; exit 1') >"$TMP/rout" 2>"$TMP/rerr"
-	RS=$?
-	rerr_seen
-	OBS="status $RS, seam receipt '$(cat "$DRCPT")', draft '$(cat "$ISO/docs/spikes/issue-drafts/s5-admission.md" 2>/dev/null)'"
-	# the target: the audited raw size (19 bytes) met the redacted part (22 bytes) at the size comparison
-	[ "$(cat "$DRCPT")" = "part 22 raw 19" ] && reached
-	[ "$RS" = 1 ] && [ "$(cat "$ISO/docs/spikes/issue-drafts/s5-admission.md" 2>/dev/null)" = "blocked [REDACTED] end" ]
-}
-redgreen "raw-size-equals-emitted-size mutant drops the expanded draft" a_draft_expand "$MUT/mut-raw-eq-emitted.sh" "$MUT/fault-draft-size.sh"
-DRAFT_SHRINK_IN='see https://aaaaaaaaa:bbbbbbbb@h/p?k=cccccccccccccccccccc end'
-DRAFT_SHRINK_OUT='see https://[REDACTED]@h/p?k=[REDACTED] end'
-a_draft_shrink() { # holds when an 18-byte userinfo and 20-byte query value shrink the draft but it is kept
-	rm -f "$ISO/docs/spikes/issue-drafts/s5-admission.md"
-	: >"$DRCPT" || { OBS="the seam receipt could not be created"; SETUP=1; return 1; }
-	rrx "$ISO" "$1" --write docs/spikes/issue-drafts -- sh -c 'printf "see https://aaaaaaaaa:bbbbbbbb@h/p?k=cccccccccccccccccccc end" >/src/docs/spikes/issue-drafts/s5-admission.md; exit 1'
-	OBS="status $RS, seam receipt '$(cat "$DRCPT")', draft '$(cat "$ISO/docs/spikes/issue-drafts/s5-admission.md" 2>/dev/null)'"
-	# the target: the audited raw size met the shorter redacted part at the size comparison
-	[ "$(cat "$DRCPT")" = "part $(printf %s "$DRAFT_SHRINK_OUT" | wc -c | tr -d ' ') raw $(printf %s "$DRAFT_SHRINK_IN" | wc -c | tr -d ' ')" ] && reached
-	[ "$RS" = 1 ] && [ "$(cat "$ISO/docs/spikes/issue-drafts/s5-admission.md" 2>/dev/null)" = "$DRAFT_SHRINK_OUT" ]
-}
-redgreen "size-compare mutant drops the shrunk draft" a_draft_shrink "$MUT/mut-raw-eq-emitted.sh" "$MUT/fault-draft-size.sh"
-
-# exporter prefix fault: the raw count catches a truncated draft (raw-count-removed mutant RED). The target is the receipt of the fault itself: a 5-byte prefix of the complete export got through.
-PREFIX_BODY='a complete draft body'
-a_prefix_draft() { # holds when a prefix-only export is write_audit_failed with no draft
-	rm -f "$ISO/docs/spikes/issue-drafts/s5-admission.md"
-	: >"$DRCPT" || { OBS="the seam receipt could not be created"; SETUP=1; return 1; }
-	rrx "$ISO" "$1" --write docs/spikes/issue-drafts -- sh -c 'printf "a complete draft body" >/src/docs/spikes/issue-drafts/s5-admission.md; exit 1'
-	OBS="status $RS, seam receipt '$(cat "$DRCPT")', draft $([ -e "$ISO/docs/spikes/issue-drafts/s5-admission.md" ] && echo published || echo absent)"
-	# the target: the exporter delivered exactly its 5-byte prefix of the complete export of the whole body
-	[ "$(cat "$DRCPT")" = "export 5 $(printf %s "$PREFIX_BODY" | wc -c | tr -d ' ')" ] && reached
-	[ "$RS" = 1 ] && grep -Fq 'dev-run: write_audit_failed root=docs/spikes/issue-drafts' "$TMP/rerr" && [ ! -e "$ISO/docs/spikes/issue-drafts/s5-admission.md" ]
-}
-PREFIX_OLD='lim := io.LimitReader(in, capMap+1)'
-PREFIX_NEW='lim := io.Reader(io.LimitReader(in, capMap+1))
-			{
-				var head [5]byte
-				n, _ := io.ReadFull(lim, head[:])
-				rest, _ := io.Copy(io.Discard, lim)
-				'"$(drcpt '"export %d %d\n", n, int64(n)+rest')"'
-				lim = bytes.NewReader(head[:n])
-			}'
-gvariant fault-prefix controller.go "$PREFIX_OLD" "$PREFIX_NEW"
-gvariant mut-raw-removed controller.go "$PREFIX_OLD" "$PREFIX_NEW" 'streamOpts{capN: capDraft, raw: size, tail: -1}' 'streamOpts{capN: capDraft, raw: -1, tail: -1}'
-redgreen "raw-count-removed mutant publishes the truncated draft" a_prefix_draft "$MUT/mut-raw-removed.sh" "$MUT/fault-prefix.sh"
-# an unrelated exporter failure (the supervisor export command fails outright) says write_audit_failed with a nonzero child and no draft, as the target's refusal does, but leaves
-# every seam receipt absent or different: the three draft controls earn neither polarity on it
-gvariant fault-draft-unrelated controller.go 'return c.sup(30, "/usr/bin/cat", "--", "/src/"+c.write+"/"+name)' 'return c.sup(30, "/usr/bin/sh", "-c", "exit 1")' "$DSIZE_OLD" "$DSIZE_RCPT$DSIZE_OLD" "$PREFIX_OLD" "$PREFIX_NEW"
-neither_polarity "an unrelated exporter failure earns neither RED nor GREEN for the expanded-draft control" a_draft_expand "$MUT/fault-draft-unrelated.sh"
-neither_polarity "an unrelated exporter failure earns neither RED nor GREEN for the shrunk-draft control" a_draft_shrink "$MUT/fault-draft-unrelated.sh"
-neither_polarity "an unrelated exporter failure earns neither RED nor GREEN for the prefix-export control" a_prefix_draft "$MUT/fault-draft-unrelated.sh"
-
-# draft publication faults after the commit point and at the rename seam
-a_draft_cleanup() { # holds when a backup-unlink failure after commit keeps the new draft
-	mkdir -p "$ISO/docs/spikes/issue-drafts"
-	find "$ISO/docs/spikes/issue-drafts" -mindepth 1 -delete
-	printf 'prior draft\n' >"$ISO/docs/spikes/issue-drafts/s5-admission.md"
-	rrx "$ISO" "$1" --write docs/spikes/issue-drafts -- sh -c 'printf "new draft" >/src/docs/spikes/issue-drafts/s5-admission.md; exit 1'
-	_id=$(runid)
-	OBS="status $RS, draft '$(cat "$ISO/docs/spikes/issue-drafts/s5-admission.md" 2>/dev/null)'"
-	[ "$RS" = 1 ] && grep -Fq "dev-run: publish_cleanup_failed root=docs/spikes/issue-drafts name=.s5-admission.md.$_id.prev" "$TMP/rerr" && reached
-	[ "$RS" = 1 ] && [ "$(cat "$ISO/docs/spikes/issue-drafts/s5-admission.md")" = "new draft" ] &&
-		[ "$(cat "$ISO/docs/spikes/issue-drafts/.s5-admission.md.$_id.prev" 2>/dev/null)" = "prior draft" ] &&
-		grep -Fq "dev-run: publish_cleanup_failed root=docs/spikes/issue-drafts name=.s5-admission.md.$_id.prev" "$TMP/rerr"
-}
-UNLINK_OLD='func (c *ctl) unlinkBackup(name string) error { return c.wroot.Remove(name) }'
-ROLLBACK_OLD='reason = "publish_cleanup_failed"'
-ROLLBACK_NEW='c.rollback()
-			reason = "publish_cleanup_failed"'
-gvariant fault-cleanup-draft controller.go "$UNLINK_OLD" 'func (c *ctl) unlinkBackup(name string) error { return errors.New("injected unlink failure") }'
-gvariant mut-cleanup-rollback controller.go "$UNLINK_OLD" 'func (c *ctl) unlinkBackup(name string) error { return errors.New("injected unlink failure") }' "$ROLLBACK_OLD" "$ROLLBACK_NEW"
-redgreen "post-commit cleanup failure treated as rollback restores the prior draft" a_draft_cleanup "$MUT/mut-cleanup-rollback.sh" "$MUT/fault-cleanup-draft.sh"
-find "$ISO/docs/spikes/issue-drafts" -maxdepth 1 -name '.s5-admission.md.*.prev' -delete
-a_draft_rename_after() { # holds when a failure after the rename took effect restores the prior draft byte-exactly
-	mkdir -p "$ISO/docs/spikes/issue-drafts"
-	find "$ISO/docs/spikes/issue-drafts" -mindepth 1 -delete
-	printf 'prior draft\n' >"$ISO/docs/spikes/issue-drafts/s5-admission.md"
-	_pi=$(find "$ISO/docs/spikes/issue-drafts/s5-admission.md" -printf '%i')
-	rrx "$ISO" "$1" --write docs/spikes/issue-drafts -- sh -c 'printf "new draft" >/src/docs/spikes/issue-drafts/s5-admission.md; exit 1'
-	_now=$(find "$ISO/docs/spikes/issue-drafts/s5-admission.md" -printf '%i' 2>/dev/null)
-	OBS="status $RS, draft '$(cat "$ISO/docs/spikes/issue-drafts/s5-admission.md" 2>/dev/null)', inode $_pi -> $_now"
-	[ "$RS" = 1 ] && grep -Fq 'write_publish_failed root=docs/spikes/issue-drafts' "$TMP/rerr" && reached
-	[ "$RS" = 1 ] && [ "$(cat "$ISO/docs/spikes/issue-drafts/s5-admission.md")" = "prior draft" ] && [ "$_now" = "$_pi" ] &&
-		grep -Fq 'write_publish_failed root=docs/spikes/issue-drafts' "$TMP/rerr" &&
-		[ -z "$(find "$ISO/docs/spikes/issue-drafts" -name '.*.part' -o -name '.*.prev')" ]
-}
-RENAME_OLD='func (c *ctl) renameOne(src, dst string) error { return c.wroot.Rename(src, dst) }'
-RENAME_AFTER='func (c *ctl) renameOne(src, dst string) error {
-	if err := c.wroot.Rename(src, dst); err != nil {
-		return err
-	}
-	return errors.New("injected failure after the rename took effect")
-}'
-gvariant fault-rename-after controller.go "$RENAME_OLD" "$RENAME_AFTER"
-gvariant mut-rollback-removed controller.go "$RENAME_OLD" "$RENAME_AFTER" 'func (c *ctl) rollback() {' 'func (c *ctl) rollback() {
-	return'
-redgreen "rollback-removed mutant leaves the new draft in place" a_draft_rename_after "$MUT/mut-rollback-removed.sh" "$MUT/fault-rename-after.sh"
-rm -rf "$ISO/docs/spikes/issue-drafts" "$ISO/testdata"
-
-# ===== 4. publication on the corpus root: hard links, foreign targets, rollback (T26) ===============
-mkdir -p "$ISO/testdata/parser"
-printf 'prior series\n' >"$ISO/testdata/parser/series.jsonl"
-printf 'prior movie\n' >"$ISO/testdata/parser/movie.jsonl"
-printf 'outside bytes\n' >"$CANARY/linked.bin"
-rm -f "$ISO/testdata/parser/movie.jsonl"
-ln "$CANARY/linked.bin" "$ISO/testdata/parser/movie.jsonl"
-BOTH='printf newS >/src/testdata/parser/series.jsonl; printf newR >/src/testdata/parser/movie.jsonl'
-a_hardlink() { # holds when a hard-linked target is replaced by rename, never written in place
-	rm -rf "$ISO/testdata"
-	mkdir -p "$ISO/testdata/parser"
-	rm -f "$CANARY/linked.bin"
-	printf 'outside bytes\n' >"$CANARY/linked.bin"
-	ln "$CANARY/linked.bin" "$ISO/testdata/parser/movie.jsonl"
-	rrx "$ISO" "$1" --write testdata/parser -- sh -c "$BOTH"
-	_links=$(find "$ISO/testdata/parser/movie.jsonl" -printf '%n' 2>/dev/null)
-	_rad=$(cat "$ISO/testdata/parser/movie.jsonl" 2>/dev/null)
-	_can=$(cat "$CANARY/linked.bin" 2>/dev/null)
-	OBS="status $RS, movie '$_rad', links $_links, outside '$_can'"
-	# the publication seam ran and its intended effect is observed from the files themselves, independently of the runner's
-	# status: the new bytes sit at the destination and either the publish succeeded or the in-place write changed the outside
-	# file. An intentionally faulty publication is not required to succeed, so its 125 is not a reason to call it unreached.
-	{ [ "$_rad" = newR ] && { [ "$RS" = 0 ] || [ "$_can" = newR ]; }; } && reached
-	[ "$RS" = 0 ] && [ "$_rad" = newR ] && [ "$_links" = 1 ] && [ "$_can" = "outside bytes" ]
-}
-gvariant mut-inplace-publish controller.go "$RENAME_OLD" 'func (c *ctl) renameOne(src, dst string) error {
-	data, err := c.wroot.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	f, err := c.wroot.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(data)
-	f.Close()
-	if err != nil {
-		return err
-	}
-	return c.wroot.Remove(src)
-}'
-redgreen "bind/in-place publication mutant" a_hardlink "$MUT/mut-inplace-publish.sh" "$RUNNER"
-printf 'prior series\n' >"$ISO/testdata/parser/series.jsonl"
-rm -f "$ISO/testdata/parser/movie.jsonl"
-mkdir "$ISO/testdata/parser/movie.jsonl"
-rr -w write_publish_failed --write testdata/parser -- sh -c "$BOTH"
-expect "an existing directory at movie.jsonl: write_publish_failed, zero renames, prior files unchanged" "$RS:$(cat "$ISO/testdata/parser/series.jsonl")" "125:prior series"
-reason "directory target reason" write_publish_failed
-rmdir "$ISO/testdata/parser/movie.jsonl"
-ln -s "$CANARY/canary.txt" "$ISO/testdata/parser/movie.jsonl"
-rr -w write_publish_failed --write testdata/parser -- sh -c "$BOTH"
-expect "a symlink at movie.jsonl: write_publish_failed and the outside canary unchanged" "$RS:$(cat "$CANARY/canary.txt")" "125:outside canary"
-rm -f "$ISO/testdata/parser/movie.jsonl"
-expect "refusals left no owned part or backup" "$(find "$ISO/testdata/parser" -name '.*' ! -name . | wc -l | tr -d ' ')" 0
-
-# second rename fails after the first succeeded: three prior-state shapes. The prior device:inode,
-# bytes and link count of every existing name are recorded before the fault and compared afterwards.
-ident_h() { find "$1" -maxdepth 0 -printf '%D:%i' 2>/dev/null; } # device:inode of a host path, empty when absent
-links_h() { find "$1" -maxdepth 0 -printf '%n' 2>/dev/null; }
-a_second_rename() { # a_second_rename RUNNER (SHAPE global): holds when every shape returns to its exact prior state
-	_P=$ISO/testdata/parser
-	rm -rf "$_P"
-	mkdir -p "$_P"
-	case $SHAPE in
-	absent) ;;
-	mixed) printf 'prior movie\n' >"$_P/movie.jsonl" ;;
-	linked)
-		printf 'prior series\n' >"$CANARY/s.bin"
-		ln "$CANARY/s.bin" "$_P/series.jsonl"
-		printf 'prior movie\n' >"$_P/movie.jsonl"
-		;;
-	esac
-	_s0=$(ident_h "$_P/series.jsonl")
-	_r0=$(ident_h "$_P/movie.jsonl")
-	rrx "$ISO" "$1" --write testdata/parser -- sh -c "$BOTH"
-	[ "$RS" = 125 ] && grep -Fq 'write_publish_failed root=testdata/parser' "$TMP/rerr" && reached
-	_s=$(cat "$_P/series.jsonl" 2>/dev/null)
-	_r=$(cat "$_P/movie.jsonl" 2>/dev/null)
-	OBS="$SHAPE: status $RS series '$_s' ($(ident_h "$_P/series.jsonl") was $_s0) movie '$_r' ($(ident_h "$_P/movie.jsonl") was $_r0)"
-	[ "$RS" = 125 ] || return 1
-	grep -Fq 'write_publish_failed root=testdata/parser' "$TMP/rerr" || return 1
-	[ -z "$(find "$_P" -name '.*.part' -o -name '.*.prev')" ] || return 1
-	grep -Fq PASS "$TMP/rout" && return 1
-	case $SHAPE in
-	absent) [ ! -e "$_P/series.jsonl" ] && [ ! -e "$_P/movie.jsonl" ] ;;
-	mixed) [ ! -e "$_P/series.jsonl" ] && [ "$_r" = "prior movie" ] && [ "$(ident_h "$_P/movie.jsonl")" = "$_r0" ] && [ "$(links_h "$_P/movie.jsonl")" = 1 ] ;;
-	linked)
-		[ "$_s" = "prior series" ] && [ "$(ident_h "$_P/series.jsonl")" = "$_s0" ] && [ "$(links_h "$_P/series.jsonl")" = 2 ] &&
-			[ "$(cat "$CANARY/s.bin")" = "prior series" ] && [ "$_r" = "prior movie" ] && [ "$(ident_h "$_P/movie.jsonl")" = "$_r0" ] && [ "$(links_h "$_P/movie.jsonl")" = 1 ]
-		;;
-	esac
-}
-RENAME_SECOND='func (c *ctl) renameOne(src, dst string) error {
-	if dst == "movie.jsonl" {
-		return errors.New("injected rename failure")
-	}
-	return c.wroot.Rename(src, dst)
-}'
-gvariant fault-second-rename controller.go "$RENAME_OLD" "$RENAME_SECOND"
-gvariant mut-new-inode-kept controller.go "$RENAME_OLD" "$RENAME_SECOND" ' else if err := c.wroot.Remove(n); err != nil && !errors.Is(err, fs.ErrNotExist) { // the new inode of a name that had none
-				c.conflict(n)
-			}' ''
-for SHAPE in absent mixed; do
-	redgreen "new-inode-rollback-removed mutant, shape $SHAPE" a_second_rename "$MUT/mut-new-inode-kept.sh" "$MUT/fault-second-rename.sh"
-done
-SHAPE=linked
-holds "second rename fails with both targets existing and series hard-linked: both prior inodes (series link count 2), bytes and canary restored" a_second_rename "$MUT/fault-second-rename.sh"
-
-# foreign replacement or deletion between the first rename and the failure: present and absent priors.
-# The barrier loop is bounded and records its subshell pid.
-a_foreign() { # a_foreign PRIOR RUNNER (FACT global replace|delete)
-	_P=$ISO/testdata/parser
-	rm -rf "$_P"
-	find "$BAR" -mindepth 1 -delete
-	mkdir -p "$_P"
-	[ "$PRIOR" = present ] && printf 'prior series\n' >"$_P/series.jsonl"
-	_s0=$(ident_h "$_P/series.jsonl")
-	printf 'foreign bytes\n' >"$TMP/foreign"
-	bg_run foreign "$1" --write testdata/parser -- sh -c "$BOTH"
-	_i=0
-	while [ ! -e "$BAR/ready" ] && [ "$_i" -lt 900 ]; do
-		kill -0 "$BG_PID" 2>/dev/null || break
-		sleep 1
-		_i=$((_i + 1))
-	done
-	[ -e "$BAR/ready" ] || { OBS="barrier never reached"; SETUP=1; bg_end foreign; return 1; }
-	_fo=0
-	if [ "$FACT" = delete ]; then
-		{ rm -f "$_P/series.jsonl" && [ ! -e "$_P/series.jsonl" ]; } || _fo=1
-	else
-		{ cp "$TMP/foreign" "$_P/.foreign.new" && mv -T "$_P/.foreign.new" "$_P/series.jsonl" && [ "$(cat "$_P/series.jsonl")" = "foreign bytes" ]; } || _fo=1
-	fi
-	: >"$BAR/go"
-	bg_end foreign
-	[ "$_fo" = 0 ] || { OBS="the foreign replacement or deletion was not performed"; SETUP=1; return 1; }
-	_id=$(runid)
-	[ "$RS" = 125 ] && grep -Fq 'write_publish_failed root=testdata/parser' "$TMP/rerr" && reached
-	OBS="$FACT/$PRIOR: status $RS series '$(cat "$_P/series.jsonl" 2>/dev/null)' ($(ident_h "$_P/series.jsonl") was $_s0)"
-	[ "$RS" = 125 ] || return 1
-	if [ "$FACT" = delete ]; then
-		grep -Fq 'publish_rollback_conflict' "$TMP/rerr" && return 1
-		[ ! -e "$_P/.series.jsonl.$_id.prev" ] || return 1
-		if [ "$PRIOR" = present ]; then
-			[ "$(cat "$_P/series.jsonl" 2>/dev/null)" = "prior series" ] && [ "$(ident_h "$_P/series.jsonl")" = "$_s0" ]
-		else
-			[ ! -e "$_P/series.jsonl" ]
-		fi
-		return
-	fi
-	[ "$(cat "$_P/series.jsonl")" = "foreign bytes" ] || return 1
-	grep -Fq 'dev-run: publish_rollback_conflict root=testdata/parser name=series.jsonl' "$TMP/rerr" || return 1
-	if [ "$PRIOR" = present ]; then
-		[ "$(cat "$_P/.series.jsonl.$_id.prev" 2>/dev/null)" = "prior series" ]
-	else
-		[ ! -e "$_P/.series.jsonl.$_id.prev" ]
-	fi
-}
-FOREIGN_NEW='func (c *ctl) renameOne(src, dst string) error {
-	if dst == "movie.jsonl" {
-		return errors.New("injected rename failure")
-	}
-	if err := c.wroot.Rename(src, dst); err != nil {
-		return err
-	}
-	if dst == "series.jsonl" {
-		'"$(gobar 180)"'
-	}
-	return nil
-}'
-gvariant fault-foreign controller.go "$RENAME_OLD" "$FOREIGN_NEW"
-gvariant mut-unconditional-restore controller.go "$RENAME_OLD" "$FOREIGN_NEW" 'case curOK && cur == p:' 'case true:'
-FACT=replace
-for PRIOR in present absent; do
-	redgreen "unconditional-restore mutant, prior series $PRIOR" a_foreign "$MUT/mut-unconditional-restore.sh" "$MUT/fault-foreign.sh"
-done
-# the published name deleted at the barrier with its backup present: absent-current branch restores the
-# prior inode by no-overwrite link and removes the backup
-gvariant mut-absent-current-ignored controller.go "$RENAME_OLD" "$FOREIGN_NEW" 'case !curOK && !c.isSymlink(n):' 'case false:'
-FACT=delete
-for PRIOR in present absent; do
-	redgreen "absent-current-branch-ignored mutant, prior series $PRIOR" a_foreign "$MUT/mut-absent-current-ignored.sh" "$MUT/fault-foreign.sh"
-done
-FACT=replace
-
-# post-commit: first backup unlink succeeds, second fails; no rollback
-a_post_commit() { # holds when a post-commit cleanup failure keeps both new names, the first backup gone and the second kept
-	_P=$ISO/testdata/parser
-	rm -rf "$_P"
-	mkdir -p "$_P"
-	printf 'prior series\n' >"$_P/series.jsonl"
-	printf 'prior movie\n' >"$_P/movie.jsonl"
-	rrx "$ISO" "$1" --write testdata/parser -- sh -c "$BOTH"
-	_id=$(runid)
-	[ "$RS" = 125 ] && grep -Fq "dev-run: publish_cleanup_failed root=testdata/parser name=.movie.jsonl.$_id.prev" "$TMP/rerr" && reached
-	OBS="status $RS series '$(cat "$_P/series.jsonl" 2>/dev/null)' movie '$(cat "$_P/movie.jsonl" 2>/dev/null)', first backup $([ -e "$_P/.series.jsonl.$_id.prev" ] && echo kept || echo gone)"
-	[ "$RS" = 125 ] && [ "$(cat "$_P/series.jsonl")" = newS ] && [ "$(cat "$_P/movie.jsonl")" = newR ] &&
-		[ ! -e "$_P/.series.jsonl.$_id.prev" ] &&
-		[ "$(cat "$_P/.movie.jsonl.$_id.prev" 2>/dev/null)" = "prior movie" ] &&
-		[ -z "$(find "$_P" -name '.*.part')" ] &&
-		grep -Fq "dev-run: publish_cleanup_failed root=testdata/parser name=.movie.jsonl.$_id.prev" "$TMP/rerr"
-}
-SECOND_UNLINK='func (c *ctl) unlinkBackup(name string) error {
-	if strings.HasPrefix(name, ".movie.jsonl.") {
-		return errors.New("injected unlink failure")
-	}
-	return c.wroot.Remove(name)
-}'
-gvariant fault-second-unlink controller.go "$UNLINK_OLD" "$SECOND_UNLINK"
-gvariant mut-cleanup-as-rollback controller.go "$UNLINK_OLD" "$SECOND_UNLINK" "$ROLLBACK_OLD" "$ROLLBACK_NEW"
-redgreen "mutant treating post-commit cleanup failure as rollback" a_post_commit "$MUT/mut-cleanup-as-rollback.sh" "$MUT/fault-second-unlink.sh"
-
-# backups unlinked before the commit re-check lose the prior file under an identity fault
-a_commit_order() { # holds when an identity fault after the renames restores the prior series.jsonl
-	rm -rf "$ISO/testdata/parser"
-	mkdir -p "$ISO/testdata/parser"
-	printf 'prior series\n' >"$ISO/testdata/parser/series.jsonl"
-	rrx "$ISO" "$1" --write testdata/parser -- sh -c 'printf newS >/src/testdata/parser/series.jsonl'
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: write_root_changed' "$TMP/rerr" && reached
-	OBS="status $RS series '$(cat "$ISO/testdata/parser/series.jsonl" 2>/dev/null)'"
-	[ "$RS" = 125 ] && [ "$(cat "$ISO/testdata/parser/series.jsonl" 2>/dev/null)" = "prior series" ]
-}
-IDFAULT_OLD='if !c.rootUnchanged() { // the identity re-check after the renames'
-IDFAULT_NEW='if true || !c.rootUnchanged() { // the identity re-check after the renames'
-gvariant fault-identity controller.go "$IDFAULT_OLD" "$IDFAULT_NEW"
-gvariant mut-unlink-before-commit controller.go "$IDFAULT_OLD" "$IDFAULT_NEW" "$IDFAULT_NEW" 'for _, n := range c.staged {
-		_ = c.wroot.Remove("." + n + "." + c.runid + ".prev")
-	}
-	if true || !c.rootUnchanged() { // the identity re-check after the renames'
-redgreen "backup-unlinked-before-commit mutant loses the prior file" a_commit_order "$MUT/mut-unlink-before-commit.sh" "$MUT/fault-identity.sh"
-
-# a part whose identity cannot be held authorises no rename: no renames at all, prior bytes and inodes preserved, nothing owned left behind
-a_ident_fault() { # a_ident_fault RUNNER
-	_P=$ISO/testdata/parser
-	rm -rf "$_P"
-	mkdir -p "$_P"
-	printf 'prior series\n' >"$_P/series.jsonl"
-	printf 'prior movie\n' >"$_P/movie.jsonl"
-	_s0=$(ident_h "$_P/series.jsonl")
-	_r0=$(ident_h "$_P/movie.jsonl")
-	rrx "$ISO" "$1" --write testdata/parser -- sh -c "$BOTH"
-	{ { [ "$RS" = 125 ] && grep -Fq 'write_publish_failed root=testdata/parser' "$TMP/rerr"; } || { [ "$RS" = 0 ] && [ "$(cat "$_P/series.jsonl" 2>/dev/null)" = newS ]; }; } && reached
-	OBS="status $RS series '$(cat "$_P/series.jsonl" 2>/dev/null)' ($(ident_h "$_P/series.jsonl") was $_s0) movie '$(cat "$_P/movie.jsonl" 2>/dev/null)' ($(ident_h "$_P/movie.jsonl") was $_r0)"
-	[ "$RS" = 125 ] && grep -Fq 'write_publish_failed root=testdata/parser' "$TMP/rerr" &&
-		[ "$(cat "$_P/series.jsonl")" = "prior series" ] && [ "$(ident_h "$_P/series.jsonl")" = "$_s0" ] &&
-		[ "$(cat "$_P/movie.jsonl")" = "prior movie" ] && [ "$(ident_h "$_P/movie.jsonl")" = "$_r0" ] &&
-		[ -z "$(find "$_P" -name '.*.part' -o -name '.*.prev')" ]
-}
-IDENT_OLD='func (c *ctl) partIdent(part string) (fileID, bool) {
-	return c.identOf(part)
-}'
-IDENT_NEW='func (c *ctl) partIdent(part string) (fileID, bool) {
-	if strings.HasPrefix(part, ".series.jsonl.") {
-		return fileID{}, false
-	}
-	return c.identOf(part)
-}'
-gvariant fault-ident-part controller.go "$IDENT_OLD" "$IDENT_NEW"
-gvariant mut-ident-unchecked controller.go "$IDENT_OLD" "$IDENT_NEW" 'if !ok { // an unheld part identity authorises no rename
-			return c.failPub("write_publish_failed")
-		}' '_ = ok'
-redgreen "unheld part identity (identity-unchecked mutant renames anyway)" a_ident_fault "$MUT/mut-ident-unchecked.sh" "$MUT/fault-ident-part.sh"
-
-# canary_state (names and content hashes of everything outside the checkout) is defined with the live-map controls above
-# Distinct transitions after the write root was acquired, with the child held at the in-container barrier;
-# the child then writes the real map name. MODE: leaf (parser replaced by a canary symlink), ancestor-link
-# (testdata replaced by a canary symlink), ancestor-dir (testdata moved away and a fresh real tree created).
-a_root_transition() { # a_root_transition MODE RUNNER
-	rm -rf "$ISO/testdata" "$ISO/testdata.moved"
-	mkdir -p "$ISO/testdata/parser"
-	printf 'c\n' >"$ISO/testdata/parser/keep"
-	_h0=$(fhash "$ISO/testdata/parser/keep")
-	bg_run swap "$2" --write testdata/parser -- sh -c "$CBAR; printf late >/src/testdata/parser/series.jsonl"
-	_c=$(bg_ctr swap) || { OBS="no container"; SETUP=1; return 1; }
-	bg_wait "$_c" /tmp/ready || { OBS="not ready"; SETUP=1; kill -KILL "$BG_PID" 2>/dev/null; bg_end swap; return 1; }
-	_cs0=$(canary_state)
-	case $1 in
-	leaf)
-		mv "$ISO/testdata/parser" "$ISO/testdata/parser.moved"
-		ln -s "$CANARY" "$ISO/testdata/parser"
-		_mv=$ISO/testdata/parser.moved
-		;;
-	ancestor-link)
-		mv "$ISO/testdata" "$ISO/testdata.moved"
-		ln -s "$CANARY" "$ISO/testdata"
-		_mv=$ISO/testdata.moved/parser
-		;;
-	ancestor-dir)
-		mv "$ISO/testdata" "$ISO/testdata.moved"
-		mkdir -p "$ISO/testdata/parser"
-		_mv=$ISO/testdata.moved/parser
-		;;
-	esac
-	bg_touch "$_c" /tmp/go
-	bg_end swap
-	_new=$([ -e "$ISO/testdata/parser/series.jsonl" ] && echo present || echo absent)
-	OBS="$1: status $RS, replacement series $_new, moved keep '$(cat "$_mv/keep" 2>/dev/null)'"
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: write_root_changed' "$TMP/rerr" && reached
-	_ok=0
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: write_root_changed' "$TMP/rerr" && [ "$_cs0" = "$(canary_state)" ] && [ "$_new" = absent ] &&
-		[ "$(find "$_mv" -mindepth 1 | LC_ALL=C sort | tr '\n' ' ')" = "$_mv/keep " ] && [ "$(fhash "$_mv/keep")" = "$_h0" ] && _ok=1
-	rm -rf "$ISO/testdata" "$ISO/testdata.moved"
-	[ "$_ok" = 1 ]
-}
-for MODE in leaf ancestor-link ancestor-dir; do
-	holds "write root $MODE replaced while the child is held, then the child writes series.jsonl: write_root_changed, canary and moved object bytes and entries unchanged, replacement unwritten" a_root_transition "$MODE" "$RUNNER"
-done
-# Transitions during acquisition itself (validation and creation), held at a compiled barrier before the write-root OpenRoot: the
-# controller refuses a swapped leaf or ancestor with write_root_symlink before any child runs; the acquisition checks removed (mutant) reach the child.
-# The pinned-root open and its identity check are not the only refusal a swapped root meets: the image copies the swapped symlink, so the
-# supervisor's own map preflight (writePreflight) would refuse the run before any child existed and mask the removed check.
-# The mutant therefore pins the repository root instead of the leaf, drops the acquisition identity check and that masking preflight together, so the only remaining refusals
-# come after the child ran; the original refuses at acquisition with write_root_symlink and no child.
-ROOTHOLD_OLD='wroot, err := c.repoRoot.OpenRoot(c.write)'
-ROOTHOLD_NEW="$(gobar 120)
-	wroot, err := c.repoRoot.OpenRoot(c.write)"
-a_acq_transition() { # a_acq_transition RUNNER (ACQ global cold-leaf|cold-ancestor|warm-leaf): the earliest accepted boundary is the acquisition itself. Every Docker call of the bootstrap precedes the barrier;
-	# whatever the controller itself calls after the swap is native work attempted past the acquisition (the shim records the S line of each call before it execs the real CLI), so the original must make none and the mutant
-	# must positively show its first native call, the work-image build over the swapped tree, whatever a downstream Docker safety check later says.
-	rm -rf "$ISO/testdata" "$ISO/testdata.moved" "$ISO/testdata/parser.moved"
-	mkdir -p "$CANARY/parser"
-	[ "$ACQ" != warm-leaf ] || { mkdir -p "$ISO/testdata/parser"; printf 'c\n' >"$ISO/testdata/parser/keep"; }
-	find "$BAR" -mindepth 1 -delete
-	_cs0=$(canary_state)
-	bg_runlog acq "$1" --write testdata/parser -- sh -c 'printf ran'
-	_i=0
-	while [ ! -e "$BAR/ready" ] && kill -0 "$BG_PID" 2>/dev/null && [ "$_i" -lt 300 ]; do sleep 1; _i=$((_i + 1)); done
-	[ -e "$BAR/ready" ] || { OBS="acquisition barrier never reached"; SETUP=1; bg_end acq; rmdir "$CANARY/parser" 2>/dev/null; return 1; }
-	_pre=$(grep -c '^S ' "$TMP/acq.dlog" 2>/dev/null)
-	_fo=0
-	case $ACQ in
-	cold-leaf | warm-leaf)
-		{ mv "$ISO/testdata/parser" "$ISO/testdata/parser.moved" && ln -s "$CANARY" "$ISO/testdata/parser"; } || _fo=1
-		_mv=$ISO/testdata/parser.moved
-		;;
-	cold-ancestor)
-		{ mv "$ISO/testdata" "$ISO/testdata.moved" && ln -s "$CANARY" "$ISO/testdata"; } || _fo=1
-		_mv=$ISO/testdata.moved
-		;;
-	esac
-	: >"$BAR/go"
-	bg_end acq
-	dlogs_same acq || { rmdir "$CANARY/parser" 2>/dev/null; return 1; }
-	[ "$_fo" = 0 ] || { OBS="the acquisition swap was not performed"; SETUP=1; rmdir "$CANARY/parser" 2>/dev/null; return 1; }
-	_post=$(grep -c '^S ' "$TMP/acq.dlog" 2>/dev/null)
-	_new=$((${_post:-0} - ${_pre:-0}))
-	_first=$(grep '^S ' "$TMP/acq.dlog" 2>/dev/null | sed -n "$((${_pre:-0} + 1))p")
-	case $_first in *" build "*"--target work"*) _bw=1 ;; *) _bw=0 ;; esac
-	OBS="$ACQ: status $RS, child output '$(cat "$TMP/rout")', runner words '$(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tr '\n' ' ')', native Docker calls after the acquisition barrier $_new (first: ${_first:-none}), moved entries '$(find "$_mv" -mindepth 1 | LC_ALL=C sort | tr '\n' ' ')'"
-	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: write_root_symlink' "$TMP/rerr" && [ "$_new" = 0 ]; } || { [ "$_new" -ge 1 ] && [ "$_bw" = 1 ]; }; } && reached
-	_ok=0
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: write_root_symlink' "$TMP/rerr" && [ "$_new" = 0 ] && [ -z "$(cat "$TMP/rout")" ] && [ "$_cs0" = "$(canary_state)" ] &&
-		if [ "$ACQ" = warm-leaf ]; then [ "$(find "$_mv" -mindepth 1 | tr '\n' ' ')" = "$_mv/keep " ] && [ "$(cat "$_mv/keep")" = c ]; else [ -z "$(find "$_mv" -mindepth 1 -not -path "$_mv/parser" | head -n 1)" ]; fi && _ok=1
-	rm -rf "$ISO/testdata" "$ISO/testdata.moved" "$CANARY/parser"
-	[ "$_ok" = 1 ]
-}
-gvariant fault-root-hold controller.go "$ROOTHOLD_OLD" "$ROOTHOLD_NEW"
-gvariant mut-no-phys-check controller.go "$ROOTHOLD_OLD" "$ROOTHOLD_NEW" "$ROOTHOLD_OLD" 'wroot, err := c.repoRoot.OpenRoot(".")' 'if r := c.writeRootCheck(); r != "" {' 'if r := ""; r != "" {' '!c.writePreflight()' 'false'
-for ACQ in cold-leaf cold-ancestor warm-leaf; do
-	redgreen "acquisition-transition $ACQ (physical-path check removed mutant reaches the child)" a_acq_transition "$MUT/mut-no-phys-check.sh" "$MUT/fault-root-hold.sh"
-done
-
-# ===== 5. quiescence: detached writers, zombies, non-dumpable, threads, verifier faults (T26) ===============
-# Readiness is deterministic. The child records the pid under test and either holds at the in-container
-# barrier (non-dumpable, thread leader) or the runner is held at the export seam, which runs after
-# quiescence and the audit but before any byte is exported (detached writer, zombie). The driver reads
-# every task state of that pid as the 65534 supervisor and asserts the state each control claims.
-mkdir -p "$ISO/testdata/parser"
-task_states() { # task_states CTR PID: the State letter of every task of PID, one per line, or gone; a failed query fails (the one-shot control file makes the first query fail, to prove that a failure followed by success is still refused)
-	if [ -e "$TMP/ts.failonce" ]; then
-		rm -f "$TMP/ts.failonce"
-		return 1
-	fi
-	timeout 30 docker exec -u 65534:65534 "$1" /usr/bin/sh -c 'if [ ! -d /proc/$0 ]; then echo gone; exit 0; fi; for t in /proc/$0/task/*; do while IFS= read -r l; do case $l in State:*) set -- $l; echo "$2" ;; esac; done <"$t/status"; done' "$2" 2>/dev/null
-}
-EXPORTHOLD_OLD='func (c *ctl) exportPart(name string, size int64) bool {'
-EXPORTHOLD_NEW="$EXPORTHOLD_OLD
-	$(gobar 120)"
-live_tasks() { printf '%s\n' "$1" | tr ' ' '\n' | grep -v '^$' | grep -Evc '^(Z|gone)$'; } # live_tasks "S Z ...": tasks neither zombie nor gone
-# a_export_hold NAME RUNNER SCRIPT PIDFILE: runs SCRIPT through the held runner; sets AH_STATES (the task states of the
-# pid in /tmp/PIDFILE, read by a status-checked supervisor exec at the hold; with AH_WAIT set, polled until exactly
-# that state or 20 reads), AH_PUB (published series.jsonl) and RS. The runner is released only after the read.
-AH_WAIT=
-a_export_hold() {
-	rm -f "$ISO/testdata/parser/series.jsonl"
-	find "$BAR" -mindepth 1 -delete
-	bg_run "$1" "$2" --write testdata/parser -- sh -c "$3"
-	AH_STATES=
-	AH_C=$(bg_ctr "$1") || { AH_C=; }
-	_i=0
-	while [ ! -e "$BAR/ready" ] && kill -0 "$BG_PID" 2>/dev/null && [ "$_i" -lt 300 ]; do
-		sleep 1
-		_i=$((_i + 1))
-	done
-	if [ -e "$BAR/ready" ] && [ -n "$AH_C" ]; then
-		_wp=$(cx "$AH_C" /usr/bin/cat "/tmp/$4" 2>/dev/null) || { _wp=; unknown_obs || SETUP=1; }
-		case $_wp in '' | *[!0-9]*) _wp= ;; esac
-		_k=0
-		while [ -n "$_wp" ] && [ "$_k" -lt 20 ]; do
-			if _as=$(task_states "$AH_C" "$_wp"); then
-				AH_STATES=$(printf '%s' "$_as" | tr '\n' ' ')
-				[ -n "$AH_WAIT" ] || break
-				[ "$(printf '%s' "$AH_STATES" | tr -d ' ')" != "$AH_WAIT" ] || break
-			else
-				AH_STATES=
-				unknown_obs || SETUP=1
-			fi
-			sleep 1
-			_k=$((_k + 1))
-		done
-		cx "$AH_C" /usr/bin/touch /tmp/go >/dev/null 2>&1 || SETUP=1
-		true >"$BAR/go" || SETUP=1
-	fi
-	bg_end "$1"
-	AH_PUB=$(cat "$ISO/testdata/parser/series.jsonl" 2>/dev/null)
-}
-DETACH='printf early >/src/testdata/parser/series.jsonl
-setsid sh -c "echo \$\$ >/tmp/writer.pid; while [ ! -e /tmp/go ]; do /usr/bin/sleep 0.1; done; printf LATE >>/src/testdata/parser/series.jsonl; while :; do /usr/bin/sleep 1; done" >/dev/null 2>&1 &
-n=0; while [ ! -s /tmp/writer.pid ] && [ "$n" -lt 100 ]; do /usr/bin/sleep 0.1; n=$((n + 1)); done
-[ -s /tmp/writer.pid ] || exit 91'
-a_detached() { # holds when no writer task is live at the pre-export boundary and the published bytes are exactly the child's
-	a_export_hold det "$1" "$DETACH" writer.pid
-	OBS="status $RS, writer task states at the export seam '${AH_STATES:-seam not reached}', published '$AH_PUB'"
-	[ -n "$AH_STATES" ] && { [ "$(live_tasks "$AH_STATES")" -ge 1 ] || { [ "$RS" = 0 ] && [ "$AH_PUB" = early ]; }; } && reached
-	[ -n "$AH_STATES" ] && [ "$(live_tasks "$AH_STATES")" = 0 ] && [ "$RS" = 0 ] && [ "$AH_PUB" = early ]
-}
-gvariant fault-export-hold controller.go "$EXPORTHOLD_OLD" "$EXPORTHOLD_NEW"
-gvariant mut-no-quiesce controller.go "$EXPORTHOLD_OLD" "$EXPORTHOLD_NEW" 'func (c *ctl) quiesce() bool {' 'func (c *ctl) quiesce() bool {
-	return true'
-redgreen "quiescence-removed mutant (a live detached writer at the pre-export seam)" a_detached "$MUT/mut-no-quiesce.sh" "$MUT/fault-export-hold.sh"
-# A control on the real callback: one task-state query fails and the next succeeds with the intended premise; the assertion
-# then holds, yet the classifier must still refuse the case for the recorded unknown observation. This is a classifier
-# meta-control (META), the only plain credit that bypasses the gate, and it is credited only when every other part is clean.
-a_detached_failonce() { # a_detached_failonce RUNNER
-	true >"$TMP/ts.failonce" || { OBS="the one-shot failure could not be armed"; SETUP=1; return 1; }
-	a_detached "$1"
-}
-refuses_unknown() { # refuses_unknown NAME FN ARGS...
-	_ruN=$1
-	_ruF=$2
-	shift 2
-	rg_reset
-	_ruC=0
-	"$_ruF" "$@" || _ruC=$?
-	_ruK=0
-	rg_verdict green "$_ruC" || _ruK=1
-	META=1
-	if [ "$_ruK" = 1 ] && [ -s "$TMP/unknown" ] && [ "$REACHED" = 1 ] && [ "$SETUP" = 0 ] && [ "$_ruC" = 0 ]; then
-		pass "$_ruN"
-	else
-		fail "$_ruN" "assertion status $_ruC, reached $REACHED, setup $SETUP, unknown record $([ -s "$TMP/unknown" ] && echo set || echo clear), refused $_ruK: $OBS"
-	fi
-	META=0
-	rm -f "$TMP/ts.failonce"
-}
-refuses_unknown "a failed task-state query followed by a successful one is still an unknown observation: the detached-writer case on the held original is refused" a_detached_failonce "$MUT/fault-export-hold.sh"
-
-ZOMBIE='/usr/bin/sleep 30 &
-echo $! >/tmp/sleeper.pid
-printf zombie >/src/testdata/parser/series.jsonl'
-# The zombie premise is read while the runner is held after its kill and before its verifier, so the verdict of
-# the rejecting target cannot hide the premise: the held copy changes only the quiescence seam, the mutant is the
-# same copy with the verifier rejecting every UID-1000 entry.
-QUIESCE_OLD='v := c.do(&callSpec{kind: kOther, argv: c.sup(10, "/usr/bin/sh", "-c", verifyScript, "sh"), bound: supBound(10)})'
-QUIESCE_HOLD="$(gobar 120)
-		$QUIESCE_OLD"
-a_zombie() { # holds when the killed UID-1000 sleeper is a terminal zombie before the verifier and does not stop publication
-	AH_WAIT=Z
-	a_export_hold zom "$1" "$ZOMBIE" sleeper.pid
-	AH_WAIT=
-	OBS="status $RS, sleeper task states before the verifier '${AH_STATES:-seam not reached}', published '$AH_PUB', $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1)"
-	[ "$(printf '%s' "$AH_STATES" | tr -d ' ')" = Z ] && { { [ "$RS" = 0 ] && [ "$AH_PUB" = zombie ]; } || { [ "$RS" = 125 ] && grep -Fq 'dev-run: quiesce_failed' "$TMP/rerr"; }; } && reached
-	[ "$(printf '%s' "$AH_STATES" | tr -d ' ')" = Z ] && [ "$RS" = 0 ] && [ "$AH_PUB" = zombie ]
-}
-gvariant fault-quiesce-hold controller.go "$QUIESCE_OLD" "$QUIESCE_HOLD"
-gvariant mut-reject-every-uid1000 controller.go "$QUIESCE_OLD" "$QUIESCE_HOLD" '[ "$state" = Z ] || bad=1' 'bad=1'
-redgreen "verifier mutant rejecting every UID-1000 entry (a zombie sleeper)" a_zombie "$MUT/mut-reject-every-uid1000.sh" "$MUT/fault-quiesce-hold.sh"
-
-KILL_OLD='"-c", "kill -KILL -1"}'
-KILL_NEW='"-c", "true"}'
-NONDUMP='cat >/tmp/nd.c <<"CSRC"
-#include <fcntl.h>
-#include <stdio.h>
-#include <sys/prctl.h>
-#include <unistd.h>
-int main(void) {
-	char b[32];
-	int fd, n;
-	if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 || prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) != 0) return 2;
-	n = snprintf(b, sizeof b, "%d\n", (int)getpid());
-	fd = open("/tmp/ns.pid.tmp", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-	if (fd < 0 || write(fd, b, n) != n || close(fd) != 0 || rename("/tmp/ns.pid.tmp", "/tmp/ns.pid") != 0) return 3;
-	for (;;) sleep(1);
-}
-CSRC
-gcc -o /tmp/nd /tmp/nd.c || exit 92
-setsid /tmp/nd >/dev/null 2>&1 &
-n=0; while [ ! -s /tmp/ns.pid ] && [ "$n" -lt 100 ]; do /usr/bin/sleep 0.1; n=$((n + 1)); done
-[ -s /tmp/ns.pid ] || exit 93
-printf x >/src/testdata/parser/series.jsonl
-'"$CBAR"
-a_nondumpable() { # holds when a live UID-1000 process that set PR_SET_DUMPABLE 0 natively is caught as live, judged from its Uid line
-	rm -f "$ISO/testdata/parser/series.jsonl"
-	bg_run nd "$1" --write testdata/parser -- sh -c "$NONDUMP"
-	_c=$(bg_ctr nd) || { OBS="no container"; SETUP=1; return 1; }
-	if ! bg_wait "$_c" /tmp/ready; then OBS="child never ready (compile or readiness failure is setup)"; SETUP=1; kill -KILL "$BG_PID" 2>/dev/null; bg_end nd; return 1; fi
-	_np=$(cx "$_c" /usr/bin/cat /tmp/ns.pid 2>/dev/null) || _np=
-	case $_np in
-	'' | *[!0-9]*)
-		OBS="no usable pid recorded by the native process"
-		SETUP=1
-		bg_touch "$_c" /tmp/go
-		bg_end nd
-		return 1
-		;;
-	esac
-	# every premise is read from the exact task status file the verifier reads, while the child is held and
-	# before the runner is released into its rejecting target
-	_tf=/proc/$_np/task/$_np/status
-	_states=$(task_states "$_c" "$_np") || { _states=; unknown_obs || SETUP=1; }
-	_states=$(printf '%s' "$_states" | tr '\n' ' ')
-	_own=$(cx "$_c" /usr/bin/stat -c %u "$_tf" 2>/dev/null) || { _own=; unknown_obs || SETUP=1; }
-	_uid=$(cx "$_c" /usr/bin/sh -c 'while IFS= read -r l; do case $l in Uid:*) set -- $l; echo "$2 $3" ;; esac; done <"$0"' "$_tf" 2>/dev/null) || { _uid=; unknown_obs || SETUP=1; }
-	_rel=0
-	bg_touch "$_c" /tmp/go && _rel=1
-	bg_end nd
-	OBS="status $RS, task states '$_states', live Uid '$_uid', $_tf owner '$_own', $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1)"
-	# the intended authority condition is positively established before the verdict: a live UID-1000 task whose
-	# task status file is root-owned while its Uid line reads 1000 1000; anything else is setup, never target evidence
-	if [ "$_rel" != 1 ] || ! { [ "$_own" = 0 ] && [ "$_uid" = "1000 1000" ] && [ "$(live_tasks "$_states")" -ge 1 ]; }; then
-		OBS="$OBS; fixture premise (live UID 1000 task, non-dumpable, root-owned task status file with a 1000 1000 Uid line) not established"
-		SETUP=1
-		return 1
-	fi
-	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: quiesce_failed' "$TMP/rerr"; } || { [ "$RS" = 0 ] && [ -e "$ISO/testdata/parser/series.jsonl" ]; }; } && reached
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: quiesce_failed' "$TMP/rerr"
-}
-gvariant fault-kill-removed controller.go "$KILL_OLD" "$KILL_NEW"
-gvariant mut-dir-owner-verifier controller.go "$KILL_OLD" "$KILL_NEW" 'Uid:*) set -- $line; uids="$2 $3" ;;' 'Uid:*) uids="$(/usr/bin/stat -c %u "$t/status") 0" ;;'
-redgreen "proc-file-owner verifier (the owner of the exact task status file it reads, not its Uid line) misses the non-dumpable live process" a_nondumpable "$MUT/mut-dir-owner-verifier.sh" "$MUT/fault-kill-removed.sh"
-
-THREAD='cat >/tmp/th.c <<"CSRC"
-#include <pthread.h>
-#include <fcntl.h>
-#include <unistd.h>
-static void *w(void *a) { int fd = open("/src/testdata/parser/series.jsonl", O_WRONLY | O_APPEND); for (;;) { if (fd >= 0) (void)write(fd, "t", 1); usleep(1000); } return a; }
-int main(void) { pthread_t t; pthread_create(&t, 0, w, 0); pthread_exit(0); }
-CSRC
-gcc -pthread -o /tmp/th /tmp/th.c || exit 42
-printf lead >/src/testdata/parser/series.jsonl
-setsid /tmp/th >/dev/null 2>&1 &
-echo $! >/tmp/th.pid
-sleep 1
-'"$CBAR"
-a_thread_leader() { # holds when a live second thread under a zombie leader is observed and caught
-	rm -f "$ISO/testdata/parser/series.jsonl"
-	bg_run thr "$1" --write testdata/parser -- sh -c "$THREAD"
-	_c=$(bg_ctr thr) || { OBS="no container"; SETUP=1; return 1; }
-	if ! bg_wait "$_c" /tmp/ready; then OBS="child never ready (compile failure fails the case)"; SETUP=1; kill -KILL "$BG_PID" 2>/dev/null; bg_end thr; return 1; fi
-	_tp=$(cx "$_c" /usr/bin/cat /tmp/th.pid 2>/dev/null) || _tp=
-	case $_tp in
-	'' | *[!0-9]*)
-		OBS="no usable pid recorded by the native thread process"
-		SETUP=1
-		bg_touch "$_c" /tmp/go
-		bg_end thr
-		return 1
-		;;
-	esac
-	# the premise (a zombie leader with a live second thread, real and effective UID 1000) is read while the
-	# child is held, before the runner is released into its rejecting target
-	_k=0
-	_states=
-	_prem=0
-	while [ "$_k" -lt 20 ]; do
-		if _as=$(task_states "$_c" "$_tp"); then
-			_states=$(printf '%s' "$_as" | tr '\n' ' ')
-			if [ "$(printf '%s' "$_states" | tr ' ' '\n' | grep -c '^Z$')" -ge 1 ] && [ "$(live_tasks "$_states")" -ge 1 ]; then
-				_prem=1
-				break
-			fi
-		else
-			unknown_obs || SETUP=1
-		fi
-		sleep 1
-		_k=$((_k + 1))
-	done
-	_uid=$(cx "$_c" /usr/bin/sh -c 'while IFS= read -r l; do case $l in Uid:*) set -- $l; echo "$2 $3" ;; esac; done <"/proc/$0/status"' "$_tp" 2>/dev/null) || { _uid=; unknown_obs || SETUP=1; }
-	_rel=0
-	bg_touch "$_c" /tmp/go && _rel=1
-	bg_end thr
-	OBS="status $RS, thread task states '$_states', live Uid '$_uid', $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1)"
-	if [ "$_prem" != 1 ] || [ "$_rel" != 1 ] || [ "$_uid" != "1000 1000" ]; then
-		OBS="$OBS; premise (zombie leader with a live second thread, real and effective UID 1000) not established"
-		SETUP=1
-		return 1
-	fi
-	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: quiesce_failed' "$TMP/rerr"; } || [ "$RS" = 0 ] || grep -Fq 'dev-run: write_audit_failed' "$TMP/rerr"; } && reached
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: quiesce_failed' "$TMP/rerr"
-}
-gvariant mut-status-only-verifier controller.go "$KILL_OLD" "$KILL_NEW" 'for t in "$p"/task/[0-9]*; do' 'for t in "$p"; do'
-redgreen "verifier reading only /proc/<pid>/status accepts the zombie leader (a live second thread)" a_thread_leader "$MUT/mut-status-only-verifier.sh" "$MUT/fault-kill-removed.sh"
-
-a_verifier_fault() { # holds when a status that cannot be parsed or read rejects: quiesce_failed, no publication
-	rm -f "$ISO/testdata/parser/series.jsonl"
-	rrx "$ISO" "$1" --write testdata/parser -- sh -c 'printf x >/src/testdata/parser/series.jsonl'
-	OBS="status $RS, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1), published $([ -e "$ISO/testdata/parser/series.jsonl" ] && echo yes || echo no)"
-	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: quiesce_failed' "$TMP/rerr"; } || { [ "$RS" = 0 ] && [ -e "$ISO/testdata/parser/series.jsonl" ]; }; } && reached
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: quiesce_failed' "$TMP/rerr" && [ ! -e "$ISO/testdata/parser/series.jsonl" ]
-}
-gvariant fault-verifier-nostate controller.go 'State:*) set -- $line; state=$2 ;;' 'State:*) ;;'
-gvariant mut-verifier-accepts controller.go 'State:*) set -- $line; state=$2 ;;' 'State:*) ;;' 'if [ -z "$state" ] || [ -z "$uids" ]; then' 'if false; then'
-redgreen "verifier accepting a status with no State: line" a_verifier_fault "$MUT/mut-verifier-accepts.sh" "$MUT/fault-verifier-nostate.sh"
-gvariant fault-verifier-unreadable controller.go 'done <"$t/status"' 'done <"$t/status.unreadable"'
-gvariant mut-verifier-unreadable-as-gone controller.go 'done <"$t/status"' 'done <"$t/status.unreadable"' '[ -e "$t" ] && bad=1' ':'
-redgreen "verifier treating an unreadable task status as a vanished task" a_verifier_fault "$MUT/mut-verifier-unreadable-as-gone.sh" "$MUT/fault-verifier-unreadable.sh"
-rm -rf "$ISO/testdata"
-
-# inputs exec fault and owned rm fault
-a_inputs() { # holds when an inputs exec failure stops the run before the child
-	rrx "$ISO" "$1" -- sh -c 'touch /tmp/ran; printf ran'
-	OBS="status $RS, child output '$(cat "$TMP/rout")'"
-	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: inputs_unavailable' "$TMP/rerr"; } || [ "$(cat "$TMP/rout")" = ran ]; } && reached
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: inputs_unavailable' "$TMP/rerr" && [ -z "$(cat "$TMP/rout")" ]
-}
-INPUTS_OLD='argv: c.sup(10, "/usr/bin/cat", "/usr/local/share/boxset/inputs.sha256"),'
-INPUTS_NEW='argv: c.sup(10, "/usr/bin/sh", "-c", `printf "%064d  /src/x\n" 0; exit 1`),'
-gvariant fault-inputs controller.go "$INPUTS_OLD" "$INPUTS_NEW"
-gvariant mut-inputs-status controller.go "$INPUTS_OLD" "$INPUTS_NEW" 'if r.startErr != nil || r.status != 0 || !r.outOK || !ir.ok {' 'if r.startErr != nil || !r.outOK || !ir.ok {'
-redgreen "status-ignoring inputs mutant" a_inputs "$MUT/mut-inputs-status.sh" "$MUT/fault-inputs.sh"
-a_rm_fault() { # holds when a failed owned removal is cleanup_failed with the owned name
+# owned removal: a checked removal that fails ends the run cleanup_failed after the child ran; the mutant ignores that failure
+variant fault-rm 'timeout 60 docker rm -f "$CTR" >/dev/null 2>&1 || die cleanup_failed' 'false || die cleanup_failed'
+variant mut-cleanup-ignored 'timeout 60 docker rm -f "$CTR" >/dev/null 2>&1 || die cleanup_failed' 'false || :'
+a_rm_fault() { # holds when a failed checked removal ends the run cleanup_failed
 	rrx "$ISO" "$1" -- true
 	_cn=$(cname)
-	cstate "$_cn"
-	OBS="status $RS, container $_cn $CST"
+	OBS="status $RS, container $_cn, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1)"
 	[ -n "$_cn" ] || { SETUP=1; return 1; }
-	{ { [ "$RS" = 125 ] && grep -Fq "dev-run: cleanup_failed container=$_cn" "$TMP/rerr"; } || [ "$RS" = 0 ]; } && reached
-	_ok=1
-	[ "$RS" = 125 ] && grep -Fq "dev-run: cleanup_failed container=$_cn" "$TMP/rerr" || _ok=0
-	docker rm -f "$_cn" >/dev/null 2>&1
-	[ "$_ok" = 1 ]
+	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: cleanup_failed' "$TMP/rerr"; } || [ "$RS" = 0 ]; } && reached
+	[ "$RS" = 125 ] && grep -Fq 'dev-run: cleanup_failed' "$TMP/rerr"
 }
-gvariant fault-rm controller.go 'return []string{"timeout", "30", "docker", "rm", "-f", name}' 'return []string{"/bin/sh", "-c", "exit 1"}'
-gvariant mut-cleanup-ignored controller.go 'return []string{"timeout", "30", "docker", "rm", "-f", name}' 'return []string{"/bin/sh", "-c", "exit 1"}' 'c.bad("cleanup_failed container=" + n)' '_ = n'
 redgreen "ignored-cleanup mutant" a_rm_fault "$MUT/mut-cleanup-ignored.sh" "$MUT/fault-rm.sh"
 
 # ===== 6. redaction and least environment through the real runner (T02) ========================================
@@ -2915,7 +1897,7 @@ secret_run REDACTED -- sh -c 'printf "1REDACTED2"'
 expect "a marker-overlapping secret terminates with one marker" "$RS:$(cat "$TMP/rout")" "0:1[REDACTED]2"
 secret_run abc -- sh -c 'printf xabcy'
 expect "an unterminated output is redacted" "$(cat "$TMP/rout")" "x[REDACTED]y"
-# a plain control whose bytes are right but whose final runner status is not: the compiled copy fails every owned removal, so the run ends cleanup_failed (125) after the correct redacted output. Through
+# a plain control whose bytes are right but whose final runner status is not: a runner copy whose checked owned removal always fails, so the run ends cleanup_failed (125) after the correct redacted output. Through
 # the real plain classifier that run earns no credit, whatever order its assertions would have been made in.
 plain_late_failure_control() {
 	_plo=$(
@@ -2935,40 +1917,34 @@ plain_late_failure_control() {
 	META=0
 }
 plain_late_failure_control
-rr -- sh -c 'head -c 65536 /dev/zero | tr "\0" a'
-expect "exactly 64 KiB raw passes" "$RS:$(wc -c <"$TMP/rout" | tr -d ' ')" "0:65536"
-rr -w output_overflow -- sh -c 'head -c 65537 /dev/zero | tr "\0" a'
-expect "64 KiB + 1 raw fails" "$RS" 125
+rr -- sh -c 'head -c 262144 /dev/zero | tr "\0" a'
+expect "exactly 256 KiB raw passes" "$RS:$(wc -c <"$TMP/rout" | tr -d ' ')" "0:262144"
+rr -w output_overflow -- sh -c 'head -c 262145 /dev/zero | tr "\0" a'
+expect "256 KiB + 1 raw fails" "$RS" 125
 reason "output overflow reason word" output_overflow
 gone "$(cname)" "overflow: owned container removed at once"
-rr -w output_overflow -- sh -c 'head -c 65537 /dev/zero'
-expect "65537 NUL bytes fail as output_overflow (binary safe)" "$RS" 125
+rr -w output_overflow -- sh -c 'head -c 262145 /dev/zero'
+expect "262145 NUL bytes fail as output_overflow (binary safe)" "$RS" 125
 reason "NUL overflow reason" output_overflow
-rr -- sh -c 'head -c 65536 /dev/zero'
-expect "65536 NUL bytes pass and are all emitted" "$RS:$(wc -c <"$TMP/rout" | tr -d ' ')" "0:65536"
+rr -- sh -c 'head -c 262144 /dev/zero'
+expect "262144 NUL bytes pass and are all emitted" "$RS:$(wc -c <"$TMP/rout" | tr -d ' ')" "0:262144"
 secret_run -w output_overflow a -- sh -c 'i=0; while [ $i -lt 32768 ]; do printf "a-"; i=$((i + 1)); done'
-expect "a one-byte secret expanding past 64 KiB emitted is output_overflow" "$RS" 125
+expect "a one-byte secret expanding past 256 KiB emitted is output_overflow" "$RS" 125
 reason "expansion reason" output_overflow
 a_unbounded() { # holds when an unbounded producer is cut off as output_overflow, never reported as the host deadline
 	rrx "$ISO" "$1" --timeout 20 -- sh -c 'yes'
 	OBS="status $RS, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1)"
-	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: output_overflow' "$TMP/rerr"; } || { [ "$RS" = 124 ] && grep -Fq 'dev-run: timeout' "$TMP/rerr"; }; } && reached
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: output_overflow' "$TMP/rerr" && ! grep -Fq 'dev-run: timeout' "$TMP/rerr"
+	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: output_overflow' "$TMP/rerr"; } || [ "$RS" = 124 ]; } && reached
+	[ "$RS" = 125 ] && grep -Fq 'dev-run: output_overflow' "$TMP/rerr"
 }
 holds "unbounded output stops the proof as output_overflow, not as the host deadline" a_unbounded "$RUNNER"
 gone "$(cname)" "flooding child's container is gone"
-gvariant mut-pipe-held controller.go '			p.readers[w.idx].Close()
-			if st, _ := w.v.(int); s.removeOnOut' '			if st, _ := w.v.(int); s.removeOnOut' '			c.rmNote(s.removeOnOut, st == 0)
-			rm, rmCh, rmDue = nil, nil, nil' '			c.rmNote(s.removeOnOut, st == 0)
-			p.readers[0].Close()
-			rm, rmCh, rmDue = nil, nil, nil'
-redgreen "output-stage read end held through the owned removal mutant" a_unbounded "$MUT/mut-pipe-held.sh" "$RUNNER"
 rg_reset
 (cd "$ISO" && "$RUNNER" -- sh -c 'printf out; sleep 1; printf more') >/dev/full 2>"$TMP/rerr"
 RS=$?
-plain_seen output_write_failed
-expect "stdout to /dev/full is output_write_failed" "$RS" 125
-reason "write failure reason" output_write_failed
+plain_seen output_failed
+expect "stdout to /dev/full is output_failed" "$RS" 125
+reason "write failure reason" output_failed
 a_redaction() { # holds when the child's secret never reaches the output
 	(cd "$ISO" && BOXSET_TEST_SECRET=$S "$1" -- sh -c 'printf %s "$1"' x "$S") >"$TMP/rout" 2>"$TMP/rerr"
 	RS=$?
@@ -2977,17 +1953,20 @@ a_redaction() { # holds when the child's secret never reaches the output
 	[ "$RS" = 0 ] && [ -s "$TMP/rout" ] && reached
 	[ "$RS" = 0 ] && ! grep -Fq "$S" "$TMP/rout" "$TMP/rerr"
 }
-gvariant mut-redactor-bypass controller.go 'return redactStream(c.ac, streamOpts{capN: capOut, raw: -1, tail: -1}, in, c.out)' '_, _ = io.Copy(c.out, in)
-			return 0'
+# the host helper's -cap mode is the shell's only redaction of the child output: a compiled copy that passes the bytes through unredacted (the selection is still validated, -check and -tail unchanged) is RED
+gvariant mut-redactor-bypass main.go 'return redactStream(newAutomaton(values), streamOpts{capN: *capN, raw: *raw, tail: *tail}, stdin, stdout)' 'if *capN >= 0 {
+		_, _ = io.Copy(stdout, io.LimitReader(stdin, *capN))
+		return exitOK
+	}
+	return redactStream(newAutomaton(values), streamOpts{capN: *capN, raw: *raw, tail: *tail}, stdin, stdout)'
 redgreen "redactor-bypass mutant" a_redaction "$MUT/mut-redactor-bypass.sh" "$RUNNER"
-a_length_filter() { # holds when raw overflow is enforced inside the redactor, not by a length filter
-	rrx "$ISO" "$1" -- sh -c 'head -c 65537 /dev/zero | tr "\0" a'
-	OBS="status $RS"
-	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: output_overflow' "$TMP/rerr"; } || { [ "$(wc -c <"$TMP/rout" | tr -d ' ')" = 65536 ] && ! grep -Fq 'dev-run: output_overflow' "$TMP/rerr"; }; } && reached
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: output_overflow' "$TMP/rerr"
-}
-gvariant mut-length-filter controller.go 'return redactStream(c.ac, streamOpts{capN: capOut, raw: -1, tail: -1}, in, c.out)' 'return redactStream(c.ac, streamOpts{capN: 1000000000, raw: -1, tail: -1}, io.LimitReader(in, capOut), c.out)'
-redgreen "length-filter mutant" a_length_filter "$MUT/mut-length-filter.sh" "$RUNNER"
+# a draft is redacted like the output: an expanding value keeps the published draft, and a URL credential is masked in it
+secret_run -s 1 ADM-003 --write docs/spikes/issue-drafts -- sh -c "$MKD && printf 'blocked ADM-003 end' >/src/docs/spikes/issue-drafts/s5-admission.md; exit 1"
+expect "an expanding redaction keeps the published draft" "$RS:$(cat "$DRAFTDIR/s5-admission.md" 2>/dev/null)" "1:blocked [REDACTED] end"
+rm -rf "$DRAFTDIR"
+secret_run -s 1 unused --write docs/spikes/issue-drafts -- sh -c "$MKD && printf 'see https://aaaaaaaaa:bbbbbbbb@h/p?k=cccccccccccccccccccc end' >/src/docs/spikes/issue-drafts/s5-admission.md; exit 1"
+expect "a shrinking redaction keeps the published draft" "$RS:$(cat "$DRAFTDIR/s5-admission.md" 2>/dev/null)" "1:see https://[REDACTED]@h/p?k=[REDACTED] end"
+rm -rf "$DRAFTDIR"
 secret_run "$S" -- env
 envs=$(cat "$TMP/rout")
 # the environment listing is the target: a failed run with empty output must not credit the absence or exactness assertions
@@ -3027,23 +2006,14 @@ printf '\nRUN head -c 100000 /dev/zero | tr "\\0" x >&2; printf "\\nhttps://user
 rg_reset
 (cd "$FISO" && BOXSET_TEST_SECRET=zz-build-secret "$FISO/scripts/dev-run.sh" -- true) >"$TMP/rout" 2>"$TMP/xerr"
 RS=$?
-# image_build_failed is this fault copy's intended outcome: only that exact line is exempt from infrastructure attribution (an earlier redactor,
+# build_failed is this fault copy's intended outcome: only that exact line is exempt from infrastructure attribution (an earlier redactor,
 # host or setup failure stays contamination), and the injected failing step must have run: its credential-bearing output line is in the tail, masked
-if intended_refusal image_build_failed "$TMP/xerr" && grep -Fq 'https://[REDACTED]@h.example/x?token=[REDACTED]' "$TMP/xerr"; then reached; fi
-expect "a failing image build is image_build_failed" "$RS" 125
-if grep -Fq 'dev-run: image_build_failed' "$TMP/xerr"; then pass "build failure reason"; else fail "build failure reason" "stderr lacks 'dev-run: image_build_failed': $(head -c 400 "$TMP/xerr")"; fi
+if intended_refusal build_failed "$TMP/xerr" && grep -Fq 'https://[REDACTED]@h.example/x?token=[REDACTED]' "$TMP/xerr"; then reached; fi
+expect "a failing image build is build_failed" "$RS" 125
+if grep -Fq 'dev-run: build_failed' "$TMP/xerr"; then pass "build failure reason"; else fail "build failure reason" "stderr lacks 'dev-run: build_failed': $(head -c 400 "$TMP/xerr")"; fi
 if grep -Fq 'user:pw' "$TMP/xerr"; then fail "build log credential" "URL userinfo leaked"; else pass "build diagnostics carry no URL credential"; fi
 if grep -Eq '^\[dev-run: [0-9]+ earlier bytes omitted\]$' "$TMP/xerr" && [ "$(wc -c <"$TMP/xerr")" -le 70000 ]; then pass "build diagnostics are a bounded tail with the omitted-count line"; else fail "build tail" "size $(wc -c <"$TMP/xerr")"; fi
 rm -rf "$FISO"
-a_start_diag() { # holds when start diagnostics appear only as a redacted tail
-	rrx "$ISO" "$1" -- true
-	OBS="status $RS, $(grep -c 'u:p@' "$TMP/rerr") leaked userinfo lines"
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: container_start_failed' "$TMP/rerr" && reached
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: container_start_failed' "$TMP/rerr" && ! grep -Fq 'u:p@' "$TMP/rerr" && grep -Fq '[REDACTED]' "$TMP/rerr"
-}
-gvariant fault-start controller.go '"--tmpfs", scratchTmpfs}' '"--tmpfs", scratchTmpfs, "--memory", "https://u:p@h.example/x"}'
-gvariant mut-start-bypass controller.go '"--tmpfs", scratchTmpfs}' '"--tmpfs", scratchTmpfs, "--memory", "https://u:p@h.example/x"}' 'stderr: c.tailFn(4096),' 'stderr: func(r io.Reader) any { var b bytes.Buffer; _, _ = io.Copy(&b, r); return tailRes{b.Bytes(), 0} },'
-redgreen "start-failure diagnostics redacted (bypass mutant)" a_start_diag "$MUT/mut-start-bypass.sh" "$MUT/fault-start.sh"
 
 # ===== 8. destination and flag refusals =========================================================================
 mkdir -p "$ISO/.devrites/work/boxset-test"
@@ -3068,8 +2038,8 @@ rr -w capture_flag_invalid --capture ".devrites/work/boxset-test/screenshots-202
 if [ "$RS" = 125 ] && grep -Fq 'dev-run: capture_flag_invalid' "$TMP/rerr"; then pass "--capture with --bench refused"; else fail "capture+bench" "status $RS"; fi
 rr -w capture_flag_invalid --capture ".devrites/work/boxset-test/screenshots-20260101T000003Z" --capture ".devrites/work/boxset-test/screenshots-20260101T000004Z" -- true
 if [ "$RS" = 125 ] && grep -Fq 'dev-run: capture_flag_invalid' "$TMP/rerr"; then pass "duplicate --capture refused"; else fail "duplicate capture" "status $RS"; fi
-rr -w bench_unavailable --bench 0-3 -- true
-if [ "$RS" = 125 ] && grep -Fq 'dev-run: bench_unavailable' "$TMP/rerr"; then pass "--bench is refused until its owner slice lands"; else fail "bench" "status $RS"; fi
+rr -w bench_invalid --bench 0-3 -- true
+if [ "$RS" = 125 ] && grep -Fq 'dev-run: bench_invalid side=write' "$TMP/rerr"; then pass "--bench without --write is refused before Docker"; else fail "bench" "status $RS"; fi
 mkdir -p "$TMP/shim"
 for t in sh docker id mkdir rmdir ln rm mv head tail wc cat sha256sum timeout date grep find tr od dirname; do
 	p=$(command -v "$t") && ln -sf "$p" "$TMP/shim/$t"
@@ -3078,8 +2048,8 @@ rg_reset
 (cd "$ISO" && PATH=$TMP/shim "$RUNNER" --capture ".devrites/work/boxset-test/screenshots-20260101T000005Z" -- true) >"$TMP/rout" 2>"$TMP/xerr"
 RS=$?
 # the host-tool refusal is the intended outcome of these shim runs, judged on their own stderr
-intended_refusal capture_host_tool_missing "$TMP/xerr" && reached
-if [ "$RS" = 125 ] && grep -Fq 'dev-run: capture_host_tool_missing' "$TMP/xerr"; then pass "missing host tool refused before Docker (capture)"; else fail "host tool" "status $RS"; fi
+intended_refusal host_tool_missing "$TMP/xerr" && reached
+if [ "$RS" = 125 ] && grep -Fq 'dev-run: host_tool_missing' "$TMP/xerr"; then pass "missing host tool refused before Docker (capture)"; else fail "host tool" "status $RS"; fi
 rg_reset
 (cd "$ISO" && PATH=$TMP/shim "$RUNNER" -- true) >"$TMP/rout" 2>"$TMP/xerr"
 RS=$?
@@ -3192,30 +2162,6 @@ if [ "$CAPOK" = 1 ]; then
 	replay_b64=$(base64 -w0 "$TMP/replay-A.png")
 fi
 
-# write-path spike: redirection, direct --screenshot and Bun each write in place on the precreated
-# inode. Every producer's status is observed, the previous bytes are cleared before each producer so a
-# leftover cannot pass for its output, and the child prints a completion signal; the run is then
-# refused for exactly the final invalid-PNG reason, not for any unrelated 125.
-SPIKE='n=/capture/dev-desktop.png
-i0=$(stat -c %i $n)
-printf redirect >$n || exit 51
-[ "$(stat -c %i $n)" = "$i0" ] || exit 52
-shoot_to() { "$B" --headless --no-sandbox --hide-scrollbars --force-device-scale-factor=1 --window-size=1440,900 --screenshot=$n "file:///tmp/dev-desktop.html" >/dev/null 2>&1; }
-printf "<p>x</p>" >/tmp/dev-desktop.html
-printf "" >$n || exit 57
-[ ! -s $n ] || exit 58
-shoot_to || exit 53
-[ -s $n ] || exit 59
-[ "$(stat -c %i $n)" = "$i0" ] || exit 54
-[ "$(od -An -tx1 -N8 $n | tr -d " \n")" = 89504e470d0a1a0a ] || exit 60
-printf "" >$n || exit 61
-[ ! -s $n ] || exit 62
-bun -e "require(\"fs\").writeFileSync(\"/capture/dev-desktop.png\", \"bun\")" || exit 55
-[ "$(stat -c %i $n)" = "$i0" ] && [ "$(cat $n)" = bun ] || exit 56
-echo SPIKE-DONE'
-capture_run -w capture_not_png "$SPIKE"
-if [ "$RS" = 125 ] && grep -Fq SPIKE-DONE "$TMP/rout" && grep -Fq 'dev-run: capture_not_png' "$TMP/rerr"; then pass "write-path spike: redirect, browser (PNG signature) and Bun each wrote in place, run refused only for the final invalid PNG (capture_not_png)"; else fail "write-path spike" "status $RS $(head -c 200 "$TMP/rout") $(head -c 200 "$TMP/rerr")"; fi
-
 # --- capture controls through the same runner (T31) -------------------------------------------------
 capture_run -w capture_missing 'shoot_all; : >/capture/preview-mobile.png'
 expect "an empty (truncated) preview-mobile is capture_missing" "$RS" 125
@@ -3278,417 +2224,18 @@ assert_no_publication "fake PASS"
 capture_run -s 7 'shoot_all; exit 7'
 expect "nonzero child exit propagates over valid files" "$RS" 7
 assert_no_publication "nonzero child"
-capture_run -w timeout -s 124 'shoot_all; sleep 100' --timeout 3
+capture_run -s 124 'shoot_all; sleep 100' --timeout 3
 expect "hung child times out" "$RS" 124
+noreason "hung child's deadline prints no reason word" timeout
 assert_no_publication "hung child"
 gone "$(cname)" "hung child's container is gone"
 rr -s 3 --capture "$(capdir)" -- sh -c 'B=/nonexistent; if [ ! -x "$B" ]; then echo T31-PROVIDER-UNAVAILABLE; exit 3; fi'
 if [ "$RS" = 3 ] && grep -Fq T31-PROVIDER-UNAVAILABLE "$TMP/rout"; then pass "unavailable provider is exit 3, distinct from an assertion failure"; else fail "provider unavailable" "status $RS"; fi
 capture_run -s 1 'shoot_all; false'
 expect "a failed in-place copy or assertion is exit 1, not 3" "$RS" 1
-# a child whose Wait outcome is unknown: the compiled copy reports status -1 for the child exec. The status-7 control of this section run through it: its intended status assertion fails and the dependent
-# no-publication credit is refused through the same classifier (a different nonzero status or a signal is never substituted for the unknown one).
-gvariant fault-child-status-unknown controller.go 'return r.status, rs, tmo, true' 'return -1, rs, tmo, true'
-status_unknown_control() {
-	_suo=$(
-		META=0
-		RUNNER=$MUT/fault-child-status-unknown.sh
-		capture_run -s 7 'exit 7'
-		printf 'PREMISE %s %s\n' "$RS" "$(grep -c 'dev-run: child_status_unknown' "$TMP/rerr")"
-		expect "T31 status-7 child through the unknown-status copy" "$RS" 7
-		assert_no_publication "unknown child status"
-	)
-	META=1
-	expect "unknown child status: the compiled copy reports 125 child_status_unknown once, where the child exited 7" "$(printf '%s\n' "$_suo" | grep -Fxc 'PREMISE 125 1')" 1
-	expect "unknown child status: the intended status assertion fails" "$(printf '%s\n' "$_suo" | grep -c '^not ok - T31 status-7 child through the unknown-status copy')" 1
-	expect "unknown child status: the dependent no-publication credit is refused" "$(printf '%s\n' "$_suo" | grep -c '^ok - unknown child status')" 0
-	META=0
-}
-status_unknown_control
 
-# map denials, ENOSPC bound and storage (SizeRw) with a held browserless child
-CAPDEN_A='before=$(stat -c %i /capture/dev-desktop.png /capture/dev-mobile.png /capture/preview-desktop.png /capture/preview-mobile.png)
-if rm /capture/dev-desktop.png 2>/dev/null; then exit 61; fi
-if mv /capture/dev-desktop.png /capture/t 2>/dev/null; then exit 62; fi
-if ln -s /src/capture.bin /capture/x 2>/dev/null; then exit 63; fi
-if ln /capture/dev-desktop.png /tmp/h 2>/dev/null; then exit 64; fi
-if mkdir /capture/d 2>/dev/null; then exit 65; fi
-if mkfifo /capture/f 2>/dev/null; then exit 66; fi
-if touch /capture/probe 2>/dev/null; then exit 67; fi
-if chmod 0600 /capture/dev-desktop.png 2>/dev/null; then exit 68; fi
-[ "$(stat -c %i /capture/dev-desktop.png /capture/dev-mobile.png /capture/preview-desktop.png /capture/preview-mobile.png)" = "$before" ] || exit 69
-if head -c 9437184 /dev/zero >/capture/dev-desktop.png 2>/dev/null; then exit 70; fi
-[ "$(stat -c %s /capture/dev-desktop.png)" -le 8454144 ] || exit 71
-[ ! -e /src/capture.bin ] || exit 72'
-CAPDEN="$CAPDEN_A
-$CBAR
-exit 0"
-a_capture_bound() { # holds when /capture denials hold and SizeRw stays below 1 MiB with the container up
-	CAP=$(capdir)
-	bg_run capd "$1" --capture "$CAP" -- sh -c "$CAPDEN"
-	_c=$(bg_ctr capd) || { OBS="no container"; SETUP=1; return 1; }
-	if ! bg_wait "$_c" /tmp/ready; then OBS="not ready (child denial failed)"; SETUP=1; kill -KILL "$BG_PID" 2>/dev/null; bg_end capd; return 1; fi
-	_sz=$(timeout 30 docker inspect -s -f '{{.SizeRw}}' "$_c" 2>/dev/null) || _sz=
-	bg_touch "$_c" /tmp/go || SETUP=1
-	bg_end capd
-	OBS="SizeRw ${_sz:-unknown}, child status $RS"
-	case $_sz in '' | *[!0-9]*) SETUP=1; return 1 ;; esac
-	reached
-	[ "$_sz" -lt 1048576 ] && [ ! -e "$ISO/capture.bin" ]
-}
-holds "child rm/mv/ln -s/ln/mkdir/mkfifo/touch/chmod in /capture fail, 9 MiB write hits ENOSPC at the cap, SizeRw below 1 MiB" a_capture_bound "$RUNNER"
-gvariant mut-capture-unprotected controller.go 'size=8454144,nr_inodes=8,mode=0755,uid=65534,gid=65534"' 'size=8454144,nr_inodes=8,mode=0700,uid=1000,gid=1000"' '!c.precreate("/capture", pngNames())' 'false' '!c.capturePreflight()' 'false'
-a_capture_symlink_bound() { # holds when a symlink through /capture cannot grow the container layer
-	CAP=$(capdir)
-	bg_run capu "$1" --capture "$CAP" -- sh -c "ln -s /src/capture.bin /capture/dev-desktop.png 2>/dev/null; head -c 9437184 /dev/zero >/capture/dev-desktop.png 2>/dev/null; touch /tmp/ready; n=0; while [ ! -e /tmp/go ] && [ \$n -lt 600 ]; do sleep 1; n=\$((n + 1)); done"
-	_c=$(bg_ctr capu) || { OBS="no container"; SETUP=1; return 1; }
-	if ! bg_wait "$_c" /tmp/ready; then OBS="not ready"; SETUP=1; kill -KILL "$BG_PID" 2>/dev/null; bg_end capu; return 1; fi
-	_sz=$(timeout 30 docker inspect -s -f '{{.SizeRw}}' "$_c" 2>/dev/null) || _sz=
-	bg_touch "$_c" /tmp/go || SETUP=1
-	bg_end capu
-	OBS="SizeRw ${_sz:-unknown}"
-	case $_sz in '' | *[!0-9]*) SETUP=1; return 1 ;; esac
-	reached
-	[ "$_sz" -lt 1048576 ]
-}
-redgreen "unprotected-capture-map mutant (child-owned dir, symlink into /src)" a_capture_symlink_bound "$MUT/mut-capture-unprotected.sh" "$RUNNER"
-
-# capability preflight mutants (fault copies are refused by the unchanged preflight)
-a_refuse() { # a_refuse WORD RUNNER: the runner refuses before the child produces output
-	rrx "$ISO" "$2" --capture "$(capdir)" -- sh -c 'printf ran'
-	OBS="status $RS, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1)"
-	{ { [ "$RS" = 125 ] && grep -Fq "dev-run: $1" "$TMP/rerr"; } || [ "$(cat "$TMP/rout")" = ran ]; } && reached
-	[ "$RS" = 125 ] && grep -Fq "dev-run: $1" "$TMP/rerr" && [ -z "$(cat "$TMP/rout")" ]
-}
-a_refuse_untrusted() { a_refuse supervisor_untrusted "$1"; }
-a_refuse_capmissing() { a_refuse capture_capability_missing "$1"; }
-PID1USER_OLD='"--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", supUser,'
-gvariant fault-pid1-same-uid controller.go "$PID1USER_OLD" '"--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", childUser,'
-gvariant mut-pid1-same-uid controller.go "$PID1USER_OLD" '"--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", childUser,' '!procOK(t, "65534")' 'false'
-redgreen "PID1-same-UID mutant" a_refuse_untrusted "$MUT/mut-pid1-same-uid.sh" "$MUT/fault-pid1-same-uid.sh"
-# the nonzero CapBnd premise is the controller's own read of the unprivileged child's status in the compiled copy (receipt), never assumed from the removed --cap-drop; the mutant removes only the capability predicate
-CAPRCPT=$TMP/capbnd.receipt
-CAPRCPT_OLD='t, ok := c.childStatus()'
-CAPRCPT_NEW='t, ok := c.childStatus()
-	{ f, _ := os.OpenFile("'$CAPRCPT'", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644); cb, _ := statusField(t, "CapBnd"); fmt.Fprintf(f, "capbnd %s\n", strings.Join(cb, " ")); f.Close() }'
-gvariant fault-no-capdrop controller.go "$PID1USER_OLD" '"--security-opt", "no-new-privileges", "--user", supUser,' "$CAPRCPT_OLD" "$CAPRCPT_NEW"
-gvariant mut-no-capdrop controller.go "$PID1USER_OLD" '"--security-opt", "no-new-privileges", "--user", supUser,' "$CAPRCPT_OLD" "$CAPRCPT_NEW" 'len(f) != 1 || f[0] != "0000000000000000"' 'len(f) != 1'
-a_capdrop() { # a_capdrop RUNNER: a container started without --cap-drop ALL gives its unprivileged child a nonzero bounding set (observed at the controller's own identity read) and the preflight refuses before the child
-	: >"$CAPRCPT" || { OBS="the CapBnd receipt could not be created"; SETUP=1; return 1; }
-	rrx "$ISO" "$1" --capture "$(capdir)" -- sh -c 'printf ran'
-	_cb=$(head -n 1 "$CAPRCPT")
-	OBS="status $RS, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1), CapBnd receipt '$_cb'"
-	case $_cb in
-	"capbnd 0000000000000000" | "capbnd " | "")
-		OBS="$OBS; the nonzero CapBnd premise was not observed"
-		SETUP=1
-		return 1
-		;;
-	"capbnd "[0-9a-f]*) ;;
-	*)
-		SETUP=1
-		return 1
-		;;
-	esac
-	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: supervisor_untrusted' "$TMP/rerr"; } || [ "$(cat "$TMP/rout")" = ran ]; } && reached
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: supervisor_untrusted' "$TMP/rerr" && [ -z "$(cat "$TMP/rout")" ]
-}
-redgreen "missing-cap-drop (CapBnd nonzero) mutant" a_capdrop "$MUT/mut-no-capdrop.sh" "$MUT/fault-no-capdrop.sh"
-gvariant fault-no-tmpfs-options controller.go 'size=8454144,nr_inodes=8,mode=0755,uid=65534,gid=65534"' 'size=8454144,mode=0755,uid=65534,gid=65534"'
-gvariant mut-no-tmpfs-options controller.go 'size=8454144,nr_inodes=8,mode=0755,uid=65534,gid=65534"' 'size=8454144,mode=0755,uid=65534,gid=65534"' '!c.capturePreflight()' 'false'
-redgreen "missing-tmpfs-options mutant" a_refuse_capmissing "$MUT/mut-no-tmpfs-options.sh" "$MUT/fault-no-tmpfs-options.sh"
-gvariant fault-regular-layer controller.go '"/capture:rw,nosuid,nodev,noexec,size=8454144' '"/capturex:rw,nosuid,nodev,noexec,size=8454144'
-gvariant mut-regular-layer controller.go '"/capture:rw,nosuid,nodev,noexec,size=8454144' '"/capturex:rw,nosuid,nodev,noexec,size=8454144' '!c.precreate("/capture", pngNames())' 'false' '!c.capturePreflight()' 'false'
-redgreen "regular-layer /capture mutant" a_refuse_capmissing "$MUT/mut-regular-layer.sh" "$MUT/fault-regular-layer.sh"
-
-# authority: PID 1, forged control files and markers, detached writers, kill -KILL -1. Expected-denied
-# writes use the non-special command `true`, so a refused redirection fails that command only and the
-# fixture always reaches its barrier (an exit 8x means a denial did not hold).
-AUTH_A='shoot_all
-if kill -0 1 2>/dev/null; then exit 81; fi
-if kill -STOP 1 2>/dev/null; then exit 82; fi
-if kill -KILL 1 2>/dev/null; then exit 83; fi
-if mkdir /run/boxset-capture 2>/dev/null; then exit 84; fi
-if true 2>/dev/null >/run/boxset-capture-exited; then exit 85; fi
-if true 2>/dev/null >/run/boxset-capture-release; then exit 86; fi
-echo "DEV-RUN-CAPTURE-PASS files=4 bytes=1 dir=forged challenge=0000000000000000"
-setsid sleep 300 >/dev/null 2>&1 &
-echo $! >/tmp/sleeper.pid'
-AUTH="$AUTH_A
-$CBAR
-exit 9"
-CAP=$(capdir)
-rg_reset
-bg_run auth "$RUNNER" --capture "$CAP" -- sh -c "$BASE$AUTH"
-c=$(bg_ctr auth)
-if bg_wait "$c" /tmp/ready; then
-	reached
-	pid1=$(timeout 30 docker inspect -f '{{.State.Pid}} {{.State.Status}}' "$c" 2>/dev/null)
-	[ -n "$pid1" ] || unknown_obs
-	expect "held child after forging: PID 1 running (host inspect), runner waiting, DIR empty" "$(kill -0 "$BG_PID" 2>/dev/null && echo alive):$(find "$ISO/$CAP" -mindepth 1 | wc -l | tr -d ' '):${pid1#* }" "alive:0:running"
-	# the child reached the barrier only after every denial held and the forged PASS and sleeper were produced
-	expect "authority fixture reached its barrier: forged PASS printed, detached sleeper recorded alive" "$(cx "$c" /usr/bin/sh -c 'kill -0 "$(cat /tmp/sleeper.pid)" && echo alive' 2>/dev/null)" alive
-	# interference attempted by the test as the child user, then PID 1 is inspected again
-	_kz=$(cx "$c" /usr/bin/sh -c 'kill -0 1 2>/dev/null; a=$?; kill -STOP 1 2>/dev/null; b=$?; kill -KILL 1 2>/dev/null; d=$?; echo "$a$b$d"' 2>/dev/null)
-	expect "child kill -0, -STOP and -KILL on PID 1 all fail (EPERM by design)" "$([ -n "$_kz" ] && case $_kz in *0*) echo some-succeeded ;; *) echo all-failed ;; esac)" all-failed
-	pid1b=$(timeout 30 docker inspect -f '{{.State.Pid}} {{.State.Status}}' "$c" 2>/dev/null)
-	[ -n "$pid1b" ] || unknown_obs
-	_st1=$(timeout 30 docker exec -u 65534:65534 "$c" /usr/bin/cat /proc/1/status 2>/dev/null | grep '^State:')
-	expect "PID 1 re-inspected after the attempted interference: same host pid, running, not stopped" "${pid1b}:$(printf '%s' "$_st1" | grep -Ec '^State:[[:space:]]+[SR] ')" "${pid1}:1"
-	bg_touch "$c" /tmp/go || SETUP=1
-	bg_end auth
-	expect "release into exit 9 propagates 9" "$RS" 9
-	assert_no_publication "forged markers with nonzero child"
-	if [ "$(grep -c '^DEV-RUN-CAPTURE-PASS' "$TMP/rout")" = 1 ] && ! grep -Eq "^DEV-RUN-CAPTURE-PASS files=4 bytes=[0-9]+ dir=$CAP challenge=" "$TMP/rout"; then pass "forged PASS line is the child's own and is not the runner's"; else fail "forged PASS" "$(cat "$TMP/rout")"; fi
-else
-	fail "authority barrier" "child never reached the barrier"
-	kill -KILL "$BG_PID" 2>/dev/null
-fi
-capture_run -s 137 'shoot_all; kill -KILL -1'
-expect "isolated kill -KILL -1 gives exit 137" "$RS" 137
-assert_no_publication "kill -KILL -1"
-gone "$(cname)" "kill -KILL -1: container removed"
-
-# transfer faults: exporter, validator, limiter and manifest statuses are all checked. Each injected seam writes its own
-# receipt line (XRCPT) when it runs: the exporter and limiter seams carry the real status of their own prerequisite, the
-# validator seam the validator container's real exit, and the manifest seams can only run after all four files were
-# exported, limited and validated. A generic capture_copy_failed after an earlier, unrelated refusal leaves that receipt
-# absent or different and is setup, never evidence for the intended seam.
-XRCPT=$TMP/xfer.receipt
-a_transfer_fault() { # a_transfer_fault RUNNER (TF global exporter|limiter|validator|manifest-content|manifest-status): holds when the injected seam failure is capture_copy_failed with no publication
-	CAP=$(capdir)
-	true >"$XRCPT" || { OBS="the seam receipt could not be created"; SETUP=1; return 1; }
-	rrx "$ISO" "$1" --capture "$CAP" -- sh -c "${BASE}shoot_all"
-	_xr=$(head -n 1 "$XRCPT" 2>/dev/null)
-	OBS="status $RS, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1), DIR $([ -e "$ISO/$CAP" ] && echo present || echo absent), first seam receipt '$_xr'"
-	case $TF in
-	exporter) _xw='exporter dev-desktop 0' ;;
-	limiter) _xw='limiter 0' ;;
-	validator) _xw='validator 9' ;;
-	manifest-content) _xw='manifest-content' ;;
-	manifest-status) _xw='manifest-status' ;;
-	*) _xw='unknown seam' ;;
-	esac
-	[ "$_xr" = "$_xw" ] || { OBS="$OBS; the injected $TF seam did not run with its prerequisite established (want '$_xw')"; SETUP=1; return 1; }
-	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: capture_copy_failed' "$TMP/rerr"; } || { [ "$RS" = 0 ] && grep -Fq 'DEV-RUN-CAPTURE-PASS' "$TMP/rout"; }; } && reached
-	_rid=$(runid)
-	cstate "boxset-dev-$_rid-v-dev-desktop"
-	_v=$CST
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: capture_copy_failed' "$TMP/rerr" && [ ! -e "$ISO/$CAP" ] && [ "$_v" = absent ]
-}
-# grcpt FORMAT ARGS: a Go statement appending one receipt line of the injected seam to XRCPT (FORMAT and ARGS as the fmt.Fprintf operands)
-grcpt() { printf '%s' '{ f, _ := os.OpenFile("'$XRCPT'", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644); fmt.Fprintf(f, '"$1"'); f.Close() }'; }
-EXP_OLD='if xr.startErr != nil {'
-EXP_NEW="$(grcpt '"exporter %s %d\n", name, xr.status')
-		xr.status = 7
-		if xr.startErr != nil {"
-EXP_CHK='if cr.n != capPNG+1 && xr.status != 0 {
-			return "capture_copy_failed"
-		}'
-gvariant fault-exporter controller.go "$EXP_OLD" "$EXP_NEW"
-gvariant mut-exporter-status-ignored controller.go "$EXP_OLD" "$EXP_NEW" "$EXP_CHK" '_ = xr.status'
-TF=exporter
-redgreen "exporter fault (valid bytes then exit 7), status-ignoring mutant" a_transfer_fault "$MUT/mut-exporter-status-ignored.sh" "$MUT/fault-exporter.sh"
-VAL_OLD='"/usr/local/libexec/boxset/capture-check", "-name", name, "-challenge", c.challenge}'
-VAL_NEW='"/usr/bin/sh", "-c", "cat; exit 9"}'
-VAL_RCPT_OLD='_ = c.croot.Remove(raw)'
-VAL_RCPT_NEW="_ = c.croot.Remove(raw)
-		$(grcpt '"validator %d\n", vr.status')"
-gvariant fault-validator controller.go "$VAL_OLD" "$VAL_NEW" "$VAL_RCPT_OLD" "$VAL_RCPT_NEW"
-gvariant mut-validator-status-ignored controller.go "$VAL_OLD" "$VAL_NEW" "$VAL_RCPT_OLD" "$VAL_RCPT_NEW" 'return "capture_copy_failed" // any other validator status' '_ = vr.status'
-TF=validator
-redgreen "validator fault (valid bytes then nonzero), status-ignoring mutant" a_transfer_fault "$MUT/mut-validator-status-ignored.sh" "$MUT/fault-validator.sh"
-LIM_OLD='limOK := xr.outOK && cr.err == nil'
-LIM_NEW="$(grcpt '"limiter %d\n", xr.status')
-		cr.err = errors.New(\"injected limiter failure\")
-		limOK := xr.outOK && cr.err == nil"
-gvariant fault-limiter controller.go "$LIM_OLD" "$LIM_NEW"
-gvariant mut-limiter-ignored controller.go "$LIM_OLD" "$LIM_NEW" "$LIM_OLD" 'limOK := true'
-TF=limiter
-redgreen "limiter failure, status-ignoring mutant" a_transfer_fault "$MUT/mut-limiter-ignored.sh" "$MUT/fault-limiter.sh"
-WM_OLD='if _, err := io.WriteString(f, content); err != nil {'
-WM_NEW="$(grcpt '"manifest-content\n"')
-	if _, err := io.WriteString(f, \"x\"); err != nil {"
-gvariant fault-manifest-write controller.go "$WM_OLD" "$WM_NEW"
-gvariant mut-manifest-unchecked controller.go "$WM_OLD" "$WM_NEW" 'if err != nil || len(data) != len(manifest) || sha256.Sum256(data) != sha256.Sum256([]byte(manifest)) {' 'if err != nil || len(data) < 0 {'
-TF=manifest-content
-redgreen "manifest content fault (length/hash), unchecked mutant" a_transfer_fault "$MUT/mut-manifest-unchecked.sh" "$MUT/fault-manifest-write.sh"
-WMS_OLD='return f.Close()'
-WMS_NEW="$(grcpt '"manifest-status\n"')
-	f.Close()
-	return errors.New(\"injected manifest status\")"
-gvariant fault-manifest-status controller.go "$WMS_OLD" "$WMS_NEW"
-gvariant mut-manifest-status-ignored controller.go "$WMS_OLD" "$WMS_NEW" 'if err := c.writeManifest(manifest); err != nil {
-		return "capture_copy_failed"
-	}' '_ = c.writeManifest(manifest)'
-TF=manifest-status
-redgreen "manifest writer fault (complete bytes then nonzero status), unchecked-status mutant" a_transfer_fault "$MUT/mut-manifest-status-ignored.sh" "$MUT/fault-manifest-status.sh"
-
-# post-quiescence capture map audit: a changed inode with perfectly valid PNG bytes is refused by the
-# runner's own consumer of the recorded inode map, nothing is published and the closure is checked
-a_capture_map_changed() { # a_capture_map_changed RUNNER: only the inode changes; every other fact is held and inspected
-	CAP=$(capdir)
-	rm -f "$HOOKOK"
-	rrx "$ISO" "$1" --capture "$CAP" -- sh -c "${BASE}shoot_all"
-	OBS="status $RS, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1), DIR $([ -e "$ISO/$CAP" ] && echo present || echo absent)"
-	[ -e "$HOOKOK" ] || { OBS="$OBS; the inode-only fixture did not establish its facts"; SETUP=1; return 1; }
-	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: capture_map_changed' "$TMP/rerr"; } || { [ "$RS" = 0 ] && grep -Fq 'DEV-RUN-CAPTURE-PASS' "$TMP/rout"; }; } && reached
-	cstate "$(cname)"
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: capture_map_changed' "$TMP/rerr" && ! grep -Fq 'DEV-RUN-CAPTURE-PASS' "$TMP/rout" &&
-		[ ! -e "$ISO/$CAP" ] && [ "$CST" = absent ]
-}
-# The replacement keeps owner, group, mode, link count, type and bytes of the recorded file and differs
-# only by inode; the fixture proves each fact before it moves the replacement into place and signals it.
-HOOKOK=$TMP/hook.ok
-HOOKSH='cd /capture && /usr/bin/cp dev-desktop.png t.tmp && /usr/bin/chmod 0666 t.tmp && [ "$(/usr/bin/stat -c "%u %g %a %h %F" t.tmp)" = "$(/usr/bin/stat -c "%u %g %a %h %F" dev-desktop.png)" ] && [ "$(/usr/bin/stat -c %i t.tmp)" != "$(/usr/bin/stat -c %i dev-desktop.png)" ] && [ "$(/usr/bin/sha256sum <t.tmp)" = "$(/usr/bin/sha256sum <dev-desktop.png)" ] && /usr/bin/mv -f t.tmp dev-desktop.png'
-MAPCHG_OLD='// quiescence is established; no map has been audited yet'
-MAPCHG_NEW=$MAPCHG_OLD'
-	if r := c.supCall(10, "/usr/bin/sh", "-c", `'"$HOOKSH"'`); r.startErr == nil && r.status == 0 {
-		_ = os.WriteFile("'$HOOKOK'", nil, 0o644)
-	}'
-gvariant fault-map-changed controller.go "$MAPCHG_OLD" "$MAPCHG_NEW"
-gvariant mut-map-audit-removed controller.go "$MAPCHG_OLD" "$MAPCHG_NEW" 'func (c *ctl) captureAudit() bool {' 'func (c *ctl) captureAudit() bool {
-	return true'
-gvariant mut-map-inode-compare-removed controller.go "$MAPCHG_OLD" "$MAPCHG_NEW" '} else if w, found := want[name]; !found || w != ino {' '} else if w, found := want[name]; !found || (w != ino && false) {'
-redgreen "capture-map audit removed (post-quiescence inode change with valid bytes)" a_capture_map_changed "$MUT/mut-map-audit-removed.sh" "$MUT/fault-map-changed.sh"
-redgreen "capture-map inode comparison removed alone (only the inode changes, valid bytes and every other fact held)" a_capture_map_changed "$MUT/mut-map-inode-compare-removed.sh" "$MUT/fault-map-changed.sh"
-
-# ---- owned-name closure (T26). The driver observes the runner's own Docker calls through a logging PATH
-# shim and the reconciliation window through a logging query seam; it never queries by label.
-# the logging shim (dshim_write over $REALDOCKER) was written right after the clock acquisition
-rrlog() { # rrlog DIR RUNNER ARGS...: like rrx, with the runner's Docker calls logged to $TMP/dlog
-	_xd=$1
-	_xr=$2
-	shift 2
-	true >"$TMP/dlog" && true >"$TMP/dlog.q" || SETUP=1
-	(cd "$_xd" && PATH="$TMP/dshim:$PATH" DLOG="$TMP/dlog" timeout 240 "$_xr" "$@") >"$TMP/rout" 2>"$TMP/rerr"
-	RS=$?
-	rerr_seen
-	_xc=$(cname)
-	[ -z "$_xc" ] || case " $OWNED " in *" $_xc "*) ;; *) OWNED="$OWNED $_xc" ;; esac
-}
-dqueries() { grep -Fc -- "ps -a --filter name=^$1\$" "$TMP/dlog"; } # dqueries NAME: logged exact-name queries
-# an issued main create that returned nonzero or timed out is a retained failure whatever later queries show.
-# The issued name is observed at the actual issue seam: every fault copy records $CTR before its injected
-# result, so the name exists even when Docker is never invoked. A real effect is a receipt, never a guess:
-# the after and delayed faults run the actual `docker run` and write its real status and stdout to RECEIPT,
-# and the driver credits an effect only on a successful one (status 0 and the container id; for a validator
-# status 0 and its canonical PNG byte count). The delayed fault lands its effect after the failure has been
-# reported and holds the runner's first exact-name query of the issued name until the effect has landed, so
-# the late create is observed and removed by the runner's own closure. The final state of the issued name is
-# read, status-checked, before this driver removes anything: driver removal is never runner closure.
-ISSUELOG=$TMP/issued.seen
-RECEIPT=$TMP/create.receipt
-CF_EFFECT=none
-# The create seams of a fault copy are Go statements at the controller's argv builders; there is no production hook. GO_ISSUE records the owned name at the seam,
-# before the injected result, so it exists even when Docker is never invoked. An effect script runs the real `docker run` after a delay, stamps its start with the shared
-# clock first and writes its real status and output atomically to the receipt: a real effect is a receipt, never a guess.
-GO_ISSUE_C='func() { f, _ := os.OpenFile("'$ISSUELOG'", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644); fmt.Fprintln(f, c.ctr); f.Close() }()'
-GO_ISSUE_V='func() { f, _ := os.OpenFile("'$ISSUELOG'", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644); fmt.Fprintln(f, vname); f.Close() }()'
-EFFECT_C=$TMP/effect-main.sh
-EFFECT_V=$TMP/effect-validator.sh
-cat >"$EFFECT_C" <<EFFECT || exit 125
-#!/bin/sh
-echo \$\$ >"$RECEIPT.pid"
-sleep "\$1"
-shift
-$CLOCK -clock >"$RECEIPT.t"
-o=\$(timeout --kill-after=10s 60s docker "\$@")
-x=\$?
-printf '%s %s' "\$x" "\$o" >"$RECEIPT.tmp" && mv "$RECEIPT.tmp" "$RECEIPT"
-EFFECT
-cat >"$EFFECT_V" <<EFFECT || exit 125
-#!/bin/sh
-echo \$\$ >"$RECEIPT.pid"
-sleep "\$1"
-vt=\$2
-shift 2
-$CLOCK -clock >"$RECEIPT.t"
-timeout --kill-after=2s "\${vt}s" docker run "\$@" >"$RECEIPT.out"
-x=\$?
-printf '%s %s' "\$x" "\$(wc -c <"$RECEIPT.out" | tr -d ' ')" >"$RECEIPT.tmp" && mv "$RECEIPT.tmp" "$RECEIPT"
-EFFECT
-RUNOLD='return append([]string{"timeout", "--kill-after=10s", "60s", "docker"}, args...)'
-VOLD1='return []string{"timeout", "--kill-after=2s", strconv.Itoa(left) + "s", "docker", "run", "--rm",'
-VNEW1='real := []string{"timeout", "--kill-after=2s", strconv.Itoa(left) + "s", "docker", "run", "--rm",'
-VOLD2='"-challenge", c.challenge}
-}'
-QSEAM_OLD='func (c *ctl) queryName(secs string, bound time.Duration, name, phase string) (string, bool) {'
-QHOLD_C=$QSEAM_OLD'
-	if phase == "first" {
-		for i := 0; i < 90; i++ {
-			if fi, err := os.Stat("'$RECEIPT'"); err == nil && fi.Size() > 0 {
-				break
-			}
-			time.Sleep(time.Second)
-		}
-	}'
-QHOLD_V=$QSEAM_OLD'
-	if phase == "first" && strings.Contains(name, "-v-") {
-		for i := 0; i < 90; i++ {
-			if fi, err := os.Stat("'$RECEIPT'"); err == nil && fi.Size() > 0 {
-				break
-			}
-			time.Sleep(time.Second)
-		}
-	}'
-# the track-successful-creates-only mutant: a name is issued only after its call returned status 0 (instead of when its native process started)
-SO1_OLD='if s.issue != "" {
-		c.issued = append(c.issued, s.issue)
-	}'
-SO1_NEW='_ = s.issue'
-SO2_OLD='return p.wait()'
-SO2_NEW='res := p.wait()
-	if p.s.issue != "" && res.status == 0 {
-		c.issued = append(c.issued, p.s.issue)
-	}
-	return res'
-cf_go() { # cf_go none|after|timeout|delayed: the Go statements of the main create seam
-	case $1 in
-	none) printf '%s\n\treturn []string{"/bin/sh", "-c", "exit 1"}' "$GO_ISSUE_C" ;;
-	after) printf '%s\n\treturn append([]string{"/bin/sh", "-c", `/bin/sh "$@"; exit 1`, "sh", "%s", "0"}, args...)' "$GO_ISSUE_C" "$EFFECT_C" ;;
-	timeout) printf '%s\n\treturn []string{"timeout", "1", "sleep", "3"}' "$GO_ISSUE_C" ;;
-	delayed) printf '%s\n\treturn append([]string{"/bin/sh", "-c", `setsid /bin/sh "$@" >/dev/null 2>&1 </dev/null & _i=0; while [ ! -s "%s" ] && [ "$_i" -lt 500 ]; do sleep 0.01; _i=$((_i + 1)); done; exit 1`, "sh", "%s", "%s"}, args...)' "$GO_ISSUE_C" "$RECEIPT.pid" "$EFFECT_C" "$CF_DELAY" ;;
-	esac
-}
-vf_go() { # vf_go none|after|timeout|delayed: the Go statements of the validator create seam (real is the original argv; the effect scripts receive the original arguments and stdin)
-	case $1 in
-	none) printf '\t_ = real\n\t%s\n\treturn []string{"/bin/sh", "-c", "exit 125"}' "$GO_ISSUE_V" ;;
-	after) printf '\t%s\n\treturn append([]string{"/bin/sh", "-c", `/bin/sh "$@"; exit 125`, "sh", "%s", "0", strconv.Itoa(left)}, real[5:]...)' "$GO_ISSUE_V" "$EFFECT_V" ;;
-	timeout) printf '\t_ = real\n\t%s\n\treturn []string{"timeout", "1", "sleep", "3"}' "$GO_ISSUE_V" ;;
-	delayed) printf '\t%s\n\treturn append([]string{"/bin/sh", "-c", `exec 7<&0; setsid /bin/sh "$@" <&7 >/dev/null 2>&1 & _i=0; while [ ! -s "%s" ] && [ "$_i" -lt 500 ]; do sleep 0.01; _i=$((_i + 1)); done; exec 7<&-; exit 125`, "sh", "%s", "%s", strconv.Itoa(left)}, real[5:]...)' "$GO_ISSUE_V" "$RECEIPT.pid" "$EFFECT_V" "$CF_DELAY" ;;
-	esac
-}
-# cf_effect NAME RECEIPT_RE: the effect premise of the injected cell. none: Docker is never invoked, so no
-# receipt may exist; after and delayed: the actual `docker run` wrote its receipt (the late one is awaited,
-# up to 90 s) and it must be a successful create. An unestablished premise is setup, never target evidence.
-cf_effect() {
-	if [ "$CF_EFFECT" = none ]; then
-		[ ! -e "$RECEIPT" ] && return 0
-		OBS="$OBS; a receipt exists for a cell that never invokes Docker"
-	else
-		if [ "$CF_EFFECT" = delayed ] && [ ! -s "$RECEIPT.pid" ]; then
-			OBS="$OBS; the escaped effect session never announced itself before its parent returned"
-			SETUP=1
-			docker rm -f "$1" >/dev/null 2>&1
-			return 1
-		fi
-		_cw=0
-		while [ ! -s "$RECEIPT" ] && [ "$_cw" -lt 90 ]; do
-			sleep 1
-			_cw=$((_cw + 1))
-		done
-		_cr=$(cat "$RECEIPT" 2>/dev/null)
-		if printf '%s\n' "$_cr" | grep -Eq "$2"; then
-			OBS="$OBS; effect receipt '$(printf '%s' "$_cr" | cut -c1-24)'"
-			return 0
-		fi
-		OBS="$OBS; no successful effect receipt (status and output '$(printf '%s' "$_cr" | cut -c1-80)')"
-	fi
-	SETUP=1
-	docker rm -f "$1" >/dev/null 2>&1
-	return 1
-}
+# ---- closure-window helpers: cf_natural, cf_terminal and cf_final are the producers the permanent self-check above extracts from this file and perturbs.
+# No full-run case uses them: the shell lifecycle has no reconciliation window (it removes its one owned container by label on exit).
 # cf_natural NAME: the delayed cell is natural. Every S record of an exact-name `ps` of NAME in the shim's $TMP/dlog has exactly one well-formed E record with the same token in
 # $TMP/dlog.q whose END is not before its START; there is no orphan, malformed or duplicate token; and there are at least two queries, each with status 0, the answer [] and
 # END + 10 ms no later than the effect start, so each really saw the absence. Anything else is setup naming the tokens.
@@ -3768,2153 +2315,8 @@ cf_final() {
 		_fin=$CST
 	fi
 }
-CF_HOLD=0
-CF_NATURAL=0
-CF_RUNARGS=
-CF_DELAY=2
-a_create_failure() { # a_create_failure RUNNER (CF_EFFECT none|after|delayed, CF_HOLD, CF_NATURAL and CF_RUNARGS globals): container_start_failed plus cleanup_failed for the observed issued name, its real effect read from the receipt and its final absence from a status-checked query read before any driver removal
-	true >"$ISSUELOG" || { OBS="the issue log could not be created"; SETUP=1; return 1; }
-	rm -f "$RECEIPT" "$RECEIPT.tmp" "$RECEIPT.t" "$RECEIPT.pid"
-	# shellcheck disable=SC2086
-	rrlog "$ISO" "$1" $CF_RUNARGS -- sh -c 'printf ran'
-	_n=$(head -n 1 "$ISSUELOG")
-	[ -z "$_n" ] || case " $OWNED " in *" $_n "*) ;; *) OWNED="$OWNED $_n" ;; esac
-	_q=0
-	[ -z "$_n" ] || _q=$(dqueries "$_n")
-	OBS="status $RS, issued '$_n', $_q queries, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tr '\n' ' ')"
-	[ -n "$_n" ] || { SETUP=1; return 1; }
-	cf_effect "$_n" '^0 [0-9a-f]{64}$' || return 1
-	[ "$CF_NATURAL" != 1 ] || cf_natural "$_n" || { docker rm -f "$_n" >/dev/null 2>&1; return 1; }
-	cf_final "$_n" || { docker rm -f "$_n" >/dev/null 2>&1; return 1; }
-	OBS="$OBS; final state of the issued name before any driver removal: $_fin"
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: container_start_failed' "$TMP/rerr" && reached
-	_ok=0
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: container_start_failed' "$TMP/rerr" && grep -Fq "dev-run: cleanup_failed container=$_n" "$TMP/rerr" &&
-		[ -z "$(cat "$TMP/rout")" ] && [ "$_q" -ge 2 ] && [ "$_fin" = absent ] && _ok=1
-	docker rm -f "$_n" >/dev/null 2>&1
-	[ "$_ok" = 1 ]
-}
-cf_variant() { # cf_variant NAME KIND [OLD NEW]...: a main-create fault copy; a held delayed cell also holds the first exact-name query until the late effect has landed
-	_cvn=$1
-	_cvk=$2
-	shift 2
-	if [ "$CF_HOLD" = 1 ]; then
-		gvariant "$_cvn" controller.go "$RUNOLD" "$(cf_go "$_cvk")" "$QSEAM_OLD" "$QHOLD_C" "$@"
-	else
-		gvariant "$_cvn" controller.go "$RUNOLD" "$(cf_go "$_cvk")" "$@"
-	fi
-}
-# an unknown Wait outcome of the create (the real `docker run` ran, its status is reported as -1) is retained and reconciled like a failed or timed-out create; the issued name is tracked from the start
-CF_UNK_OLD='tail, tok := r.tail()
-	if r.status != 0 || !r.errOK || !tok {'
-CF_UNK_NEW='r.status = -1 // an unknown Wait outcome
-	tail, tok := r.tail()
-	if r.status != 0 || !r.errOK || !tok {'
-for cf in none after timeout delayed unknown; do
-	CF_HOLD=0
-	case $cf in
-	none) CF_EFFECT=none ;;
-	after | unknown) CF_EFFECT=after ;;
-	timeout) CF_EFFECT=none ;;
-	delayed) CF_EFFECT=delayed CF_HOLD=1 ;;
-	esac
-	if [ "$cf" = unknown ]; then
-		cf_variant "cf-$cf" after "$CF_UNK_OLD" "$CF_UNK_NEW"
-		cf_variant "mut-cf-nolatch-$cf" after 'c.failCreate(c.ctr)' '_ = 0' "$CF_UNK_OLD" "$CF_UNK_NEW"
-		cf_variant "mut-cf-successonly-$cf" after "$SO1_OLD" "$SO1_NEW" "$SO2_OLD" "$SO2_NEW" "$CF_UNK_OLD" "$CF_UNK_NEW"
-	else
-		cf_variant "cf-$cf" "$cf"
-		cf_variant "mut-cf-nolatch-$cf" "$cf" 'c.failCreate(c.ctr)' '_ = 0'
-		cf_variant "mut-cf-successonly-$cf" "$cf" "$SO1_OLD" "$SO1_NEW" "$SO2_OLD" "$SO2_NEW"
-	fi
-	redgreen "issued main create $cf: create-failure-latch-removed mutant" a_create_failure "$MUT/mut-cf-nolatch-$cf.sh" "$MUT/cf-$cf.sh"
-	redgreen "issued main create $cf: track-successful-creates-only mutant" a_create_failure "$MUT/mut-cf-successonly-$cf.sh" "$MUT/cf-$cf.sh"
-done
-# the genuine delayed-effect sibling perturbs the create seam only: the controller's own queries are untouched, so its closure
-# really observes absence before the late effect lands; the effect receipt, the absent-before-effect shim receipts and the bounded
-# terminal state (the container's own expiry, --timeout 1) are all read before the driver removes anything
-CF_HOLD=0
-CF_EFFECT=delayed
-CF_NATURAL=1
-CF_RUNARGS='--timeout 1'
-CF_DELAY=3
-cf_variant cf-natural delayed
-cf_variant mut-cf-nolatch-natural delayed 'c.failCreate(c.ctr)' '_ = 0'
-redgreen "issued main create with the effect landing after the controller's own absence observations: create-failure-latch-removed mutant" a_create_failure "$MUT/mut-cf-nolatch-natural.sh" "$MUT/cf-natural.sh"
-CF_NATURAL=0
-CF_RUNARGS=
-CF_DELAY=2
-CF_EFFECT=none
-
-# a validator whose create failed is retained as failed; its name is observed at the same seam; never-issued names are not queried.
-# The before-effect, effect-before-error, timeout and delayed-effect siblings run through the real validator boundary:
-# the after and delayed faults run the original `docker run` argument vector (isolation, limits, label, image, native
-# `timeout --kill-after=1s 10s` and the capture-check command) with the original raw-image stdin, and receipt its
-# status and canonical PNG size. Native 10 s + 1 s expiry itself is exercised by the stalled and host-loss controls.
-a_validator_create_failure() { # a_validator_create_failure RUNNER (CF_EFFECT none|after|delayed, CF_HOLD and CF_NATURAL globals)
-	true >"$ISSUELOG" || { OBS="the issue log could not be created"; SETUP=1; return 1; }
-	rm -f "$RECEIPT" "$RECEIPT.tmp" "$RECEIPT.out" "$RECEIPT.t" "$RECEIPT.pid"
-	CAP=$(capdir)
-	rrlog "$ISO" "$1" --capture "$CAP" -- sh -c "${BASE}shoot_all"
-	_rid=$(runid)
-	_vi=boxset-dev-$_rid-v-dev-desktop
-	_never=0
-	for _w in dev-mobile preview-desktop preview-mobile; do
-		_never=$((_never + $(grep -Fc -- "boxset-dev-$_rid-v-$_w" "$TMP/dlog")))
-	done
-	OBS="status $RS, $(dqueries "$_vi") queries of the issued validator, $_never log lines for never-issued names, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tr '\n' ' ')"
-	[ -n "$_rid" ] || { SETUP=1; return 1; }
-	[ "$(head -n 1 "$ISSUELOG")" = "$_vi" ] || { OBS="$OBS; the issue seam did not observe the validator name"; SETUP=1; return 1; }
-	OWNED="$OWNED $_vi"
-	cf_effect "$_vi" '^0 [1-9][0-9]*$' || return 1
-	[ "$CF_NATURAL" != 1 ] || cf_natural "$_vi" || { docker rm -f "$_vi" >/dev/null 2>&1; return 1; }
-	cf_final "$_vi" || { docker rm -f "$_vi" >/dev/null 2>&1; return 1; }
-	OBS="$OBS; final state of the issued validator before any driver removal: $_fin"
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: capture_copy_failed' "$TMP/rerr" && reached
-	_ok=0
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: capture_copy_failed' "$TMP/rerr" && grep -Fq "dev-run: cleanup_failed container=$_vi" "$TMP/rerr" &&
-		[ "$(dqueries "$_vi")" -ge 2 ] && [ "$_never" = 0 ] && [ ! -e "$ISO/$CAP" ] && [ "$_fin" = absent ] && _ok=1
-	docker rm -f "$_vi" >/dev/null 2>&1
-	[ "$_ok" = 1 ]
-}
-VLATCH_OLD='c.failCreate(vname) // a failed, timed-out or unknown create is retained'
-vf_variant() { # vf_variant NAME KIND [OLD NEW]...: a validator-create fault copy; a held delayed cell also holds the validator's first query
-	_cvn=$1
-	_cvk=$2
-	shift 2
-	_cvt='"-challenge", c.challenge}
-'"$(vf_go "$_cvk")"'
-}'
-	if [ "$CF_HOLD" = 1 ]; then
-		gvariant "$_cvn" controller.go "$VOLD1" "$VNEW1" "$VOLD2" "$_cvt" "$QSEAM_OLD" "$QHOLD_V" "$@"
-	else
-		gvariant "$_cvn" controller.go "$VOLD1" "$VNEW1" "$VOLD2" "$_cvt" "$@"
-	fi
-}
-VF_UNK_OLD='if vs := vr.status; vs < 0 || vs == 124 || vs == 125 || vs == 126 || vs == 127 || vs == 137 {'
-VF_UNK_NEW='vr.status = -1 // an unknown Wait outcome
-		if vs := vr.status; vs < 0 || vs == 124 || vs == 125 || vs == 126 || vs == 127 || vs == 137 {'
-for vf in none after timeout delayed unknown; do
-	CF_HOLD=0
-	case $vf in
-	none) CF_EFFECT=none ;;
-	after | unknown) CF_EFFECT=after ;;
-	timeout) CF_EFFECT=none ;;
-	delayed) CF_EFFECT=delayed CF_HOLD=1 ;;
-	esac
-	if [ "$vf" = unknown ]; then
-		vf_variant "vf-$vf" after "$VF_UNK_OLD" "$VF_UNK_NEW"
-		vf_variant "mut-vf-nolatch-$vf" after "$VLATCH_OLD" '_ = vname' "$VF_UNK_OLD" "$VF_UNK_NEW"
-		vf_variant "mut-vf-successonly-$vf" after "$SO1_OLD" "$SO1_NEW" "$SO2_OLD" "$SO2_NEW" "$VF_UNK_OLD" "$VF_UNK_NEW"
-	else
-		vf_variant "vf-$vf" "$vf"
-		vf_variant "mut-vf-nolatch-$vf" "$vf" "$VLATCH_OLD" '_ = vname'
-		vf_variant "mut-vf-successonly-$vf" "$vf" "$SO1_OLD" "$SO1_NEW" "$SO2_OLD" "$SO2_NEW"
-	fi
-	redgreen "issued validator create failure ($vf): latch-removed mutant" a_validator_create_failure "$MUT/mut-vf-nolatch-$vf.sh" "$MUT/vf-$vf.sh"
-	redgreen "issued validator create failure ($vf): track-successful-creates-only mutant" a_validator_create_failure "$MUT/mut-vf-successonly-$vf.sh" "$MUT/vf-$vf.sh"
-done
-# the genuine delayed-effect sibling perturbs the validator create seam only: the controller's own queries are untouched and see
-# the natural absence before the late effect lands, the effect receipt is the real original argv/stdin run, and the final state is read after
-CF_HOLD=0
-CF_EFFECT=delayed
-CF_NATURAL=1
-CF_DELAY=3
-vf_variant vf-natural delayed
-vf_variant mut-vf-nolatch-natural delayed "$VLATCH_OLD" '_ = vname'
-redgreen "issued validator create with the effect landing after the controller's own absence observations: latch-removed mutant" a_validator_create_failure "$MUT/mut-vf-nolatch-natural.sh" "$MUT/vf-natural.sh"
-CF_NATURAL=0
-CF_DELAY=2
-CF_EFFECT=none
-
-# removal that took effect and then returned nonzero stays a failure although the name is later absent. The fault seam at the removal argv runs the
-# real `docker rm -f`, writes its real status to the receipt RMRCPT and only then fails, so the effect is established before the refusal and is never
-# attributed to the controller's final unchecked removal or to a later absence.
-RMRCPT=$TMP/rm.receipt
-rm_effect() { # rm_effect NAME: the real removal ran and succeeded before the injected nonzero status
-	if grep -Fxq "$1 0" "$RMRCPT" 2>/dev/null; then
-		OBS="$OBS; real removal receipt '$1 0'"
-		return 0
-	fi
-	OBS="$OBS; no successful real-removal receipt for $1 ('$(tr '\n' '|' <"$RMRCPT" 2>/dev/null)')"
-	SETUP=1
-	return 1
-}
-a_rm_after_effect() { # a_rm_after_effect RUNNER
-	true >"$RMRCPT" || { OBS="the removal receipt could not be created"; SETUP=1; return 1; }
-	rrlog "$ISO" "$1" -- true
-	_cn=$(cname)
-	cstate "$_cn"
-	_cst=$CST
-	OBS="status $RS, container $_cn $_cst, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tr '\n' ' ')"
-	[ -n "$_cn" ] || { SETUP=1; return 1; }
-	rm_effect "$_cn" || { docker rm -f "$_cn" >/dev/null 2>&1; return 1; }
-	{ { [ "$RS" = 125 ] && grep -Fq "dev-run: cleanup_failed container=$_cn" "$TMP/rerr"; } || [ "$RS" = 0 ]; } && reached
-	_ok=0
-	[ "$RS" = 125 ] && grep -Fq "dev-run: cleanup_failed container=$_cn" "$TMP/rerr" && [ "$_cst" = absent ] && _ok=1
-	docker rm -f "$_cn" >/dev/null 2>&1
-	[ "$_ok" = 1 ]
-}
-RM_OLD='return []string{"timeout", "30", "docker", "rm", "-f", name}'
-RM_AFTER_NEW='return []string{"/bin/sh", "-c", `timeout 30 docker rm -f "$1"; x=$?; printf "%s %s\n" "$1" "$x" >>'$RMRCPT'; exit 1`, "sh", name}'
-gvariant fault-rm-after-effect controller.go "$RM_OLD" "$RM_AFTER_NEW"
-gvariant mut-rm-status-ignored controller.go "$RM_OLD" "$RM_AFTER_NEW" 'return c.rmNote(name, r.startErr == nil && r.status == 0)' '_ = r
-	return true'
-redgreen "owned removal after effect then nonzero: removal-status-ignoring mutant" a_rm_after_effect "$MUT/mut-rm-status-ignored.sh" "$MUT/fault-rm-after-effect.sh"
-
-# the asynchronous output-stage removal (the redactor stopped on overflow) is the controller's own synchronous owned removal: its failure survives the later absence
-a_rm_async() { # a_rm_async RUNNER
-	true >"$RMRCPT" || { OBS="the removal receipt could not be created"; SETUP=1; return 1; }
-	rrx "$ISO" "$1" -- sh -c 'head -c 65537 /dev/zero | tr "\0" a'
-	_cn=$(cname)
-	cstate "$_cn"
-	_cst=$CST
-	OBS="status $RS, container $_cn $_cst, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tr '\n' ' ')"
-	[ -n "$_cn" ] || { SETUP=1; return 1; }
-	rm_effect "$_cn" || { docker rm -f "$_cn" >/dev/null 2>&1; return 1; }
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: output_overflow' "$TMP/rerr" && reached
-	_ok=0
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: output_overflow' "$TMP/rerr" && grep -Fq "dev-run: cleanup_failed container=$_cn" "$TMP/rerr" && [ "$_cst" = absent ] && _ok=1
-	docker rm -f "$_cn" >/dev/null 2>&1
-	[ "$_ok" = 1 ]
-}
-gvariant mut-rm-async-status-dropped controller.go "$RM_OLD" "$RM_AFTER_NEW" 'c.rmNote(s.removeOnOut, st == 0)' 'c.rmNote(s.removeOnOut, true)'
-redgreen "output-stage owned removal after effect then nonzero: stage-status-dropping mutant" a_rm_async "$MUT/mut-rm-async-status-dropped.sh" "$MUT/fault-rm-after-effect.sh"
-
-# one absolute 15 s reconciliation window shared by every issued name, read as exact CLOCK_MONOTONIC nanoseconds by the controller's one clock function when its
-# removal step ends; each confirmation query is hard-bounded by the time left floored to milliseconds, no grace. The query seam of a fault copy sits at the controller's
-# confirmation call and logs, per query, S (the controller's own reading, resolution charge 0, the native budget, the name, the shared deadline and the true
-# reconciliation start) and, on return, E (a reading of the same clock, the name and the query's status).
-QLOG=$TMP/qlog
-QCNT=$TMP/qcnt
-QCALLS=$TMP/qcalls
-QOLD='out, ok := c.queryName(fmt.Sprintf("%d.%03d", ms/1000, ms%1000), time.Duration(ms)*time.Millisecond, n, "confirm")'
-# gq ARGV [MARGIN]: the Go call-site seam: log S, run the fault argv (a Go []string over secs and n) under the hard bound of the time left plus MARGIN seconds, log E
-gq() {
-	printf '%s' 'out, ok := func() (string, bool) {
-		secs := fmt.Sprintf("%d.%03d", ms/1000, ms%1000)
-		{ f, _ := os.OpenFile("'$QLOG'", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644); fmt.Fprintf(f, "S %d %s %s %d %d\n", at, secs, n, end, t0); f.Close() }
-		r := c.do(&callSpec{kind: kReconcile, argv: '"$1"', stdout: captureFn(4096), bound: time.Duration(ms)*time.Millisecond + '"${2:-3}"'*time.Second})
-		sec, nsec, _ := clockGettime()
-		{ f, _ := os.OpenFile("'$QLOG'", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644); fmt.Fprintf(f, "E %d %s %d\n", sec*1000000000+nsec, n, r.status); f.Close() }
-		o, ok := r.text()
-		return strings.TrimRight(o, "\n"), ok
-	}()'
-}
-# gerr RETURN: the first confirmation query returns RETURN (a Go multi-value), later ones are the real query
-gerr() {
-	printf '%s' 'out, ok := func() (string, bool) {
-		nb, _ := os.ReadFile("'$QCNT'")
-		k, _ := strconv.Atoi(strings.TrimSpace(string(nb)))
-		k++
-		_ = os.WriteFile("'$QCNT'", []byte(strconv.Itoa(k)), 0o644)
-		if k == 1 {
-			return '"$1"'
-		}
-		return c.queryName(fmt.Sprintf("%d.%03d", ms/1000, ms%1000), time.Duration(ms)*time.Millisecond, n, "confirm")
-	}()'
-}
-secs_ns() { # secs_ns SECONDS[.FRACTION]: integer nanoseconds of the controller's whole-seconds.milliseconds budget
-	case $1 in '' | *[!0-9.]*)
-		printf 0
-		return
-		;;
-	esac
-	_sni=${1%%.*}
-	_snf=
-	case $1 in *.*) _snf=${1#*.} ;; esac
-	_snf=${_snf}000000000
-	_snf=${_snf%"${_snf#?????????}"}
-	while :; do
-		case $_snf in 0?*) _snf=${_snf#0} ;; *) break ;; esac
-	done
-	printf '%s' "$((${_sni:-0} * 1000000000 + _snf))"
-}
-a_closure_window() { # a_closure_window RUNNER: one shared 15 s window, strictly; every confirmation bounded by the time left, no grace
-	true >"$QLOG" || { OBS="the query log could not be created"; SETUP=1; return 1; }
-	CAP=$(capdir)
-	rrlog "$ISO" "$1" --capture "$CAP" -- sh -c "${BASE}shoot_all"
-	[ -s "$QLOG" ] || { OBS="no confirmation query was logged, status $RS"; SETUP=1; return 1; }
-	_wn=0
-	_wx=0
-	_wreset=0
-	_wspan=0
-	_wover=0
-	_wearly=0
-	_wbadst=0
-	_wd0=
-	_wsb=0
-	while read -r _wk _wa _wb _wc _wd _wt; do
-		case $_wk in
-		S)
-			_wn=$((_wn + 1))
-			[ -n "$_wd0" ] || _wd0=$_wd
-			[ "$_wd" = "$_wd0" ] || _wreset=$((_wreset + 1))
-			[ "$((_wd - _wt))" = 15000000000 ] || _wspan=$((_wspan + 1))
-			[ "$_wt" -le "$_wa" ] || _wearly=$((_wearly + 1))
-			_wsb=$(secs_ns "$_wb")
-			# the controller's readings are exact nanoseconds (resolution charge 0): its reading plus the native budget never exceeds the deadline
-			[ "$((_wa + _wsb))" -le "$_wd" ] || _wover=$((_wover + 1))
-			;;
-		E)
-			_wx=$((_wx + 1))
-			# the completion record keeps the query's status: the native timeout's 124 or 0. The completion boundary itself is judged by the
-			# scripted-clock cases below, never by a real-time scheduling allowance here
-			case $_wc in 0 | 124) ;; *) _wbadst=$((_wbadst + 1)) ;; esac
-			;;
-		esac
-	done <"$QLOG"
-	OBS="status $RS, $_wn confirmation queries ($_wx completed), $_wspan deadlines not exactly 15 s after the controller's own reconciliation start, $_wreset deadline resets, $_wover queries bounded beyond the time left, $_wearly queries before the window opened, $_wbadst unexpected query statuses, $(grep -c 'dev-run: cleanup_failed container=' "$TMP/rerr") cleanup_failed lines"
-	reached
-	[ "$RS" = 125 ] && [ "$_wspan" = 0 ] && [ "$_wreset" = 0 ] && [ "$_wover" = 0 ] && [ "$_wearly" = 0 ] && [ "$_wbadst" = 0 ] && [ "$_wx" = "$_wn" ] &&
-		grep -Fq "dev-run: cleanup_failed container=$(cname)" "$TMP/rerr" && ! grep -Fq 'DEV-RUN-CAPTURE-PASS' "$TMP/rout" && [ ! -e "$ISO/$CAP" ]
-}
-gvariant fault-window-stall controller.go "$QOLD" "$(gq '[]string{"timeout", secs, "sleep", "100"}')"
-gvariant fault-window-slow controller.go "$QOLD" "$(gq '[]string{"timeout", secs, "sh", "-c", "sleep 3; echo $0", n}')"
-gvariant mut-window-reset controller.go "$QOLD" "$(gq '[]string{"timeout", secs, "sleep", "100"}')" 'left := end - at' 'end = at + 15000000000
-			left := end - at'
-gvariant mut-window-fixed controller.go "$QOLD" "$(gq '[]string{"timeout", secs, "sh", "-c", "sleep 3; echo $0", n}')" 'ms := left / 1000000' 'ms := int64(15000)'
-gvariant mut-window-attempts controller.go "$QOLD" "$(gq '[]string{"timeout", secs, "sh", "-c", "sleep 3; echo $0", n}')" 'end := t0 + 15000000000' 'end := t0 + 3600000000000'
-gvariant mut-window-grace controller.go "$QOLD" "$(gq '[]string{"timeout", secs, "sleep", "100"}')" 'end := t0 + 15000000000' 'end := t0 + 17000000000'
-gvariant mut-window-grace1 controller.go "$QOLD" "$(gq '[]string{"timeout", secs, "sleep", "100"}')" 'end := t0 + 15000000000' 'end := t0 + 16000000000'
-gvariant mut-window-late controller.go "$QOLD" "$(gq '[]string{"timeout", secs, "sleep", "100"}')" 'secs := fmt.Sprintf("%d.%03d", ms/1000, ms%1000)' 'secs := fmt.Sprintf("%d", ms/1000+2)'
-gvariant mut-window-late1 controller.go "$QOLD" "$(gq '[]string{"timeout", secs, "sleep", "100"}')" 'secs := fmt.Sprintf("%d.%03d", ms/1000, ms%1000)' 'secs := fmt.Sprintf("%d", ms/1000+1)'
-redgreen "per-name-reset window mutant (stalled confirmation queries)" a_closure_window "$MUT/mut-window-reset.sh" "$MUT/fault-window-stall.sh"
-redgreen "fixed-per-query-budget mutant (slow-present confirmation queries)" a_closure_window "$MUT/mut-window-fixed.sh" "$MUT/fault-window-slow.sh"
-redgreen "attempt-count (no absolute deadline) mutant (slow-present confirmation queries)" a_closure_window "$MUT/mut-window-attempts.sh" "$MUT/fault-window-slow.sh"
-redgreen "two-second-grace window mutant (stalled confirmation queries)" a_closure_window "$MUT/mut-window-grace.sh" "$MUT/fault-window-stall.sh"
-redgreen "one-second-grace window mutant (stalled confirmation queries)" a_closure_window "$MUT/mut-window-grace1.sh" "$MUT/fault-window-stall.sh"
-redgreen "late-return budget mutant (queries allowed two seconds past the time left)" a_closure_window "$MUT/mut-window-late.sh" "$MUT/fault-window-stall.sh"
-redgreen "late-return budget mutant (queries allowed one second past the time left)" a_closure_window "$MUT/mut-window-late1.sh" "$MUT/fault-window-stall.sh"
-
-# a failed or malformed (a successful answer that is not the exact name) confirmation query stays a failure
-# although the next confirmation reports absence
-a_closure_error_absence() { # a_closure_error_absence RUNNER
-	rm -f "$QCNT"
-	rrlog "$ISO" "$1" -- true
-	_cn=$(cname)
-	_qc=$(cat "$QCNT" 2>/dev/null)
-	OBS="status $RS, ${_qc:-0} confirmation queries, container $_cn, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tr '\n' ' ')"
-	[ -n "$_cn" ] || { SETUP=1; return 1; }
-	case $_qc in '' | 0 | 1) OBS="$OBS; no confirmation followed the failed one"; SETUP=1; docker rm -f "$_cn" >/dev/null 2>&1; return 1 ;; esac
-	{ { [ "$RS" = 125 ] && grep -Fq "dev-run: cleanup_failed container=$_cn" "$TMP/rerr"; } || [ "$RS" = 0 ]; } && reached
-	_ok=0
-	cstate "$_cn"
-	[ "$RS" = 125 ] && grep -Fq "dev-run: cleanup_failed container=$_cn" "$TMP/rerr" && [ "$CST" = absent ] && _ok=1
-	docker rm -f "$_cn" >/dev/null 2>&1
-	[ "$_ok" = 1 ]
-}
-gvariant fault-window-error controller.go "$QOLD" "$(gerr '"", false')"
-gvariant mut-window-error-forgotten controller.go "$QOLD" "$(gerr '"", false')" 'fail(n) // a failed confirmation stays a failure' '_ = n'
-redgreen "confirmation-error-forgotten mutant (first confirmation fails, the next reports absence)" a_closure_error_absence "$MUT/mut-window-error-forgotten.sh" "$MUT/fault-window-error.sh"
-gvariant fault-window-malformed controller.go "$QOLD" "$(gerr '"not-the-name", true')"
-gvariant mut-window-malformed-forgotten controller.go "$QOLD" "$(gerr '"not-the-name", true')" 'fail(n) // a foreign answer is not absence' '_ = n'
-redgreen "malformed-success-forgotten mutant (the first confirmation prints a foreign name, the next reports absence)" a_closure_error_absence "$MUT/mut-window-malformed-forgotten.sh" "$MUT/fault-window-malformed.sh"
-# a confirmation that reports absence only after the shared deadline is a failure, not a success: late by two seconds on the real
-# clock here (no whole-second grace); the fractional boundaries are the scripted-clock cases below
-a_closure_late() { # a_closure_late RUNNER
-	rrlog "$ISO" "$1" -- true
-	_cn=$(cname)
-	OBS="status $RS, container $_cn, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tr '\n' ' ')"
-	[ -n "$_cn" ] || { SETUP=1; return 1; }
-	{ { [ "$RS" = 125 ] && grep -Fq "dev-run: cleanup_failed container=$_cn" "$TMP/rerr"; } || [ "$RS" = 0 ]; } && reached
-	_ok=0
-	cstate "$_cn"
-	[ "$RS" = 125 ] && grep -Fq "dev-run: cleanup_failed container=$_cn" "$TMP/rerr" && [ "$CST" = absent ] && _ok=1
-	docker rm -f "$_cn" >/dev/null 2>&1
-	[ "$_ok" = 1 ]
-}
-gvariant fault-window-late controller.go "$QOLD" "$(gq '[]string{"/bin/sh", "-c", "sleep \"$0\"; sleep 2", secs}' 5)"
-gvariant mut-window-late-accepted controller.go "$QOLD" "$(gq '[]string{"/bin/sh", "-c", "sleep \"$0\"; sleep 2", secs}' 5)" 'if done, err := c.now(); err != nil || done >= end {' 'if done, err := c.now(); err != nil || done < 0 {'
-redgreen "late-success-accepted mutant (absence reported two seconds after the shared deadline)" a_closure_late "$MUT/mut-window-late-accepted.sh" "$MUT/fault-window-late.sh"
-
-# Deterministic clock cases through the real closure. The compiled fault replaces the raw reader of the controller's one clock function while the closure runs: it reads no
-# real clock and calls no helper. Reading n counts from the closure's first reading (1 the reconciliation start t0 = 1000 s, 2 the admission of a confirmation query, 3 its
-# completion, 4 the loop-continuation check, reached only while a name is still pending). Each reading is the scripted value for its number (`N NS`), a failure (`N err`),
-# an invalid reading (`N bad`) or the previous reading plus one second. The exact-nanosecond completion is late at the deadline and inside one nanosecond before it; every grace
-# (10 ms, 250 ms, 1 s) and the inclusive comparison are mutants of that one boundary and no case depends on process scheduling. A counting query seam that answers "present" holds
-# the closure in its loop, so the exhausted admission (no query once nothing of the window remains) and the continuation failure (no further reading or query after it) are
-# observed from the seam's own call count and the script's own count. The consumer's status, the publication and the container's state are observed independently of the scripted
-# clock; the script's own count proves the targeted reading was reached.
-CLKF=$TMP/clk.f
-CLKN=$TMP/clk.n
-CLKV=$TMP/clk.v
-CLKT=$TMP/clk.t
-CK=
-CK_CALLS=0
-CK_LINE=
-CLKSEAM_OLD='sec, nsec, err := clockGettime()'
-CLKSEAM_NEW='sec, nsec, err := c.scripted()'
-CLKDEF_OLD='type callKind int'
-CLKDEF_NEW='func (c *ctl) scripted() (int64, int64, error) {
-	if !c.closureRan {
-		return 999, 0, nil // one scripted domain for every reading of this copy: the entry reading precedes the first closure reading (1000 s)
-	}
-	nb, _ := os.ReadFile("'$CLKN'")
-	n, _ := strconv.Atoi(strings.TrimSpace(string(nb)))
-	n++
-	_ = os.WriteFile("'$CLKN'", []byte(strconv.Itoa(n)), 0o644)
-	vb, _ := os.ReadFile("'$CLKV'")
-	v, err := strconv.ParseInt(strings.TrimSpace(string(vb)), 10, 64)
-	if err != nil {
-		v = 999000000000
-	}
-	nv := v + 1000000000
-	sc, _ := os.ReadFile("'$CLKF'")
-	for _, l := range strings.Split(string(sc), "\n") {
-		f := strings.Fields(l)
-		if len(f) != 2 || f[0] != strconv.Itoa(n) {
-			continue
-		}
-		{ lf, _ := os.OpenFile("'$CLKT'", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644); fmt.Fprintf(lf, "%d %s\n", n, f[1]); lf.Close() }
-		switch f[1] {
-		case "err":
-			return 0, 0, errors.New("scripted clock failure")
-		case "bad":
-			return -1, 0, nil
-		}
-		if x, e := strconv.ParseInt(f[1], 10, 64); e == nil {
-			nv = x
-		}
-	}
-	_ = os.WriteFile("'$CLKV'", []byte(strconv.FormatInt(nv, 10)), 0o644)
-	return nv / 1000000000, nv % 1000000000, nil
-}
-
-type callKind int'
-QCOUNT_NEW='_ = ms
-			out, ok := func() (string, bool) { f, _ := os.OpenFile("'$QCALLS'", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644); _, _ = f.WriteString("x"); f.Close(); return n, true }()'
-ck_script() { # ck_script LINES...: the scripted closure clock; a reading with no line is the previous reading plus one second. CK_LINE is the first line, the targeted reading the case must see consumed
-	CK_LINE=${1:-}
-	: >"$CLKF" || { SETUP=1; return 1; }
-	for _ckl in "$@"; do printf '%s\n' "$_ckl" >>"$CLKF" || SETUP=1; done
-}
-a_clock_case() { # a_clock_case RUNNER (CK err-t0|invalid-admission|backward-completion|late-boundary|late-100|late-600|inside-boundary|exhausted-admission|err-continuation, CK_CALLS globals)
-	rm -f "$CLKN" "$CLKV" "$QCALLS" "$CLKT"
-	rm -rf "$ISO/testdata"
-	mkdir -p "$ISO/testdata/parser"
-	rrlog "$ISO" "$1" --write testdata/parser -- sh -c 'printf pub >/src/testdata/parser/series.jsonl'
-	_cn=$(cname)
-	cstate "$_cn"
-	_cst=$CST
-	_kn=$(cat "$CLKN" 2>/dev/null)
-	case $_kn in '' | *[!0-9]*) _kn=0 ;; esac
-	_qc=$({ wc -c <"$QCALLS"; } 2>/dev/null | tr -d ' ')
-	case $_qc in '' | *[!0-9]*) _qc=0 ;; esac
-	_pub=no
-	[ ! -e "$ISO/testdata/parser/series.jsonl" ] || _pub=yes
-	OBS="$CK: status $RS, container $_cn $_cst, clock readings $_kn (targeted reading $CK_CALLS, scripted line '$CK_LINE' consumed: $(grep -Fxc "$CK_LINE" "$CLKT" 2>/dev/null)), confirmation queries $_qc, published $_pub, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tr '\n' ' ')"
-	if [ -z "$_cn" ] || [ "$_kn" -lt "$CK_CALLS" ] || ! grep -Fxq "$CK_LINE" "$CLKT" 2>/dev/null; then
-		SETUP=1
-		[ -z "$_cn" ] || docker rm -f "$_cn" >/dev/null 2>&1
-		rm -rf "$ISO/testdata"
-		return 1
-	fi
-	reached
-	_ok=0
-	case $CK in
-	inside-boundary)
-		[ "$RS" = 0 ] && [ "$_pub" = yes ] && ! grep -Fq 'dev-run: cleanup_failed' "$TMP/rerr" && [ "$_cst" = absent ] && _ok=1
-		;;
-	exhausted-admission)
-		[ "$RS" = 125 ] && [ "$_pub" = no ] && grep -Fq "dev-run: cleanup_failed container=$_cn" "$TMP/rerr" && [ "$_cst" = absent ] && [ "$_qc" = 0 ] && _ok=1
-		;;
-	err-t0)
-		[ "$RS" = 125 ] && [ "$_pub" = no ] && grep -Fq "dev-run: cleanup_failed container=$_cn" "$TMP/rerr" && [ "$_cst" = absent ] && [ "$_qc" = 0 ] && [ "$_kn" = "$CK_CALLS" ] && _ok=1
-		;;
-	err-continuation)
-		[ "$RS" = 125 ] && [ "$_pub" = no ] && grep -Fq "dev-run: cleanup_failed container=$_cn" "$TMP/rerr" && [ "$_cst" = absent ] && [ "$_qc" = 1 ] && [ "$_kn" = "$CK_CALLS" ] && _ok=1
-		;;
-	*)
-		[ "$RS" = 125 ] && [ "$_pub" = no ] && grep -Fq "dev-run: cleanup_failed container=$_cn" "$TMP/rerr" && [ "$_cst" = absent ] && _ok=1
-		;;
-	esac
-	docker rm -f "$_cn" >/dev/null 2>&1
-	rm -rf "$ISO/testdata"
-	[ "$_ok" = 1 ]
-}
-gclock() { # gclock NAME [Q [OLD NEW]...]: the scripted-clock fault copy (Q: with the counting query seam) plus optional mutant replacements
-	_gcn=$1
-	_gcq=$2
-	shift 2
-	if [ "$_gcq" = Q ]; then
-		gvariant "$_gcn" controller.go "$CLKSEAM_OLD" "$CLKSEAM_NEW" "$CLKDEF_OLD" "$CLKDEF_NEW" "$QOLD" "$QCOUNT_NEW" "$@"
-	else
-		gvariant "$_gcn" controller.go "$CLKSEAM_OLD" "$CLKSEAM_NEW" "$CLKDEF_OLD" "$CLKDEF_NEW" "$@"
-	fi
-}
-gclock fault-clock N
-gclock fault-clock-q Q
-gclock mut-clock-t0-ignored Q 'for err == nil && len(pend) > 0 { // no reconciliation window without a reading' '_ = err
-	for len(pend) > 0 { // no reconciliation window without a reading'
-gclock mut-clock-admit-ignored N 'if err != nil { // an unusable clock admits no further confirmation of any name
-				pend = append(next, pend[i:]...)
-				break confirm
-			}' '_ = err'
-gclock mut-clock-monotonic-removed N 'if v < 0 || v < c.lastClock {' 'if v < 0 {'
-gclock mut-clock-resolution-grace N 'if done, err := c.now(); err != nil || done >= end {' 'if done, err := c.now(); err != nil || done >= end+10000000 {'
-gclock mut-clock-grace-250 N 'if done, err := c.now(); err != nil || done >= end {' 'if done, err := c.now(); err != nil || done >= end+250000000 {'
-gclock mut-clock-grace-1s N 'if done, err := c.now(); err != nil || done >= end {' 'if done, err := c.now(); err != nil || done >= end+1000000000 {'
-gclock mut-clock-boundary-inclusive N 'if done, err := c.now(); err != nil || done >= end {' 'if done, err := c.now(); err != nil || done > end {'
-gclock mut-clock-exhaust-ignored Q 'if left < 1000000 {' 'if false {'
-gclock mut-clock-continue-ignored Q 'if err != nil || end-at <= 1000000000 {' 'if (err != nil && false) || end-at <= 1000000000 {'
-CK=err-t0
-CK_CALLS=1
-ck_script '1 err' '2 1000000000'
-redgreen "closure clock read failing at the reconciliation start: status-ignoring mutant" a_clock_case "$MUT/mut-clock-t0-ignored.sh" "$MUT/fault-clock-q.sh"
-CK=invalid-admission
-CK_CALLS=2
-ck_script '2 bad'
-redgreen "closure clock reading that is out of range at a query admission: status-ignoring mutant" a_clock_case "$MUT/mut-clock-admit-ignored.sh" "$MUT/fault-clock.sh"
-CK=backward-completion
-CK_CALLS=3
-ck_script '3 10000000'
-redgreen "closure clock stepping backward at a query completion: monotonic-check-removed mutant" a_clock_case "$MUT/mut-clock-monotonic-removed.sh" "$MUT/fault-clock.sh"
-CK=late-boundary
-CK_CALLS=3
-ck_script '3 1015000000000'
-redgreen "closure completion read exactly at the deadline (late, resolution charge 0): 10 ms resolution-grace mutant" a_clock_case "$MUT/mut-clock-resolution-grace.sh" "$MUT/fault-clock.sh"
-redgreen "closure completion read exactly at the deadline (late): inclusive-comparison mutant" a_clock_case "$MUT/mut-clock-boundary-inclusive.sh" "$MUT/fault-clock.sh"
-CK=late-100
-CK_CALLS=3
-ck_script '3 1015100000000'
-redgreen "closure completion read 15.10 s after the start (a tenth of a second late): 250 ms-grace mutant" a_clock_case "$MUT/mut-clock-grace-250.sh" "$MUT/fault-clock.sh"
-CK=late-600
-CK_CALLS=3
-ck_script '3 1015600000000'
-redgreen "closure completion read 15.60 s after the start (six tenths of a second late): one-second-grace mutant" a_clock_case "$MUT/mut-clock-grace-1s.sh" "$MUT/fault-clock.sh"
-CK=inside-boundary
-CK_CALLS=3
-ck_script '3 1014999999999'
-holds "closure completion read one nanosecond before the deadline is inside: admitted, published and the container closed" a_clock_case "$MUT/fault-clock.sh"
-# a remaining budget under 1 ms at a query admission starts no query, and a clock failure at the loop-continuation reading ends the loop
-CK=exhausted-admission
-CK_CALLS=2
-ck_script '2 1014999500000'
-redgreen "closure query admission with 0.5 ms of the window left: admission-guard-removed mutant starts a query" a_clock_case "$MUT/mut-clock-exhaust-ignored.sh" "$MUT/fault-clock-q.sh"
-CK=err-continuation
-CK_CALLS=4
-ck_script '4 err'
-redgreen "closure clock reading failing at the loop-continuation check with a name still pending: status-ignoring mutant keeps looping" a_clock_case "$MUT/mut-clock-continue-ignored.sh" "$MUT/fault-clock-q.sh"
-
-# a clock that fails or steps backward ends the whole confirmation phase for every outstanding name. Two names are issued (the container and the first validator, which a capture whose child leaves empty files
-# reaches without a browser). Readings count as above: 2 and 3 the admission and completion of the first name, 4 and 5 those of the second. The first name is confirmed by one query; the failure then admits no
-# further confirmation of either name, and both stay failed.
-a_clock_multi() { # a_clock_multi RUNNER (CK, CK_CALLS and CK_LINE globals)
-	rm -f "$CLKN" "$CLKV" "$QCALLS" "$CLKT"
-	CAP=$(capdir)
-	rrlog "$ISO" "$1" --capture "$CAP" -- sh -c true
-	_cn=$(cname)
-	_vn=${_cn}-v-dev-desktop
-	cstate "$_cn"
-	_cst=$CST
-	cstate "$_vn"
-	_vst=$CST
-	_kn=$(cat "$CLKN" 2>/dev/null)
-	case $_kn in '' | *[!0-9]*) _kn=0 ;; esac
-	_qc=$({ wc -c <"$QCALLS"; } 2>/dev/null | tr -d ' ')
-	case $_qc in '' | *[!0-9]*) _qc=0 ;; esac
-	_runs=$(grep -Ec '^S [^ ]+ [0-9]+\.[0-9][0-9] run ' "$TMP/dlog")
-	OBS="$CK: status $RS, names $_cn $_cst and $_vn $_vst, $_runs run records, clock readings $_kn (targeted reading $CK_CALLS, scripted line '$CK_LINE' consumed: $(grep -Fxc "$CK_LINE" "$CLKT" 2>/dev/null)), confirmation queries $_qc, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tr '\n' ' ')"
-	if [ -z "$_cn" ] || [ "$_runs" != 2 ] || [ "$_kn" -lt "$CK_CALLS" ] || ! grep -Fxq "$CK_LINE" "$CLKT" 2>/dev/null; then
-		SETUP=1
-		[ -z "$_cn" ] || docker rm -f "$_cn" "$_vn" >/dev/null 2>&1
-		rm -rf "$ISO/$CAP"
-		return 1
-	fi
-	reached
-	_ok=0
-	[ "$RS" = 125 ] && grep -Fq "dev-run: cleanup_failed container=$_cn" "$TMP/rerr" && grep -Fq "dev-run: cleanup_failed container=$_vn" "$TMP/rerr" &&
-		[ "$_qc" = 1 ] && [ "$_kn" = "$CK_CALLS" ] && [ "$_cst" = absent ] && [ "$_vst" = absent ] && _ok=1
-	docker rm -f "$_cn" "$_vn" >/dev/null 2>&1
-	rm -rf "$ISO/$CAP"
-	[ "$_ok" = 1 ]
-}
-MULTI_ADM_OLD='if err != nil { // an unusable clock admits no further confirmation of any name
-				pend = append(next, pend[i:]...)
-				break confirm
-			}'
-MULTI_ADM_NEW='if err != nil {
-				fail(n)
-				continue
-			}'
-MULTI_CMP_OLD='fail(n)
-				if err != nil {
-					pend = append(next, pend[i:]...)
-					break confirm
-				}
-				next = append(next, n)'
-MULTI_CMP_NEW='fail(n)
-				next = append(next, n)'
-gclock mut-clock-multi-admit Q "$MULTI_ADM_OLD" "$MULTI_ADM_NEW"
-gclock mut-clock-multi-cmp Q "$MULTI_CMP_OLD" "$MULTI_CMP_NEW"
-CK=multi-admission-err
-CK_CALLS=4
-ck_script '4 err'
-redgreen "closure clock failing at the second name's admission with later valid readings: the per-name-continue mutant keeps confirming" a_clock_multi "$MUT/mut-clock-multi-admit.sh" "$MUT/fault-clock-q.sh"
-CK=multi-completion-err
-CK_CALLS=3
-ck_script '3 err'
-redgreen "closure clock failing at the first name's completion with later valid readings: the continue mutant admits the second name" a_clock_multi "$MUT/mut-clock-multi-cmp.sh" "$MUT/fault-clock-q.sh"
-CK=multi-backward
-CK_CALLS=4
-ck_script '4 10000000'
-redgreen "closure clock stepping backward at the second name's admission: the per-name-continue mutant keeps reading" a_clock_multi "$MUT/mut-clock-multi-admit.sh" "$MUT/fault-clock-q.sh"
-
-# stalled validator: killed by the in-container 10 s + 1 s, within the 30 s budget
-a_stalled_validator() { # holds when a stalled validator is killed by its own native 10 s + 1 s and the run ends within the shared 30 s transfer budget. Both intervals start at the logging shim's own reading before the validator's
-	# docker run (the effect), never at a later first observation, so each reported duration really is an upper bound of the lifetime it names.
-	CAP=$(capdir)
-	bg_runlog stall "$1" --capture "$CAP" -- sh -c "${BASE}shoot_all"
-	_c=$(bg_ctr stall) || { OBS="no container"; SETUP=1; return 1; }
-	_vn=boxset-dev-${_c#boxset-dev-}-v-dev-desktop
-	_seen=0
-	_tg=0
-	_i=0
-	while kill -0 "$BG_PID" 2>/dev/null && [ "$_i" -lt 600 ]; do
-		cstate "$_vn"
-		if [ "$CST" = present ]; then
-			_seen=1
-		elif [ "$CST" = absent ] && [ "$_seen" = 1 ] && [ "$_tg" = 0 ]; then
-			mono_ns && _tg=$MONO_NS
-		fi
-		sleep 1
-		_i=$((_i + 1))
-	done
-	mono_ns || { OBS="the monotonic clock could not be read at the end of the run"; SETUP=1; bg_end stall; return 1; }
-	_t2=$MONO_NS
-	bg_end stall
-	dlogs_same stall || return 1
-	_vs=
-	_vl=$(grep -E -- "^S [^ ]+ [0-9]+\.[0-9][0-9] run .* --name $_vn " "$TMP/stall.dlog" 2>/dev/null)
-	if [ "$(printf '%s\n' "$_vl" | grep -c .)" = 1 ]; then
-		set -- $_vl
-		mono_parse "$3" && _vs=$MONO_NS
-	fi
-	[ -n "$_vs" ] || { OBS="no single shim run record of the validator, so no interval can start before its effect"; SETUP=1; return 1; }
-	[ "$_seen" = 1 ] && [ "$_tg" != 0 ] || { OBS="the validator was never seen present and then absent"; SETUP=1; return 1; }
-	_dur=$((_t2 + MONO_RES - _vs))
-	_vlife=$((_tg + MONO_RES - _vs))
-	OBS="status $RS, from the validator's own run record: the run ended within $((_dur / 1000000)) ms and the validator was first seen gone within $((_vlife / 1000000)) ms (upper bounds)"
-	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: capture_copy_failed' "$TMP/rerr"; } || [ "$_dur" -gt 30000000000 ] || [ "$_vlife" -gt 20000000000 ]; } && reached
-	cstate "$_vn"
-	[ "$_dur" -le 30000000000 ] && [ "$_vlife" -le 20000000000 ] && [ "$RS" = 125 ] && grep -Fq 'dev-run: capture_copy_failed' "$TMP/rerr" && [ "$CST" = absent ]
-}
-
-gvariant fault-stalled controller.go '"/usr/local/libexec/boxset/capture-check", "-name", name, "-challenge", c.challenge}' '"/usr/bin/sleep", "100"}'
-gvariant mut-stalled-unbounded controller.go '"/usr/local/libexec/boxset/capture-check", "-name", name, "-challenge", c.challenge}' '"/usr/bin/sleep", "100"}' '"timeout", "--kill-after=2s", strconv.Itoa(left) + "s", "docker", "run",' '"docker", "run",' '"/usr/bin/timeout", "--kill-after=1s", "10s", ' '"/usr/bin/env", ' 'bound: validatorBound(left),' 'bound: time.Hour,'
-redgreen "stalled validator (native timeouts removed mutant runs past the 30 s budget)" a_stalled_validator "$MUT/mut-stalled-unbounded.sh" "$MUT/fault-stalled.sh"
-# only the in-container timeout removed: the outer wrapper alone ends the validator, at the transfer budget rather than at its own native 10 s + 1 s
-gvariant mut-stalled-inner-removed controller.go '"/usr/local/libexec/boxset/capture-check", "-name", name, "-challenge", c.challenge}' '"/usr/bin/sleep", "100"}' '"/usr/bin/timeout", "--kill-after=1s", "10s", ' '"/usr/bin/env", '
-redgreen "stalled validator (inner in-container timeout removed alone: only the outer wrapper ends it, at the transfer budget)" a_stalled_validator "$MUT/mut-stalled-inner-removed.sh" "$MUT/fault-stalled.sh"
-
-# F1: acquired-object authority (DIR and feature-parent swaps, first-part rename)
-swap_control() { # swap_control RUNNER MODE: sets RS and CAP; MODE dir | parent
-	CAP=$(capdir)
-	rg_reset
-	bg_run swapc "$1" --capture "$CAP" -- sh -c "${BASE}shoot_all; $CBAR"
-	_c=$(bg_ctr swapc) || { RS=125; SETUP=1; return 1; }
-	if bg_wait "$_c" /tmp/ready; then
-		reached
-		case $2 in
-		dir)
-			mv "$ISO/$CAP" "$ISO/$CAP.moved"
-			ln -s "$CANARY" "$ISO/$CAP"
-			;;
-		parent)
-			mv "$ISO/.devrites/work/boxset-test" "$ISO/.devrites/work/boxset-test.moved"
-			ln -s "$CANARY" "$ISO/.devrites/work/boxset-test"
-			;;
-		esac
-		bg_touch "$_c" /tmp/go || SETUP=1
-	else
-		SETUP=1
-		kill -KILL "$BG_PID" 2>/dev/null
-	fi
-	bg_end swapc
-}
-CS_BEFORE=$(canary_state)
-swap_control "$RUNNER" dir
-if [ "$RS" = 125 ] && grep -Fq 'dev-run: capture_root_changed' "$TMP/rerr"; then pass "DIR swapped for a symlink mid-run gives capture_root_changed"; else fail "DIR swap" "status $RS"; fi
-expect "canary state unchanged (DIR swap)" "$(canary_state)" "$CS_BEFORE"
-expect "moved object holds nothing (DIR swap)" "$(find "$ISO/$CAP.moved" -mindepth 1 | wc -l | tr -d ' ')" 0
-rm -rf "$ISO/$CAP.moved"
-rm -f "$ISO/$CAP"
-CS_BEFORE=$(canary_state)
-swap_control "$RUNNER" parent
-if [ "$RS" = 125 ] && grep -Fq 'dev-run: capture_root_changed' "$TMP/rerr"; then pass "feature parent .devrites/work/<slug> swapped for a symlink gives capture_root_changed"; else fail "parent swap" "status $RS"; fi
-expect "canary state unchanged (parent swap)" "$(canary_state)" "$CS_BEFORE"
-if find "$CANARY" -name '*.png' -o -name 'capture.manifest' -o -name '.*.part' | grep -q .; then fail "parent swap canary" "capture bytes reached the canary"; else pass "no capture bytes reached the canary under a parent swap"; fi
-rm -f "$ISO/.devrites/work/boxset-test"
-mv "$ISO/.devrites/work/boxset-test.moved" "$ISO/.devrites/work/boxset-test"
-
-# moving DIR outside after the first complete .part (fault-copy barrier). The barrier loops are
-# bounded and record their subshell pid so a forced runner loss can reap exactly that helper.
-a_dir_moved_at_transfer() { # holds when DIR moved away after the first part is capture_root_changed
-	rm -rf "$TMP/moved-out"
-	find "$BAR" -mindepth 1 -delete
-	CAP=$(capdir)
-	bg_run movd "$1" --capture "$CAP" -- sh -c "${BASE}shoot_all"
-	_i=0
-	while [ ! -e "$BAR/ready" ] && [ "$_i" -lt 900 ]; do
-		kill -0 "$BG_PID" 2>/dev/null || break
-		sleep 1
-		_i=$((_i + 1))
-	done
-	[ -e "$BAR/ready" ] || { OBS="barrier never reached"; SETUP=1; bg_end movd; return 1; }
-	mv "$ISO/$CAP" "$TMP/moved-out" || { OBS="the approved DIR could not be moved"; SETUP=1; : >"$BAR/go"; bg_end movd; return 1; }
-	: >"$BAR/go"
-	bg_end movd
-	_left=$(find "$TMP/moved-out" -mindepth 1 | wc -l | tr -d ' ')
-	OBS="status $RS, moved object holds $_left entries, approved path $([ -e "$ISO/$CAP" ] && echo present || echo absent)"
-	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: capture_root_changed' "$TMP/rerr"; } || { [ "$RS" = 0 ] && grep -Fq 'DEV-RUN-CAPTURE-PASS' "$TMP/rout"; }; } && reached
-	_ok=0
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: capture_root_changed' "$TMP/rerr" && ! grep -Fq 'DEV-RUN-CAPTURE-PASS' "$TMP/rout" && [ "$_left" = 0 ] && [ ! -e "$ISO/$CAP" ] && _ok=1
-	rm -rf "$TMP/moved-out"
-	[ "$_ok" = 1 ]
-}
-gvariant fault-dir-barrier controller.go 'sum += pr.n // staged and checked' 'sum += pr.n // staged and checked
-		if name == "dev-desktop" { '"$(gobar 180)"' }'
-holds "DIR moved outside after the first .part: capture_root_changed, no PASS, moved object emptied, approved path absent" a_dir_moved_at_transfer "$MUT/fault-dir-barrier.sh"
-
-# Acquisition authority, observed at the first-write seam. The seam is the first producer of any
-# staged byte (the pipeline's output file is opened with it), so the assertion looks into the
-# pre-swapped object while the runner is held there, before any cleanup can erase a write. The
-# original must never reach the seam; the acquisition-check-removed mutant reaches it with a
-# staged file already in the moved object. The final-authority check has its own control below.
-FIRSTWRITE_OLD='// the staged raw file exists; the exporter has not run'
-gvariant fault-first-write controller.go "$FIRSTWRITE_OLD" "$FIRSTWRITE_OLD
-		$(gobar 60)"
-gvariant mut-no-acquisition-check controller.go "$FIRSTWRITE_OLD" "$FIRSTWRITE_OLD
-		$(gobar 60)" 'if !c.captureAuthority() {' 'if false {'
-a_pre_swapped_acquisition() { # holds when a DIR swapped before the first write is refused with zero writes into the moved object
-	rm -rf "$TMP/pre-moved"
-	find "$BAR" -mindepth 1 -delete
-	find "$ISO/.devrites/work/boxset-test" -maxdepth 1 -name 'screenshots-*' -exec rm -rf {} +
-	CAP=$(capdir)
-	bg_run preswap "$1" --capture "$CAP" -- sh -c "${BASE}shoot_all; $CBAR"
-	_c=$(bg_ctr preswap) || { OBS="no container"; SETUP=1; return 1; }
-	bg_wait "$_c" /tmp/ready || { OBS="not ready"; SETUP=1; kill -KILL "$BG_PID" 2>/dev/null; return 1; }
-	{ mv "$ISO/$CAP" "$TMP/pre-moved" && mkdir "$ISO/$CAP"; } || { OBS="the pre-swap could not be performed"; SETUP=1; bg_touch "$_c" /tmp/go; bg_end preswap; return 1; }
-	bg_touch "$_c" /tmp/go || { OBS="the child could not be released"; SETUP=1; kill -KILL "$BG_PID" 2>/dev/null; return 1; }
-	_i=0
-	while [ ! -e "$BAR/ready" ] && kill -0 "$BG_PID" 2>/dev/null && [ "$_i" -lt 300 ]; do
-		sleep 1
-		_i=$((_i + 1))
-	done
-	_reached=no
-	_seen=0
-	if [ -e "$BAR/ready" ]; then
-		_reached=yes
-		_seen=$(find "$TMP/pre-moved" -mindepth 1 | wc -l | tr -d ' ')
-		: >"$BAR/go"
-	fi
-	bg_end preswap
-	OBS="status $RS, first-write seam reached: $_reached, entries in the moved object at that seam: $_seen"
-	{ { [ "$RS" = 125 ] && grep -Fq 'dev-run: capture_root_changed' "$TMP/rerr"; } || [ "$_reached" = yes ]; } && reached
-	_ok=0
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: capture_root_changed' "$TMP/rerr" && [ "$_reached" = no ] && [ "$_seen" = 0 ] && _ok=1
-	rm -rf "$TMP/pre-moved" "$ISO/$CAP"
-	[ "$_ok" = 1 ]
-}
-redgreen "acquisition-check-removed mutant stages a file in the pre-swapped object (observed at the first-write seam)" a_pre_swapped_acquisition "$MUT/mut-no-acquisition-check.sh" "$MUT/fault-first-write.sh"
-gvariant mut-no-final-check controller.go 'sum += pr.n // staged and checked' 'sum += pr.n // staged and checked
-		if name == "dev-desktop" { '"$(gobar 180)"' }' 'if !c.captureAuthority() {' 'if !c.captureAuthorityKEEP() {' 'if !c.captureAuthority() {' 'if false {' 'if !c.captureAuthority() {' 'if false {' 'captureAuthorityKEEP' 'captureAuthority'
-a_final_authority() { # holds when a DIR moved at the transfer barrier never publishes into the moved object
-	a_dir_moved_at_transfer "$1"
-}
-redgreen "final-check-removed mutant publishes into the moved object" a_final_authority "$MUT/mut-no-final-check.sh" "$MUT/fault-dir-barrier.sh"
-
-# ===== 9b. the native lifecycle controller: cancellation, repeated and inherited signals, bootstrap and exec, relative PATH and TMPDIR (T02/T26/T31, B05/B08) ======
-# Positions: C is the container, V1..V4 the validators of dev-desktop, dev-mobile, preview-desktop and preview-mobile. Every cell runs through the logging shim: $TMP/cc.dlog
-# holds the S records of every Docker call and $TMP/cc.dlog.q the E records of every `ps`; "after the signal" means the DLOG lines past the line count taken when the signal is sent.
-# A compiled barrier sits at a real statement of the controller's start primitive: the controller's PID goes to $BAR/helper.pid, $BAR/ready is created and $BAR/go releases it.
-CC_NAME=cc
-CC_KIND=
-CC_POS=
-CC_ACK=ack
-CC_DELAY=0
-CC_NOACK_SLEEP=1
-CC_BAD=
-CC_RID=
-SD_SIG=
-SD_MODE=
-RS_KIND=
-BOOT_MODE=
-pos_index() { case $1 in C) printf 0 ;; V1) printf 1 ;; V2) printf 2 ;; V3) printf 3 ;; V4) printf 4 ;; esac; }
-pos_name() { # pos_name RID POS
-	case $2 in
-	C) printf 'boxset-dev-%s' "$1" ;;
-	V1) printf 'boxset-dev-%s-v-dev-desktop' "$1" ;;
-	V2) printf 'boxset-dev-%s-v-dev-mobile' "$1" ;;
-	V3) printf 'boxset-dev-%s-v-preview-desktop' "$1" ;;
-	V4) printf 'boxset-dev-%s-v-preview-mobile' "$1" ;;
-	esac
-}
-pos_cond() { # the Go condition that matches the call issuing POS's name
-	case $1 in
-	C) printf 's.issue == c.ctr' ;;
-	V1) printf 'strings.HasSuffix(s.issue, "-v-dev-desktop")' ;;
-	V2) printf 'strings.HasSuffix(s.issue, "-v-dev-mobile")' ;;
-	V3) printf 'strings.HasSuffix(s.issue, "-v-preview-desktop")' ;;
-	V4) printf 'strings.HasSuffix(s.issue, "-v-preview-mobile")' ;;
-	esac
-}
-pos_hold() { # the shim pattern that matches the real run of POS
-	case $1 in
-	C) printf 'run -d --rm --name' ;;
-	V1) printf -- '-v-dev-desktop' ;;
-	V2) printf -- '-v-dev-mobile' ;;
-	V3) printf -- '-v-preview-desktop' ;;
-	V4) printf -- '-v-preview-mobile' ;;
-	esac
-}
-CC_START_OLD='func (c *ctl) start(s *callSpec) (*proc, error) {
-	if s.kind != kReconcile && c.cancelled.Load() {'
-CC_GAP_OLD='cmd := c.command(s.argv)'
-CC_CHECK_OLD='if s.kind != kReconcile && c.cancelled.Load() {'
-# the three insertion points: before N's start checkpoint (pre), between the checkpoint and the start (gap), and a non-existent argv0 for N's start alone (startfail)
-cc_pre_new() { printf 'func (c *ctl) start(s *callSpec) (*proc, error) {\n\tif %s {\n\t\t%s\n\t}\n\tif s.kind != kReconcile && c.cancelled.Load() {' "$(pos_cond "$1")" "$(gobar 180)"; }
-cc_gap_new() { printf 'if %s {\n\t\t%s\n\t}\n\tcmd := c.command(s.argv)' "$(pos_cond "$1")" "$(gobar 180)"; }
-cc_sf_new() { printf 'argv := s.argv\n\tif %s {\n\t\targv = []string{"/nonexistent/dev-run-argv0"}\n\t}\n\tcmd := c.command(argv)' "$(pos_cond "$1")"; }
-cc_build() { # cc_build NAME pre|gap|startfail POS [OLD NEW]...: the compiled copy of one cell
-	_cbn=$1
-	_cbk=$2
-	_cbp=$3
-	shift 3
-	case $_cbk in
-	pre) gvariant "$_cbn" controller.go "$CC_START_OLD" "$(cc_pre_new "$_cbp")" "$@" ;;
-	gap) gvariant "$_cbn" controller.go "$CC_GAP_OLD" "$(cc_gap_new "$_cbp")" "$@" ;;
-	startfail) gvariant "$_cbn" controller.go "$CC_GAP_OLD" "$(cc_sf_new "$_cbp")" "$@" ;;
-	esac
-}
-cc_wait_file() { # cc_wait_file FILE: FILE exists (a barrier or hold was reached) while the runner lives, within 900 s
-	_cwi=0
-	while [ ! -e "$1" ] && kill -0 "$BG_PID" 2>/dev/null && [ "$_cwi" -lt 900 ]; do
-		sleep 1
-		_cwi=$((_cwi + 1))
-	done
-	[ -e "$1" ]
-}
-cc_ack() { # cc_ack SECONDS: the controller's existing interrupted line is on its stderr
-	_cai=0
-	while [ "$(grep -c '^dev-run: interrupted$' "$TMP/$CC_NAME.err" 2>/dev/null)" = 0 ] && [ "$_cai" -lt "$1" ]; do
-		sleep 1
-		_cai=$((_cai + 1))
-	done
-	[ "$(grep -c '^dev-run: interrupted$' "$TMP/$CC_NAME.err" 2>/dev/null)" -ge 1 ]
-}
-cc_abort() { # cc_abort: end a stuck case, its process group included, and collect it
-	kill -s KILL -- "-$BG_PID" 2>/dev/null
-	kill -KILL "$BG_PID" 2>/dev/null
-	wait "$BG_PID" 2>/dev/null || true
-}
-cc_setup() { # cc_setup MESSAGE: an unestablished premise is setup, never target evidence
-	OBS="$OBS; $1"
-	SETUP=1
-	: >"$BAR/go"
-	: >"$BAR/hold.go"
-	: >"$BAR/consumer.go"
-	sleep 1
-	cc_abort
-	bg_end "$CC_NAME"
-}
-cc_rid() { # cc_rid: CC_RID is the run id of the case, from the shim's first owned name or else the controller's own argv
-	CC_RID=$(grep -o -m1 'boxset-dev-[0-9a-f]\{16\}' "$TMP/$CC_NAME.dlog" 2>/dev/null | head -n 1)
-	CC_RID=${CC_RID#boxset-dev-}
-	if [ -z "$CC_RID" ]; then CC_RID=$(tr '\0' '\n' <"/proc/$BG_PID/cmdline" 2>/dev/null | sed -n 4p); fi
-	case $CC_RID in
-	[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-	*) CC_RID= ;;
-	esac
-}
-cc_names() { # the owned names of the issued positions, in the DLOG's run order
-	grep -E '^S [^ ]+ [0-9]+\.[0-9][0-9] run ' "$TMP/$CC_NAME.dlog" 2>/dev/null | sed -n 's/.* --name \([^ ]*\) .*/\1/p'
-}
-cc_named() { # cc_named NAME: the number of DLOG records naming exactly NAME
-	_cnn=0
-	while read -r _k _t _s _r; do
-		case " $_r " in *" $1 "* | *"=^$1\$ "*) _cnn=$((_cnn + 1)) ;; esac
-	done <"$TMP/$CC_NAME.dlog"
-	printf '%s' "$_cnn"
-}
-cc_runs() { # cc_runs NAME: the number of `run` records naming NAME
-	_cnr=0
-	while read -r _k _t _s _r; do
-		case " $_r " in *" run "*" --name $1 "*) _cnr=$((_cnr + 1)) ;; esac
-	done <"$TMP/$CC_NAME.dlog"
-	printf '%s' "$_cnr"
-}
-cc_cmds() { # cc_cmds ps|rm|run: the number of records of that Docker command
-	_cnc=0
-	while read -r _k _t _s _r; do
-		case $_r in "$1 "*) _cnc=$((_cnc + 1)) ;; esac
-	done <"$TMP/$CC_NAME.dlog"
-	printf '%s' "$_cnc"
-}
-cc_psfirst() { # cc_psfirst NAME...: the first ps queries of the case are exactly NAME... in order (the first-phase pass of the closure)
-	_cpw=$*
-	_cpg=$(grep -E '^S [^ ]+ [0-9]+\.[0-9][0-9] ps -a --filter name=\^' "$TMP/$CC_NAME.dlog" | sed -n 's/.*name=^\([^ ]*\)\$ --format.*/\1/p' | head -n "$#" | tr '\n' ' ')
-	[ "${_cpg% }" = "${_cpw% }" ]
-}
-cc_after() { # cc_after SIGN [ALLOWED_RUN]: every DLOG record past line SIGN is an exact-name ps or an rm -f of an issued name, except the one explicitly committed run ALLOWED_RUN
-	tail -n +"$(($1 + 1))" "$TMP/$CC_NAME.dlog" >"$TMP/cc.after"
-	_cab=0
-	_cau=0
-	_cal=$(cc_names | tr '\n' ' ')
-	while read -r _ak _at _as _ar; do
-		case $_ar in
-		"ps -a --filter name=^"*'$ --format {{.Names}}')
-			_cx=${_ar#"ps -a --filter name=^"}
-			_cx=${_cx%'$ --format {{.Names}}'}
-			;;
-		"rm -f "*) _cx=${_ar#"rm -f "} ;;
-		"run "*" --name "*)
-			_cx=${_ar#*" --name "}
-			_cx=${_cx%% *}
-			if [ -n "${2:-}" ] && [ "$_cx" = "$2" ] && [ "$_cau" = 0 ]; then
-				_cau=1
-				continue
-			fi
-			_cab=$((_cab + 1))
-			continue
-			;;
-		*)
-			_cab=$((_cab + 1))
-			continue
-			;;
-		esac
-		case " $_cal " in *" $_cx "*) ;; *) _cab=$((_cab + 1)) ;; esac
-	done <"$TMP/cc.after"
-	[ "$_cab" = 0 ]
-}
-cc_procs() { # cc_procs RID: the number of live host processes whose cmdline holds the run id
-	_cpn=0
-	for _cpf in $(find /proc -maxdepth 2 -name cmdline -path '/proc/[0-9]*/cmdline' 2>/dev/null); do
-		case $(tr '\0' ' ' <"$_cpf" 2>/dev/null) in *"$1"*) _cpn=$((_cpn + 1)) ;; esac
-	done
-	printf '%s' "$_cpn"
-}
-cc_bad() { CC_BAD="$CC_BAD $1"; }
-# cc_handled SIGN [ALLOWED_RUN]: the assertions every handled-cancellation cell makes
-cc_handled() {
-	[ "$RS" = 125 ] || cc_bad "status-$RS"
-	[ "$(grep -c '^dev-run: interrupted$' "$TMP/rerr")" = 1 ] || cc_bad "interrupted-lines-$(grep -c '^dev-run: interrupted$' "$TMP/rerr")"
-	! grep -Fq DEV-RUN-CAPTURE-PASS "$TMP/rout" || cc_bad capture-pass
-	[ -z "$CAP" ] || [ ! -e "$ISO/$CAP" ] || cc_bad capture-dir-present
-	[ "$(find "$ISO/testdata" "$ISO/docs/spikes/issue-drafts" 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')" = "$_ccm0" ] || cc_bad host-map-names-changed
-	cc_after "$1" "${2:-}" || cc_bad work-after-the-signal
-}
-# cc_final: every issued name is absent by a final status-checked driver query read before any driver removal; no host process holds the run id
-cc_final() {
-	for _cfn in $(cc_names); do
-		OWNED="$OWNED $_cfn"
-		cstate "$_cfn"
-		[ "$CST" = absent ] || cc_bad "present-$_cfn"
-	done
-	[ -z "$CC_RID" ] || [ "$(cc_procs "$CC_RID")" = 0 ] || cc_bad host-process-left
-	for _cfn in $(cc_names); do docker rm -f "$_cfn" >/dev/null 2>&1; done
-}
-cc_later() { # cc_later IDX: the number of DLOG records naming a position at or after IDX
-	_clt=0
-	for _clp in C V1 V2 V3 V4; do
-		[ "$(pos_index "$_clp")" -ge "$1" ] || continue
-		_clt=$((_clt + $(cc_named "$(pos_name "$CC_RID" "$_clp")")))
-	done
-	printf '%s' "$_clt"
-}
-cc_earlier() { # cc_earlier IDX: the names of the positions before IDX, in order
-	for _cep in C V1 V2 V3 V4; do
-		[ "$(pos_index "$_cep")" -lt "$1" ] || continue
-		pos_name "$CC_RID" "$_cep"
-		printf ' '
-	done
-}
-a_cc() { # a_cc RUNNER (CC_KIND pre|gap|inflight|group|nativegrp|startfail|preissue, CC_POS, CC_ACK ack|noack, CC_DELAY 0|1)
-	CC_NAME=cc
-	CC_BAD=
-	CC_RID=
-	find "$BAR" -mindepth 1 -delete
-	_ccm0=$(find "$ISO/testdata" "$ISO/docs/spikes/issue-drafts" 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')
-	_ccr=$1
-	CAP=
-	if [ "$CC_POS" = C ]; then
-		set -- -- true
-	else
-		CAP=$(capdir)
-		set -- --capture "$CAP" -- sh -c "${BASE}shoot_all"
-	fi
-	DSHIM_HOLD=
-	case $CC_KIND in inflight | group | nativegrp) DSHIM_HOLD=$(pos_hold "$CC_POS") ;; esac
-	if [ "$CC_KIND" = group ]; then bg_runlog cc timeout 900 "$_ccr" "$@"; else bg_runlog cc "$_ccr" "$@"; fi
-	DSHIM_HOLD=
-	_ccs=0
-	case $CC_KIND in
-	startfail | preissue) bg_end cc ;;
-	*)
-		case $CC_KIND in pre | gap) _ccw=$BAR/ready ;; *) _ccw=$BAR/hold.ready ;; esac
-		if ! cc_wait_file "$_ccw"; then
-			cc_setup "the barrier or hold was never reached"
-			return 1
-		fi
-		cc_rid
-		_ccs=$(wc -l <"$TMP/cc.dlog" | tr -d ' ')
-		case $CC_KIND in
-		pre | gap)
-			kill -s TERM "$BG_PID"
-			if [ "$CC_DELAY" = 1 ]; then
-				if ! cc_wait_file "$BAR/consumer.ready"; then
-					cc_setup "the delayed consumer was never held"
-					return 1
-				fi
-				if [ "$(grep -c '^dev-run: interrupted$' "$TMP/cc.err")" != 0 ]; then
-					cc_setup "the acknowledgement appeared while the consumer was held"
-					return 1
-				fi
-				if [ "$CC_ACK" = noack ]; then
-					: >"$BAR/go"
-					sleep "$CC_NOACK_SLEEP"
-					: >"$BAR/consumer.go"
-				else
-					: >"$BAR/consumer.go"
-					if ! cc_ack 30; then
-						cc_setup "no acknowledgement after the consumer was released"
-						return 1
-					fi
-					kill -0 "$BG_PID" 2>/dev/null || cc_bad owner-not-alive
-					: >"$BAR/go"
-				fi
-			else
-				if ! cc_ack 30; then
-					cc_setup "no acknowledgement of the handled signal"
-					return 1
-				fi
-				: >"$BAR/go"
-			fi
-			;;
-		inflight | group)
-			if [ "$CC_KIND" = group ]; then kill -s TERM -- "-$BG_PID"; else kill -s TERM "$BG_PID"; fi
-			if ! cc_ack 30; then
-				cc_setup "no acknowledgement of the handled signal"
-				return 1
-			fi
-			sleep 2
-			kill -0 "$BG_PID" 2>/dev/null || cc_bad owner-died-in-flight
-			[ "$(wc -l <"$TMP/cc.dlog" | tr -d ' ')" = "$_ccs" ] || cc_bad new-record-while-held
-			if [ "$CC_KIND" = group ]; then kill -0 "$(cat "$BAR/hold.pid" 2>/dev/null)" 2>/dev/null || cc_bad native-group-gone; fi
-			: >"$BAR/hold.go"
-			;;
-		nativegrp)
-			_ccp=$(cat "$BAR/hold.pid" 2>/dev/null)
-			case $_ccp in
-			'' | *[!0-9]*)
-				cc_setup "no native process-group leader was recorded"
-				return 1
-				;;
-			esac
-			if ! kill -s TERM -- "-$_ccp"; then
-				cc_setup "the native group could not be signalled"
-				return 1
-			fi
-			sleep 3
-			: >"$BAR/hold.go"
-			;;
-		esac
-		bg_end cc
-		;;
-	esac
-	dlogs_same cc || return 1
-	[ -n "$CC_RID" ] || cc_rid
-	_cci=$(pos_index "$CC_POS")
-	_ccn=$(pos_name "$CC_RID" "$CC_POS")
-	case $CC_KIND in
-	startfail | preissue)
-		if [ "$CC_POS" = C ]; then grep -Fq -- '--target work' "$TMP/cc.dlog" && reached; else grep -Eq "$RUNNER_STARTED_RE" "$TMP/rerr" && reached; fi
-		;;
-	*) reached ;;
-	esac
-	[ -n "$CC_RID" ] || { [ "$CC_KIND" = startfail ] && [ "$CC_POS" = C ]; } || { OBS="$OBS; no run id"; SETUP=1; return 1; }
-	case $CC_KIND in
-	pre)
-		cc_handled "$_ccs"
-		[ "$(cc_later "$_cci")" = 0 ] || cc_bad "records-at-or-after-$CC_POS"
-		for _cen in $(cc_earlier "$_cci"); do [ "$(cc_runs "$_cen")" = 1 ] || cc_bad "runs-$_cen"; done
-		# shellcheck disable=SC2046
-		cc_psfirst $(cc_earlier "$_cci") || cc_bad first-phase-queries
-		;;
-	gap)
-		cc_handled "$_ccs" "$_ccn"
-		[ "$(cc_runs "$_ccn")" = 1 ] || cc_bad "runs-$CC_POS"
-		[ "$(grep -n -- " --name $_ccn " "$TMP/cc.dlog" | head -n 1 | cut -d: -f1)" -gt "$_ccs" ] || cc_bad "run-before-the-signal"
-		[ "$(cc_later "$((_cci + 1))")" = 0 ] || cc_bad "records-after-$CC_POS"
-		for _cen in $(cc_earlier "$_cci"); do [ "$(cc_runs "$_cen")" = 1 ] || cc_bad "runs-$_cen"; done
-		# shellcheck disable=SC2046
-		cc_psfirst $(cc_earlier "$_cci") "$_ccn" || cc_bad first-phase-queries
-		;;
-	inflight | group)
-		cc_handled "$_ccs"
-		[ "$(cc_runs "$_ccn")" = 1 ] || cc_bad "runs-$CC_POS"
-		[ "$(cc_later "$((_cci + 1))")" = 0 ] || cc_bad "records-after-$CC_POS"
-		! grep -Fq 'dev-run: cleanup_failed' "$TMP/rerr" || cc_bad cleanup-failed
-		# shellcheck disable=SC2046
-		cc_psfirst $(cc_earlier "$_cci") "$_ccn" || cc_bad first-phase-queries
-		;;
-	nativegrp)
-		[ "$RS" = 125 ] || cc_bad "status-$RS"
-		! grep -Fq 'dev-run: interrupted' "$TMP/rerr" || cc_bad interrupted-line
-		[ "$(cc_later "$((_cci + 1))")" = 0 ] || cc_bad "records-after-$CC_POS"
-		if [ "$CC_POS" = C ]; then
-			grep -Fq 'dev-run: container_start_failed' "$TMP/rerr" || cc_bad no-container_start_failed
-			grep -Fq "dev-run: cleanup_failed container=$_ccn" "$TMP/rerr" || cc_bad no-cleanup_failed-C
-			cc_psfirst "$_ccn" || cc_bad first-phase-query-C
-		else
-			grep -Fq 'dev-run: capture_copy_failed' "$TMP/rerr" || cc_bad no-capture_copy_failed
-			[ "$(cc_named "$_ccn")" -ge 1 ] || cc_bad "$CC_POS-never-queried"
-		fi
-		;;
-	startfail)
-		[ "$RS" = 125 ] || cc_bad "status-$RS"
-		! grep -Fq 'dev-run: interrupted' "$TMP/rerr" || cc_bad interrupted-line
-		if [ "$CC_POS" = C ]; then
-			grep -Fq 'dev-run: container_start_failed' "$TMP/rerr" || cc_bad no-container_start_failed
-			{ [ "$(cc_cmds ps)" = 0 ] && [ "$(cc_cmds rm)" = 0 ]; } || cc_bad "ps-or-rm-records"
-		else
-			grep -Fq 'dev-run: capture_copy_failed' "$TMP/rerr" || cc_bad no-capture_copy_failed
-			[ "$(cc_later "$_cci")" = 0 ] || cc_bad "records-at-or-after-$CC_POS"
-			# shellcheck disable=SC2046
-			cc_psfirst $(cc_earlier "$_cci") || cc_bad first-phase-queries
-		fi
-		;;
-	preissue)
-		[ "$RS" = 125 ] || cc_bad "status-$RS"
-		! grep -Fq 'dev-run: interrupted' "$TMP/rerr" || cc_bad interrupted-line
-		grep -Fq 'dev-run: capture_copy_failed' "$TMP/rerr" || cc_bad no-capture_copy_failed
-		[ "$(cc_later "$_cci")" = 0 ] || cc_bad "records-at-or-after-$CC_POS"
-		# shellcheck disable=SC2046
-		cc_psfirst $(cc_earlier "$_cci") || cc_bad first-phase-queries
-		;;
-	esac
-	cc_final
-	OBS="$CC_KIND($CC_POS): status $RS, run $CC_RID, failed predicates:${CC_BAD:- none}"
-	[ -z "$CC_BAD" ]
-}
-a_cc_noack() { # the acknowledgement-removed fixture: the start barrier is released while the consumer is still held
-	CC_ACK=noack
-	a_cc "$1"
-	_cnk=$?
-	CC_ACK=ack
-	return "$_cnk"
-}
-for P in C V1 V2 V3 V4; do
-	CC_POS=$P
-	cc_build "cc-pre-$P" pre "$P"
-	cc_build "cc-gap-$P" gap "$P"
-	cc_build "cc-sf-$P" startfail "$P"
-	CC_KIND=pre
-	holds "pre($P): TERM at the barrier before $P's start checkpoint, released after the acknowledgement, starts nothing at or after $P" a_cc "$MUT/cc-pre-$P.sh"
-	CC_KIND=gap
-	holds "gap($P): TERM between $P's checkpoint and its start leaves exactly its one committed create, then reconciliation only" a_cc "$MUT/cc-gap-$P.sh"
-	CC_KIND=startfail
-	holds "startfail($P): a non-existent argv0 for $P's start alone issues nothing and is that step's failure" a_cc "$MUT/cc-sf-$P.sh"
-done
-for P in C V2; do
-	CC_POS=$P
-	CC_KIND=inflight
-	holds "inflight($P): TERM while $P's create is held keeps the owner alive, starts nothing, and reconciles without cleanup_failed" a_cc "$RUNNER"
-	CC_KIND=group
-	holds "group($P): TERM to the runner's process group while $P's create is held (inflight window, native group untouched)" a_cc "$RUNNER"
-	CC_KIND=nativegrp
-	holds "nativegrp($P): TERM to $P's native process group fails its create, retained and reconciled, with no interrupted line" a_cc "$RUNNER"
-done
-CC_POS=V2
-CC_KIND=preissue
-gvariant cc-preissue-V2 controller.go 'if xr.startErr != nil {' 'if name == "dev-mobile" {
-			xr.status = 7
-		}
-		if xr.startErr != nil {'
-holds "pre-issue(V2): only V2's exporter returns 7 before its validator start: nothing names V2 or later, V1 reconciled" a_cc "$MUT/cc-preissue-V2.sh"
-# the cancellation latch is synchronized with its acknowledgement; the delayed-consumer fault holds before latching and the acknowledgement-removed fixture is caught
-CONS_OLD='if s != syscall.SIGPIPE {'
-CONS_NEW='if s != syscall.SIGPIPE {
-					_ = os.WriteFile("'$BAR'/consumer.ready", nil, 0o644)
-					for i := 0; i < 120; i++ {
-						if _, err := os.Stat("'$BAR'/consumer.go"); err == nil {
-							break
-						}
-						time.Sleep(time.Second)
-					}'
-for P in C V2; do
-	cc_build "cc-delay-pre-$P" pre "$P" "$CONS_OLD" "$CONS_NEW"
-	cc_build "cc-delay-gap-$P" gap "$P" "$CONS_OLD" "$CONS_NEW"
-	CC_POS=$P
-	for CC_KIND in pre gap; do
-		CC_DELAY=1
-		RG_GREEN_FN=a_cc
-		CC_NOACK_SLEEP=1
-		[ "$CC_KIND" != gap ] || CC_NOACK_SLEEP=3
-		redgreen "$CC_KIND($P) with a delayed signal consumer: the acknowledgement-removed fixture releases the barrier while the consumer is held and is caught" a_cc_noack "$MUT/cc-delay-$CC_KIND-$P.sh" "$MUT/cc-delay-$CC_KIND-$P.sh"
-		RG_GREEN_FN=
-		CC_DELAY=0
-		CC_NOACK_SLEEP=1
-	done
-done
-CC_KIND=pre
-# mutants of the controller, each judged on its own cell
-CC_POS=C
-CC_KIND=pre
-cc_build mut-no-cancel-check-C pre C "$CC_CHECK_OLD" 'if false {'
-redgreen "pre(C): no cancellation check before a start (a run record names C after the signal)" a_cc "$MUT/mut-no-cancel-check-C.sh" "$MUT/cc-pre-C.sh"
-CC_POS=V2
-cc_build mut-no-cancel-check-V2 pre V2 "$CC_CHECK_OLD" 'if false {'
-redgreen "pre(V2): no cancellation check before a start (a run record names V2 after the signal)" a_cc "$MUT/mut-no-cancel-check-V2.sh" "$MUT/cc-pre-V2.sh"
-cc_build mut-trackall-V2 pre V2 '	for _, name := range captureNames {
-		left := int(endSec - time.Now().Unix())' '	for _, nm := range captureNames {
-		c.issued = append(c.issued, c.ctr+"-v-"+nm)
-	}
-	for _, name := range captureNames {
-		left := int(endSec - time.Now().Unix())'
-redgreen "pre(V2): track-every-allocated-name mutant queries V2 to V4" a_cc "$MUT/mut-trackall-V2.sh" "$MUT/cc-pre-V2.sh"
-RECBEFORE_OLD='	if err := cmd.Start(); err != nil {
-		closeAll()
-		return nil, err
-	}
-	if s.issue != "" {
-		c.issued = append(c.issued, s.issue)
-	}'
-RECBEFORE_NEW='	if s.issue != "" {
-		c.issued = append(c.issued, s.issue)
-	}
-	if err := cmd.Start(); err != nil {
-		closeAll()
-		return nil, err
-	}'
-CC_KIND=startfail
-for P in C V2; do
-	CC_POS=$P
-	cc_build "mut-record-before-start-$P" startfail "$P" "$RECBEFORE_OLD" "$RECBEFORE_NEW"
-	redgreen "startfail($P): a name recorded before its start is queried" a_cc "$MUT/mut-record-before-start-$P.sh" "$MUT/cc-sf-$P.sh"
-done
-CC_POS=C
-CC_KIND=nativegrp
-gvariant mut-record-success-only controller.go "$SO1_OLD" "$SO1_NEW" "$SO2_OLD" "$SO2_NEW"
-redgreen "nativegrp(C): a name recorded only after a successful create is neither queried nor retained" a_cc "$MUT/mut-record-success-only.sh" "$RUNNER"
-CC_POS=V2
-CC_KIND=gap
-cc_build mut-cancel-exits-V2 gap V2 'c.intrOnce.Do(func() { c.say("interrupted") })' 'c.intrOnce.Do(func() { c.say("interrupted") })
-	os.Exit(125)'
-redgreen "gap(V2): an immediate exit on cancellation leaves C present" a_cc "$MUT/mut-cancel-exits-V2.sh" "$MUT/cc-gap-V2.sh"
-cc_build mut-cleanup-container-only-V2 gap V2 'names := append([]string(nil), c.issued...)' 'names := append([]string(nil), c.issued[:1]...)'
-redgreen "gap(V2): a closure over the container only never queries V1" a_cc "$MUT/mut-cleanup-container-only-V2.sh" "$MUT/cc-gap-V2.sh"
-CC_POS=C
-CC_KIND=inflight
-gvariant mut-cancel-kills-create controller.go 'if s.kind == kOther {' 'if s.kind != kReconcile {'
-redgreen "inflight(C): cancellation that kills the create leaves a retained failure" a_cc "$MUT/mut-cancel-kills-create.sh" "$RUNNER"
-# repeated signals and dispositions (T02/T26/T31): the first TERM is acknowledged once, later ones change nothing; HUP and INT cancel unless inherited ignored
-a_rs() { # a_rs RUNNER (RS_KIND create|reconcile, CC_POS C|V2): a second TERM while a create, or an owned reconciliation call, is held
-	CC_NAME=cc
-	CC_BAD=
-	CC_RID=
-	find "$BAR" -mindepth 1 -delete
-	_ccm0=$(find "$ISO/testdata" "$ISO/docs/spikes/issue-drafts" 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')
-	_ccr=$1
-	CAP=
-	DSHIM_HOLD=
-	case $RS_KIND in
-	create)
-		DSHIM_HOLD=$(pos_hold "$CC_POS")
-		if [ "$CC_POS" = C ]; then
-			set -- -- true
-		else
-			CAP=$(capdir)
-			set -- --capture "$CAP" -- sh -c "${BASE}shoot_all"
-		fi
-		;;
-	reconcile)
-		DSHIM_HOLD='ps -a --filter name=^boxset-dev-'
-		set -- -- sh -c "$CBAR"
-		;;
-	esac
-	bg_runlog cc "$_ccr" "$@"
-	DSHIM_HOLD=
-	if [ "$RS_KIND" = reconcile ]; then
-		_c=$(bg_ctr cc) || { cc_setup "no container"; return 1; }
-		OWNED="$OWNED $_c"
-		if ! bg_wait "$_c" /tmp/ready; then
-			cc_setup "the child never reached its barrier"
-			return 1
-		fi
-		_ccs=$(wc -l <"$TMP/cc.dlog" | tr -d ' ')
-		cc_rid
-		kill -s TERM "$BG_PID"
-		if ! cc_ack 30; then
-			cc_setup "no acknowledgement of the first TERM"
-			return 1
-		fi
-		if ! cc_wait_file "$BAR/hold.ready"; then
-			cc_setup "the owned reconciliation call was never held"
-			return 1
-		fi
-	else
-		if ! cc_wait_file "$BAR/hold.ready"; then
-			cc_setup "the create was never held"
-			return 1
-		fi
-		_ccs=$(wc -l <"$TMP/cc.dlog" | tr -d ' ')
-		cc_rid
-		kill -s TERM "$BG_PID"
-		if ! cc_ack 30; then
-			cc_setup "no acknowledgement of the first TERM"
-			return 1
-		fi
-	fi
-	kill -s TERM "$BG_PID" 2>/dev/null
-	sleep 2
-	kill -0 "$BG_PID" 2>/dev/null || cc_bad owner-died-on-the-second-signal
-	[ "$(grep -c '^dev-run: interrupted$' "$TMP/cc.err")" = 1 ] || cc_bad interrupted-lines-while-held
-	: >"$BAR/hold.go"
-	bg_end cc
-	dlogs_same cc || return 1
-	reached
-	[ -n "$CC_RID" ] || { OBS="$OBS; no run id"; SETUP=1; return 1; }
-	_cci=$(pos_index "$CC_POS")
-	_ccn=$(pos_name "$CC_RID" "$CC_POS")
-	cc_handled "$_ccs"
-	if [ "$RS_KIND" = reconcile ]; then
-		[ "$(cc_later 1)" = 0 ] || cc_bad validator-work
-	else
-		[ "$(cc_runs "$_ccn")" = 1 ] || cc_bad "runs-$CC_POS"
-		[ "$(cc_later "$((_cci + 1))")" = 0 ] || cc_bad "records-after-$CC_POS"
-		! grep -Fq 'dev-run: cleanup_failed' "$TMP/rerr" || cc_bad cleanup-failed
-	fi
-	cc_final
-	OBS="$RS_KIND($CC_POS): status $RS, run $CC_RID, failed predicates:${CC_BAD:- none}"
-	[ -z "$CC_BAD" ]
-}
-# a_sigdisp RUNNER (SD_SIG HUP|INT, SD_MODE default|ignored): the inherited disposition is established before exec (env --default-signal or --ignore-signal) and read back from the controller's own SigIgn mask at a
-# compiled barrier BEFORE its handlers are installed (the runner is the barrier copy), so a wrong inherited disposition is an unestablished premise (setup). After the registration the mask and the signal's
-# effect are the controller's own behaviour and are judged as assertions: a default HUP or INT cancels like TERM, an inherited-ignored one stays ignored and lets the run continue to the intended child result (7).
-a_sigdisp() {
-	CC_NAME=sd
-	CC_BAD=
-	CC_RID=
-	find "$BAR" -mindepth 1 -delete
-	_ccm0=$(find "$ISO/testdata" "$ISO/docs/spikes/issue-drafts" 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')
-	CAP=
-	_sr=$1
-	DSHIM_HOLD=
-	if [ "$SD_MODE" = ignored ]; then
-		bg_runlog sd env --ignore-signal=HUP,INT "$_sr" -- sh -c "$CBAR; exit 7"
-	else
-		bg_runlog sd env --default-signal=HUP,INT "$_sr" -- sh -c "$CBAR; exit 7"
-	fi
-	if ! cc_wait_file "$BAR/ready"; then
-		cc_setup "the barrier before the handler registration was never reached"
-		return 1
-	fi
-	_sg=$(sed -n 's/^SigIgn:[[:space:]]*//p' "/proc/$BG_PID/status" 2>/dev/null)
-	case $_sg in
-	'' | *[!0-9a-fA-F]*)
-		cc_setup "the controller's signal dispositions could not be read"
-		return 1
-		;;
-	esac
-	_sm=$((0x$_sg & 3))
-	if { [ "$SD_MODE" = ignored ] && [ "$_sm" != 3 ]; } || { [ "$SD_MODE" = default ] && [ "$_sm" != 0 ]; }; then
-		cc_setup "the inherited disposition ($SD_MODE) was not established before the registration: SigIgn mask $_sm"
-		return 1
-	fi
-	: >"$BAR/go"
-	_c=$(bg_ctr sd) || { cc_setup "no container"; return 1; }
-	OWNED="$OWNED $_c"
-	if ! bg_wait "$_c" /tmp/ready; then
-		cc_setup "the child never reached its barrier"
-		return 1
-	fi
-	_sg2=$(sed -n 's/^SigIgn:[[:space:]]*//p' "/proc/$BG_PID/status" 2>/dev/null)
-	case $_sg2 in
-	'' | *[!0-9a-fA-F]*)
-		cc_setup "the controller's signal dispositions could not be read after the registration"
-		return 1
-		;;
-	esac
-	[ "$((0x$_sg2 & 3))" = "$_sm" ] || cc_bad "disposition-changed-by-the-registration-$_sm-to-$((0x$_sg2 & 3))"
-	cc_rid
-	_ccs=$(wc -l <"$TMP/sd.dlog" | tr -d ' ')
-	reached
-	kill -s "$SD_SIG" "$BG_PID" 2>/dev/null
-	if [ "$SD_MODE" = ignored ]; then
-		sleep 2
-		_sdx=0 # 1 once the signal's own cancellation of the target is positively observed: the controller exited or printed its interrupted line
-		kill -0 "$BG_PID" 2>/dev/null || { cc_bad owner-died; _sdx=1; }
-		! grep -Fq 'dev-run: interrupted' "$TMP/sd.err" || { cc_bad interrupted-line; _sdx=1; }
-		# a target the signal already cancelled may have removed its own container, so its release is not demanded; any other failed release is setup
-		bg_touch "$_c" /tmp/go || [ "$_sdx" = 1 ] || SETUP=1
-		bg_end sd
-		[ "$RS" = 7 ] || cc_bad "status-$RS"
-		! grep -Fq 'dev-run: interrupted' "$TMP/rerr" || cc_bad interrupted-line
-	else
-		cc_ack 30 || cc_bad no-acknowledgement
-		_wi=0
-		while kill -0 "$BG_PID" 2>/dev/null && [ "$_wi" -lt 120 ]; do
-			sleep 1
-			_wi=$((_wi + 1))
-		done
-		if kill -0 "$BG_PID" 2>/dev/null; then
-			cc_bad owner-still-running
-			kill -KILL "$BG_PID" 2>/dev/null
-		fi
-		bg_end sd
-		cc_handled "$_ccs"
-	fi
-	dlogs_same sd || return 1
-	cc_final
-	OBS="$SD_MODE $SD_SIG: status $RS, failed predicates:${CC_BAD:- none}"
-	[ -z "$CC_BAD" ]
-}
-for RS_KIND in create reconcile; do
-	for CC_POS in C V2; do
-		[ "$RS_KIND" = create ] || [ "$CC_POS" = C ] || continue
-		holds "repeated TERM ($RS_KIND, $CC_POS): the owner survives a second TERM, one interrupted line, reconciliation only, nothing published" a_rs "$RUNNER"
-	done
-done
-RS_KIND=create
-CC_POS=C
-gvariant mut-defaults-before-ack controller.go 'func (c *ctl) interrupt() {
-	c.latch()' 'func (c *ctl) interrupt() {
-	c.latch()
-	signal.Reset(syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT)'
-gvariant mut-exit-on-second controller.go 'func (c *ctl) interrupt() {
-	c.latch()' 'func (c *ctl) interrupt() {
-	if c.cancelled.Load() {
-		os.Exit(125)
-	}
-	c.latch()'
-redgreen "repeated TERM (create, C): defaults restored before the first acknowledgement" a_rs "$MUT/mut-defaults-before-ack.sh" "$RUNNER"
-redgreen "repeated TERM (create, C): exit only on the second signal" a_rs "$MUT/mut-exit-on-second.sh" "$RUNNER"
-SD_OLD='	stop := c.installSignals()'
-SD_NEW="	$(gobar 120)
-	stop := c.installSignals()"
-gvariant fault-sig-barrier controller.go "$SD_OLD" "$SD_NEW"
-gvariant mut-no-hup-int controller.go "$SD_OLD" "$SD_NEW" 'for _, s := range []os.Signal{syscall.SIGHUP, syscall.SIGINT} {' 'for _, s := range []os.Signal{} {'
-gvariant mut-register-ignored controller.go "$SD_OLD" "$SD_NEW" 'if !signal.Ignored(s) {' 'if true {'
-for SD_SIG in HUP INT; do
-	SD_MODE=default
-	holds "$SD_SIG with the default disposition cancels like TERM (disposition read back from the controller's SigIgn mask before registration)" a_sigdisp "$MUT/fault-sig-barrier.sh"
-	SD_MODE=ignored
-	holds "inherited-ignored $SD_SIG: the run continues to the intended child result and prints no interrupted line" a_sigdisp "$MUT/fault-sig-barrier.sh"
-done
-SD_SIG=HUP
-SD_MODE=default
-redgreen "default HUP: HUP and INT registration omitted" a_sigdisp "$MUT/mut-no-hup-int.sh" "$MUT/fault-sig-barrier.sh"
-SD_MODE=ignored
-redgreen "inherited-ignored HUP: ignored HUP and INT registered anyway (the wrong disposition after registration is the assertion, not setup)" a_sigdisp "$MUT/mut-register-ignored.sh" "$MUT/fault-sig-barrier.sh"
-SD_SIG=INT
-redgreen "inherited-ignored INT: ignored HUP and INT registered anyway" a_sigdisp "$MUT/mut-register-ignored.sh" "$MUT/fault-sig-barrier.sh"
-# bootstrap and exec controls (T26)
-a_exec_identity() { # a_exec_identity RUNNER: the runner PID is the controller (argv[1] -run, argv[0] .../bin/redact) and every child of it is a timeout wrapper
-	CC_NAME=ex
-	CC_BAD=
-	find "$BAR" -mindepth 1 -delete
-	CAP=
-	bg_runlog ex "$1" -- sh -c "$CBAR"
-	_c=$(bg_ctr ex) || { cc_setup "no container"; return 1; }
-	OWNED="$OWNED $_c"
-	if ! bg_wait "$_c" /tmp/ready; then
-		cc_setup "the child never reached its barrier"
-		return 1
-	fi
-	_av=$(tr '\0' '\n' <"/proc/$BG_PID/cmdline" 2>/dev/null)
-	_a0=$(printf '%s\n' "$_av" | sed -n 1p)
-	_a1=$(printf '%s\n' "$_av" | sed -n 2p)
-	_kids=0
-	_badk=0
-	for _sf in $(find /proc -maxdepth 2 -name stat -path '/proc/[0-9]*/stat' 2>/dev/null); do
-		read -r _sl <"$_sf" 2>/dev/null || continue
-		_sr=${_sl##*) }
-		set -- $_sr
-		[ "${2:-}" = "$BG_PID" ] || continue
-		_sc=${_sl#*(}
-		_sc=${_sc%)*}
-		_kids=$((_kids + 1))
-		[ "$_sc" = timeout ] || _badk=$((_badk + 1))
-	done
-	bg_touch "$_c" /tmp/go || SETUP=1
-	bg_end ex
-	reached
-	OBS="argv[0] '$_a0', argv[1] '$_a1', $_kids children of the runner PID, $_badk of them not timeout wrappers"
-	[ "$_a1" = -run ] && case $_a0 in */bin/redact) true ;; *) false ;; esac && [ "$_kids" -ge 1 ] && [ "$_badk" = 0 ]
-}
-variant mut-fork-controller 'exec "$REDACT" -run' '"$REDACT" -run'
-redgreen "bootstrap that forks the controller instead of exec'ing it" a_exec_identity "$MUT/mut-fork-controller.sh" "$RUNNER"
-a_boot_term() { # a_boot_term RUNNER (BOOT_MODE pid|group): TERM while the helper build is held ends the run at the bootstrap: interrupted, no work build, no run, private TMPDIR empty
-	CC_NAME=bt
-	CC_BAD=
-	find "$BAR" -mindepth 1 -delete
-	rm -rf "$TMP/boot-tmp"
-	mkdir -m 0700 "$TMP/boot-tmp" || { SETUP=1; return 1; }
-	DSHIM_HOLD='--target host-redact'
-	if [ "$BOOT_MODE" = group ]; then
-		bg_runlog bt env TMPDIR="$TMP/boot-tmp" timeout 900 "$1" -- true
-	else
-		bg_runlog bt env TMPDIR="$TMP/boot-tmp" "$1" -- true
-	fi
-	DSHIM_HOLD=
-	if ! cc_wait_file "$BAR/hold.ready"; then
-		cc_setup "the helper build was never held"
-		return 1
-	fi
-	reached
-	if [ "$BOOT_MODE" = group ]; then kill -s TERM -- "-$BG_PID"; else kill -s TERM "$BG_PID"; fi
-	sleep 2
-	: >"$BAR/hold.go"
-	bg_end bt
-	dlogs_same bt || return 1
-	OBS="status $RS, $(grep -Fc -- '--target work' "$TMP/bt.dlog") work builds, $(CC_NAME=bt cc_cmds run) runs, TMPDIR holds '$(ls -A "$TMP/boot-tmp" | tr '\n' ' ')'"
-	[ "$RS" = 125 ] && [ "$(grep -c '^dev-run: interrupted$' "$TMP/rerr")" = 1 ] && [ "$(grep -Fc -- '--target work' "$TMP/bt.dlog")" = 0 ] && [ "$(CC_NAME=bt cc_cmds run)" = 0 ] && [ -z "$(ls -A "$TMP/boot-tmp")" ]
-}
-for BOOT_MODE in pid group; do
-	holds "boot-term ($BOOT_MODE): TERM during the held helper build: 125 interrupted, no work build or run record, private TMPDIR empty" a_boot_term "$RUNNER"
-done
-a_child_cancel() { # a_child_cancel RUNNER: the child held at CBAR, TERM to the runner PID: the child exec is killed and the run ends within 60 s with no publication
-	CC_NAME=cp
-	CC_BAD=
-	CC_RID=
-	find "$BAR" -mindepth 1 -delete
-	_ccm0=$(find "$ISO/testdata" "$ISO/docs/spikes/issue-drafts" 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')
-	CAP=
-	bg_runlog cp "$1" -- sh -c "$CBAR"
-	_c=$(bg_ctr cp) || { cc_setup "no container"; return 1; }
-	OWNED="$OWNED $_c"
-	if ! bg_wait "$_c" /tmp/ready; then
-		cc_setup "the child never reached its barrier"
-		return 1
-	fi
-	cc_rid
-	_ccs=$(wc -l <"$TMP/cp.dlog" | tr -d ' ')
-	kill -s TERM "$BG_PID"
-	if ! cc_ack 30; then
-		cc_setup "no acknowledgement of the handled signal"
-		return 1
-	fi
-	reached
-	_wi=0
-	while kill -0 "$BG_PID" 2>/dev/null && [ "$_wi" -lt 60 ]; do
-		sleep 1
-		_wi=$((_wi + 1))
-	done
-	if kill -0 "$BG_PID" 2>/dev/null; then
-		cc_bad "runner-alive-60s-after-the-signal"
-		kill -KILL "$BG_PID" 2>/dev/null
-	fi
-	bg_end cp
-	dlogs_same cp || return 1
-	cc_handled "$_ccs"
-	cc_final
-	OBS="child-phase cancel: status $RS, failed predicates:${CC_BAD:- none}"
-	[ -z "$CC_BAD" ]
-}
-holds "child-phase-cancel: TERM with the child held kills the child exec and ends the run within 60 s, nothing published" a_child_cancel "$RUNNER"
-gvariant mut-cancel-waits-child controller.go '		kind: kOther,
-		argv: argv,' '		kind: kCreate,
-		argv: argv,'
-redgreen "child exec that is not killed on cancellation: the runner is still alive 60 s after the signal" a_child_cancel "$MUT/mut-cancel-waits-child.sh" "$RUNNER"
-a_epipe() { # a_epipe RUNNER: a closed stdout is an EPIPE write error (output_write_failed, C absent), never SIGPIPE death
-	rm -f "$TMP/epipe.rs"
-	{ (cd "$ISO" && "$1" -- sh -c 'printf a; sleep 3; head -c 70000 /dev/zero') 2>"$TMP/rerr"; echo $? >"$TMP/epipe.rs"; } | head -c 1 >/dev/null
-	RS=$(cat "$TMP/epipe.rs" 2>/dev/null)
-	rerr_seen
-	_cn=$(cname)
-	[ -z "$_cn" ] || OWNED="$OWNED $_cn"
-	{ [ -n "$_cn" ] && [ -n "$RS" ]; } && reached
-	cstate "${_cn:-boxset-dev-none}"
-	OBS="status $RS, container ${_cn:-none} $CST, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1)"
-	_ok=0
-	[ "$RS" = 125 ] && grep -Fq 'dev-run: output_write_failed' "$TMP/rerr" && [ "$CST" = absent ] && _ok=1
-	[ -z "$_cn" ] || docker rm -f "$_cn" >/dev/null 2>&1
-	[ "$_ok" = 1 ]
-}
-holds "epipe: stdout closed while the child still writes is output_write_failed (125) and C is absent" a_epipe "$RUNNER"
-gvariant mut-no-sigpipe-notify controller.go 'sigs := []os.Signal{syscall.SIGTERM, syscall.SIGPIPE}' 'sigs := []os.Signal{syscall.SIGTERM}'
-redgreen "SIGPIPE not notified: the controller dies of SIGPIPE (141) and C stays present" a_epipe "$MUT/mut-no-sigpipe-notify.sh" "$RUNNER"
-# ---- the sinks of the full controller (NC07, NC12, NC17) ------------------------------------------------------------------------------------------------------------------
-host_dead() { # host_dead PID: the task is gone or a zombie
-	_hds=$(sed -n 's/^State:[[:space:]]*\(.\).*/\1/p' "/proc/$1/status" 2>/dev/null)
-	[ -z "$_hds" ] || [ "$_hds" = Z ]
-}
-# NC07: the full controller with a stderr that is full and never read. A compiled copy queues a 70,000-byte diagnostic at the child start, so the pipe is full before the closure; the owner must still finish its
-# run (and its checked closure), while the mutant that writes diagnostics synchronously holds the lifetime owner in that write.
-BLKRAW_OLD='	c.say(fmt.Sprintf("image=%s inputs=%s timeout=%ds container=%s", c.img, c.inputs, c.timeout, c.ctr))'
-BLKRAW_NEW='	c.raw(bytes.Repeat([]byte("x"), 70000))
-	c.say(fmt.Sprintf("image=%s inputs=%s timeout=%ds container=%s", c.img, c.inputs, c.timeout, c.ctr))'
-BLKSAY_OLD='c.diag.put(diagItem{b: []byte("dev-run: " + msg + "\n")})'
-BLKSAY_NEW='_, _ = c.diag.w.Write([]byte("dev-run: " + msg + "\n"))'
-BLKRAWW_OLD='c.diag.put(diagItem{b: bytes.Clone(b)})'
-BLKRAWW_NEW='_, _ = c.diag.w.Write(b)'
-BLK=ok
-a_stderr_blocked() { # a_stderr_blocked RUNNER (BLK ok|cleanup): the run ends by itself with its own status although stderr is full; cleanup also fails the owned removal, so the diagnostics of the checked closure meet the blocked sink
-	rm -f "$TMP/blk.fifo"
-	mkfifo "$TMP/blk.fifo" || { OBS="the stderr fifo could not be made"; SETUP=1; return 1; }
-	{ true >"$TMP/blk.dlog" && true >"$TMP/blk.dlog.q"; } || SETUP=1
-	exec 5<>"$TMP/blk.fifo"
-	(cd "$ISO" && PATH="$TMP/dshim:$PATH" DLOG="$TMP/blk.dlog" exec "$1" -- sh -c 'printf ran') >"$TMP/rout" 2>&5 &
-	_bp=$!
-	_i=0
-	while kill -0 "$_bp" 2>/dev/null && [ "$_i" -lt 200 ]; do
-		sleep 1
-		_i=$((_i + 1))
-	done
-	_held=0
-	if kill -0 "$_bp" 2>/dev/null; then
-		_held=1
-		kill -KILL "$_bp" 2>/dev/null
-	fi
-	wait "$_bp" 2>/dev/null
-	RS=$?
-	_nb=$(dd iflag=nonblock bs=1048576 count=1 <&5 2>/dev/null | wc -c | tr -d ' ')
-	exec 5<&-
-	_cn=$(grep -E '^S [^ ]+ [0-9]+\.[0-9][0-9] run ' "$TMP/blk.dlog" 2>/dev/null | sed -n 's/.* --name \([^ ]*\) .*/\1/p' | head -n 1)
-	[ -z "$_cn" ] || OWNED="$OWNED $_cn"
-	cstate "${_cn:-boxset-dev-none}"
-	OBS="$BLK: status $RS, still held by the sink after 200 s: $_held, bytes left in the full pipe $_nb, container ${_cn:-none} $CST, output '$(cat "$TMP/rout")'"
-	[ "$_nb" -ge 60000 ] || { OBS="$OBS; the stderr pipe was not full"; SETUP=1; return 1; }
-	[ -n "$_cn" ] || { SETUP=1; return 1; }
-	reached
-	_ok=0
-	case $BLK in
-	ok) [ "$_held" = 0 ] && [ "$RS" = 0 ] && [ "$(cat "$TMP/rout")" = ran ] && [ "$CST" = absent ] && _ok=1 ;;
-	cleanup) [ "$_held" = 0 ] && [ "$RS" = 125 ] && [ "$(cat "$TMP/rout")" = ran ] && _ok=1 ;;
-	esac
-	docker rm -f "$_cn" >/dev/null 2>&1
-	[ "$_ok" = 1 ]
-}
-gvariant fault-blk-ok controller.go "$BLKRAW_OLD" "$BLKRAW_NEW"
-gvariant mut-blk-ok controller.go "$BLKRAW_OLD" "$BLKRAW_NEW" "$BLKSAY_OLD" "$BLKSAY_NEW" "$BLKRAWW_OLD" "$BLKRAWW_NEW"
-gvariant fault-blk-cleanup controller.go "$BLKRAW_OLD" "$BLKRAW_NEW" "$RM_OLD" 'return []string{"/bin/sh", "-c", "exit 1"}'
-gvariant mut-blk-cleanup controller.go "$BLKRAW_OLD" "$BLKRAW_NEW" "$RM_OLD" 'return []string{"/bin/sh", "-c", "exit 1"}' "$BLKSAY_OLD" "$BLKSAY_NEW" "$BLKRAWW_OLD" "$BLKRAWW_NEW"
-BLK=ok
-redgreen "blocked stderr: diagnostics written synchronously hold the lifetime owner (full unread stderr, checked closure)" a_stderr_blocked "$MUT/mut-blk-ok.sh" "$MUT/fault-blk-ok.sh"
-BLK=cleanup
-redgreen "blocked stderr with a failed owned removal: synchronous cleanup diagnostics hold the lifetime owner" a_stderr_blocked "$MUT/mut-blk-cleanup.sh" "$MUT/fault-blk-cleanup.sh"
-# NC17: the stdout of the runner is a full pipe nobody reads, with a producer that still writes: bounded output_write_failed (125), the owned container reconciled, nothing published
-a_stdout_blocked() { # a_stdout_blocked RUNNER
-	rm -rf "$ISO/testdata"
-	mkdir -p "$ISO/testdata/parser"
-	rm -f "$TMP/blkout.fifo"
-	mkfifo "$TMP/blkout.fifo" || { OBS="the stdout fifo could not be made"; SETUP=1; return 1; }
-	exec 6<>"$TMP/blkout.fifo"
-	dd if=/dev/zero bs=65536 count=1 >&6 2>/dev/null || { OBS="the stdout pipe could not be filled"; SETUP=1; exec 6<&-; return 1; }
-	if dd if=/dev/zero bs=1 count=1 oflag=nonblock >&6 2>/dev/null; then
-		OBS="the stdout pipe was not full"
-		SETUP=1
-		exec 6<&-
-		return 1
-	fi
-	(cd "$ISO" && exec "$1" --write testdata/parser --timeout 3 -- sh -c 'printf pub >/src/testdata/parser/series.jsonl; head -c 1000 /dev/zero | tr "\0" a') >"$TMP/blkout.fifo" 2>"$TMP/bo.err" &
-	_bp=$!
-	_i=0
-	while kill -0 "$_bp" 2>/dev/null && [ "$_i" -lt 90 ]; do
-		sleep 1
-		_i=$((_i + 1))
-	done
-	_held=0
-	if kill -0 "$_bp" 2>/dev/null; then
-		_held=1
-		kill -KILL "$_bp" 2>/dev/null
-	fi
-	wait "$_bp" 2>/dev/null
-	RS=$?
-	exec 6<&-
-	cp "$TMP/bo.err" "$TMP/rerr"
-	rerr_seen
-	_cn=$(cname)
-	[ -z "$_cn" ] || OWNED="$OWNED $_cn"
-	cstate "${_cn:-boxset-dev-none}"
-	OBS="status $RS, still held by the sink after 90 s: $_held, container ${_cn:-none} $CST, $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1), published series $([ -e "$ISO/testdata/parser/series.jsonl" ] && echo yes || echo no)"
-	grep -Eq "$RUNNER_STARTED_RE" "$TMP/rerr" && reached
-	[ "$_held" = 0 ] && [ "$RS" = 125 ] && grep -Fq 'dev-run: output_write_failed' "$TMP/rerr" && [ "$CST" = absent ] && [ ! -e "$ISO/testdata/parser/series.jsonl" ]
-}
-holds "blocked stdout: a producer writing into a full unread stdout ends the run as output_write_failed within the bound, the owned container is absent and nothing is published" a_stdout_blocked "$RUNNER"
-rm -rf "$ISO/testdata"
-# NC12: the output stop starts the owned removal inside the parent's own wait. The compiled copy runs a TERM-ignoring child instead of the exec (it writes its pid, floods past the cap, then sleeps) and the shim
-# holds the removal: the parent must still be killed at its own bound (--timeout 1: 6 s) while the removal is held. The mutant that waits for the removal synchronously leaves it alive.
-RMHELD_PID=$TMP/rmheld.pid
-RMH_OLD='	argv = append(argv, c.argv...)'
-RMH_NEW='	argv = []string{"/bin/sh", "-c", `echo $$ >'$RMHELD_PID'; head -c 70000 /dev/zero; trap "" TERM HUP INT; sleep 100`}'
-RMH_SYNC_OLD='if rm = c.startRm(s.removeOnOut); rm != nil {
-					rmCh, rmTimer = rm.waitCh, time.NewTimer(time.Until(rm.deadline))
-					rmDue = rmTimer.C
-				}'
-gvariant fault-rm-held controller.go "$RMH_OLD" "$RMH_NEW"
-gvariant mut-rm-held-sync controller.go "$RMH_OLD" "$RMH_NEW" "$RMH_SYNC_OLD" 'c.rmOwned(s.removeOnOut)'
-a_rm_held() { # a_rm_held RUNNER
-	CC_NAME=rh
-	CC_BAD=
-	find "$BAR" -mindepth 1 -delete
-	rm -f "$RMHELD_PID"
-	DSHIM_HOLD='rm -f boxset-dev-'
-	bg_runlog rh "$1" --timeout 1 -- true
-	DSHIM_HOLD=
-	if ! cc_wait_file "$BAR/hold.ready"; then
-		cc_setup "the owned removal was never held"
-		return 1
-	fi
-	_pp=$(cat "$RMHELD_PID" 2>/dev/null)
-	case $_pp in
-	'' | *[!0-9]*)
-		cc_setup "the fault child recorded no pid"
-		return 1
-		;;
-	esac
-	if host_dead "$_pp"; then
-		cc_setup "the parent was not live when its removal was held"
-		return 1
-	fi
-	reached
-	_i=0
-	while ! host_dead "$_pp" && [ "$_i" -lt 20 ]; do
-		sleep 1
-		_i=$((_i + 1))
-	done
-	kill -0 "$BG_PID" 2>/dev/null || cc_bad owner-gone-while-held
-	host_dead "$_pp" || cc_bad "parent-alive-20-s-into-a-held-removal"
-	: >"$BAR/hold.go"
-	bg_end rh
-	dlogs_same rh || return 1
-	{ [ "$RS" = 125 ] && grep -Fq 'dev-run: output_overflow' "$TMP/rerr"; } || cc_bad "status-$RS"
-	_cn=$(cname)
-	[ -z "$_cn" ] || OWNED="$OWNED $_cn"
-	cstate "${_cn:-boxset-dev-none}"
-	[ "$CST" = absent ] || cc_bad "present-$_cn"
-	OBS="removal held: parent pid $_pp, failed predicates:${CC_BAD:- none}"
-	[ -z "$CC_BAD" ]
-}
-redgreen "output-failure removal held: the parent is killed at its own bound while the removal runs (synchronous removal mutant leaves it)" a_rm_held "$MUT/mut-rm-held-sync.sh" "$MUT/fault-rm-held.sh"
-# NC04: a real TERM, held by a compiled barrier at each publication window of the write root (the barrier statements exist only in the compiled copy). Every window also records each rename at the real renameOne seam (PUBRCPT),
-# the target-attributable evidence of how far publication got. partial: between two renames; backup: after the first backup of the prior file, before any rename; post: after the commit point, before the backups are removed.
-PUBRCPT=$TMP/pub.receipt
-gpr() { printf '%s' '{ f, _ := os.OpenFile("'$PUBRCPT'", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644); fmt.Fprintf(f, '"$1"'); f.Close() }'; }
-PUBREN_NEW='func (c *ctl) renameOne(src, dst string) error {
-	if err := c.wroot.Rename(src, dst); err != nil {
-		return err
-	}
-	'"$(gpr '"rename %s\n", dst')"'
-	return nil
-}'
-PUBREN_HOLD='func (c *ctl) renameOne(src, dst string) error {
-	if err := c.wroot.Rename(src, dst); err != nil {
-		return err
-	}
-	'"$(gpr '"rename %s\n", dst')"'
-	if dst == "series.jsonl" {
-		'"$(gobar 180)"'
-	}
-	return nil
-}'
-PUBCHK1_OLD='if c.cancelled.Load() {
-			return c.failPub(reasonCancelled)
-		}
-	}
-	if !c.rootUnchanged() { // the identity re-check after the renames'
-PUBCHK1_NEW='_ = c.cancelled.Load()
-	}
-	if !c.rootUnchanged() { // the identity re-check after the renames'
-PUBCHK2_OLD='if c.cancelled.Load() {
-		return c.failPub(reasonCancelled)
-	}
-	// Commit point:'
-PUBCHK2_NEW='_ = c.cancelled.Load()
-	// Commit point:'
-PUBPREP_OLD='		c.partP[n] = pid
-		if c.cancelled.Load() { // after the accounted backup of this name'
-PUBPREP_NEW='		c.partP[n] = pid
-		if n == "series.jsonl" {
-			'"$(gobar 180)"'
-		}
-		if c.cancelled.Load() { // after the accounted backup of this name'
-PUBPREPCHK_OLD='if c.cancelled.Load() { // after the accounted backup of this name
-			return c.failPub(reasonCancelled)
-		}'
-PUBPOST_OLD='	reason := ""
-	for _, n := range c.staged {
-		if _, had := c.partQ[n]; !had {'
-PUBPOST_NEW='	'"$(gobar 180)"'
-	reason := ""
-	for _, n := range c.staged {
-		if _, had := c.partQ[n]; !had {'
-PUBPOSTRB_OLD='	return reason
-}
-
-func (c *ctl) publishWrite() bool {'
-PUBPOSTRB_NEW='	if c.cancelled.Load() {
-		c.rollback()
-		return reasonCancelled
-	}
-	return reason
-}
-
-func (c *ctl) publishWrite() bool {'
-PUBM=partial
-a_pub_signal() { # a_pub_signal RUNNER (PUBM partial|backup|post)
-	_P=$ISO/testdata/parser
-	rm -rf "$_P"
-	mkdir -p "$_P"
-	printf 'prior series\n' >"$_P/series.jsonl"
-	printf 'prior movie\n' >"$_P/movie.jsonl"
-	_s0=$(ident_h "$_P/series.jsonl")
-	_r0=$(ident_h "$_P/movie.jsonl")
-	_cs0=$(canary_state)
-	find "$BAR" -mindepth 1 -delete
-	true >"$PUBRCPT" || { OBS="the rename receipt could not be created"; SETUP=1; return 1; }
-	CC_NAME=pubsig
-	bg_run pubsig "$1" --write testdata/parser -- sh -c "$BOTH"
-	if ! cc_wait_file "$BAR/ready"; then
-		cc_setup "the publication barrier was never reached"
-		return 1
-	fi
-	_pm=ok
-	case $PUBM in
-	partial) [ "$(cat "$PUBRCPT")" = "rename series.jsonl" ] || _pm="the first rename is not the only one that took effect" ;;
-	backup) { [ -z "$(cat "$PUBRCPT")" ] && [ -n "$(find "$_P" -maxdepth 1 -name '.series.jsonl.*.prev')" ]; } || _pm="the first backup was not prepared with no rename yet" ;;
-	post) { [ "$(cat "$_P/series.jsonl")" = newS ] && [ "$(cat "$_P/movie.jsonl")" = newR ]; } || _pm="both renames did not complete before the commit barrier" ;;
-	esac
-	if [ "$_pm" != ok ]; then
-		cc_setup "$_pm"
-		return 1
-	fi
-	kill -s TERM "$BG_PID"
-	if ! cc_ack 30; then
-		cc_setup "no acknowledgement of the handled signal"
-		return 1
-	fi
-	: >"$BAR/go"
-	bg_end pubsig
-	reached
-	_nint=$(grep -c '^dev-run: interrupted$' "$TMP/rerr")
-	_dots=$(find "$_P" -name '.*' ! -name . | wc -l | tr -d ' ')
-	_rc=$(tr '\n' ' ' <"$PUBRCPT")
-	OBS="$PUBM: status $RS, interrupted lines $_nint, series '$(cat "$_P/series.jsonl" 2>/dev/null)' movie '$(cat "$_P/movie.jsonl" 2>/dev/null)', owned dot entries $_dots, renames '$_rc'"
-	{ [ "$RS" = 125 ] && [ "$_nint" = 1 ] && [ "$_cs0" = "$(canary_state)" ] && ! grep -Fq 'PASS' "$TMP/rout"; } || return 1
-	case $PUBM in
-	partial)
-		[ "$(cat "$_P/series.jsonl")" = "prior series" ] && [ "$(ident_h "$_P/series.jsonl")" = "$_s0" ] && [ "$(cat "$_P/movie.jsonl")" = "prior movie" ] &&
-			[ "$(ident_h "$_P/movie.jsonl")" = "$_r0" ] && [ "$_dots" = 0 ] && [ "$_rc" = "rename series.jsonl " ]
-		;;
-	backup)
-		[ "$(cat "$_P/series.jsonl")" = "prior series" ] && [ "$(ident_h "$_P/series.jsonl")" = "$_s0" ] && [ "$(cat "$_P/movie.jsonl")" = "prior movie" ] &&
-			[ "$(ident_h "$_P/movie.jsonl")" = "$_r0" ] && [ "$_dots" = 0 ] && [ -z "$_rc" ]
-		;;
-	post)
-		[ "$(cat "$_P/series.jsonl")" = newS ] && [ "$(cat "$_P/movie.jsonl")" = newR ] && [ "$_dots" = 0 ] && [ "$_rc" = "rename series.jsonl rename movie.jsonl " ]
-		;;
-	esac
-}
-PUBM=partial
-gvariant fault-pub-partial controller.go "$RENAME_OLD" "$PUBREN_HOLD"
-gvariant mut-pub-partial controller.go "$RENAME_OLD" "$PUBREN_HOLD" "$PUBCHK1_OLD" "$PUBCHK1_NEW" "$PUBCHK2_OLD" "$PUBCHK2_NEW"
-redgreen "TERM between two renames: the cancellation checks removed publish through the signal" a_pub_signal "$MUT/mut-pub-partial.sh" "$MUT/fault-pub-partial.sh"
-PUBM=backup
-gvariant fault-pub-backup controller.go "$RENAME_OLD" "$PUBREN_NEW" "$PUBPREP_OLD" "$PUBPREP_NEW"
-gvariant mut-pub-backup controller.go "$RENAME_OLD" "$PUBREN_NEW" "$PUBPREP_OLD" "$PUBPREP_NEW" "$PUBPREPCHK_OLD" '_ = c.cancelled.Load()'
-redgreen "TERM during backup preparation: the backup-phase check removed renames anyway" a_pub_signal "$MUT/mut-pub-backup.sh" "$MUT/fault-pub-backup.sh"
-PUBM=post
-gvariant fault-pub-post controller.go "$RENAME_OLD" "$PUBREN_NEW" "$PUBPOST_OLD" "$PUBPOST_NEW"
-gvariant mut-pub-post controller.go "$RENAME_OLD" "$PUBREN_NEW" "$PUBPOST_OLD" "$PUBPOST_NEW" "$PUBPOSTRB_OLD" "$PUBPOSTRB_NEW"
-redgreen "TERM after the commit point: rolling back after the commit loses the published files" a_pub_signal "$MUT/mut-pub-post.sh" "$MUT/fault-pub-post.sh"
-rm -rf "$ISO/testdata"
-# NC04 capture: the same real TERM, held at the last cancellation check of the capture publication (all five names already linked) and after the capture is committed (post)
-CAPM=final
-a_cap_signal() { # a_cap_signal RUNNER (CAPM final|post)
-	find "$BAR" -mindepth 1 -delete
-	CAP=$(capdir)
-	CC_NAME=capsig
-	_cs0=$(canary_state)
-	bg_run capsig "$1" --capture "$CAP" -- sh -c "${BASE}shoot_all"
-	if ! cc_wait_file "$BAR/ready"; then
-		cc_setup "the capture publication barrier was never reached"
-		return 1
-	fi
-	_n5=$(find "$ISO/$CAP" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')
-	if [ "$_n5" != 5 ]; then
-		cc_setup "the capture was not fully linked at the barrier ($_n5 entries)"
-		return 1
-	fi
-	kill -s TERM "$BG_PID"
-	if ! cc_ack 30; then
-		cc_setup "no acknowledgement of the handled signal"
-		return 1
-	fi
-	: >"$BAR/go"
-	bg_end capsig
-	reached
-	_nint=$(grep -c '^dev-run: interrupted$' "$TMP/rerr")
-	_ents=$(find "$ISO/$CAP" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')
-	OBS="$CAPM: status $RS, interrupted lines $_nint, DIR $([ -e "$ISO/$CAP" ] && echo present || echo absent) holding '$_ents'"
-	_ok=0
-	if [ "$RS" = 125 ] && [ "$_nint" = 1 ] && [ "$_cs0" = "$(canary_state)" ] && ! grep -Fq 'DEV-RUN-CAPTURE-PASS' "$TMP/rout"; then
-		case $CAPM in
-		final) [ ! -e "$ISO/$CAP" ] && _ok=1 ;;
-		post) [ "$_ents" = "capture.manifest dev-desktop.png dev-mobile.png preview-desktop.png preview-mobile.png " ] && _ok=1 ;;
-		esac
-	fi
-	rm -rf "$ISO/$CAP"
-	[ "$_ok" = 1 ]
-}
-CAPFIN_OLD='if c.cancelled.Load() { // the last check: past it the capture is committed'
-CAPFIN_NEW="$(gobar 180)"'
-	if c.cancelled.Load() { // the last check: past it the capture is committed'
-CAPFINCHK_OLD='if c.cancelled.Load() { // the last check: past it the capture is committed
-		return reasonCancelled
-	}'
-CAPPOST_OLD='c.captureOK = true'
-CAPPOST_NEW='c.captureOK = true
-				'"$(gobar 180)"
-CAPABORT_OLD='if c.captureClaimed && !c.captureOK {'
-CAPABORT_NEW='if c.captureClaimed && (!c.captureOK || c.cancelled.Load()) {'
-CAPM=final
-gvariant fault-cap-final controller.go "$CAPFIN_OLD" "$CAPFIN_NEW"
-gvariant mut-cap-final controller.go "$CAPFIN_OLD" "$CAPFIN_NEW" "$CAPFINCHK_OLD" '_ = 0'
-redgreen "TERM in the final capture window (all five names linked): without the last check the capture is committed through the signal" a_cap_signal "$MUT/mut-cap-final.sh" "$MUT/fault-cap-final.sh"
-CAPM=post
-gvariant fault-cap-post controller.go "$CAPPOST_OLD" "$CAPPOST_NEW"
-gvariant mut-cap-post controller.go "$CAPPOST_OLD" "$CAPPOST_NEW" "$CAPABORT_OLD" "$CAPABORT_NEW"
-redgreen "TERM after the capture is committed: aborting a committed capture on cancellation removes it" a_cap_signal "$MUT/mut-cap-post.sh" "$MUT/fault-cap-post.sh"
-# NC13: the final capture locator is delivered to a stdout that is closed or blocked (a full pipe) at a barrier right before it is written; the capture stays published, the status is 125 output_write_failed
-ANNM=closed
-a_announce() { # a_announce RUNNER (ANNM closed|blocked)
-	find "$BAR" -mindepth 1 -delete
-	CAP=$(capdir)
-	rm -f "$TMP/ann.fifo"
-	mkfifo "$TMP/ann.fifo" || { OBS="the stdout fifo could not be made"; SETUP=1; return 1; }
-	exec 4<>"$TMP/ann.fifo"
-	# the child scope closes its inherited copy of the read/write end once its own stdout writer is open and before exec: a copy left in the controller would stay a reader
-	(cd "$ISO" && exec 4<&- && exec "$1" --capture "$CAP" -- sh -c "${BASE}shoot_all") >"$TMP/ann.fifo" 2>"$TMP/ann.err" &
-	BG_PID=$!
-	_i=0
-	while [ ! -e "$BAR/ready" ] && kill -0 "$BG_PID" 2>/dev/null && [ "$_i" -lt 900 ]; do
-		sleep 1
-		_i=$((_i + 1))
-	done
-	_n5=$(find "$ISO/$CAP" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')
-	if [ ! -e "$BAR/ready" ] || [ "$_n5" != 5 ]; then
-		OBS="the barrier before the final locator was not reached with a committed capture ($_n5 entries)"
-		SETUP=1
-		exec 4<&-
-		kill -KILL "$BG_PID" 2>/dev/null
-		wait "$BG_PID" 2>/dev/null
-		rm -rf "$ISO/$CAP"
-		return 1
-	fi
-	case $ANNM in
-	closed)
-		exec 4<&-
-		# the closed-reader premise is established before the barrier is released: a non-blocking write open of a FIFO with no reader fails (ENXIO)
-		if dd if=/dev/null of="$TMP/ann.fifo" bs=1 count=0 oflag=nonblock 2>/dev/null; then
-			OBS="the stdout fifo still has a reader after the driver and the child closed theirs"
-			SETUP=1
-			: >"$BAR/go"
-			kill -KILL "$BG_PID" 2>/dev/null
-			wait "$BG_PID" 2>/dev/null
-			rm -rf "$ISO/$CAP"
-			return 1
-		fi
-		;;
-	blocked)
-		dd if=/dev/zero bs=65536 count=1 >&4 2>/dev/null
-		if dd if=/dev/zero bs=1 count=1 oflag=nonblock >&4 2>/dev/null; then
-			OBS="the stdout pipe was not full"
-			SETUP=1
-			: >"$BAR/go"
-			exec 4<&-
-			kill -KILL "$BG_PID" 2>/dev/null
-			wait "$BG_PID" 2>/dev/null
-			rm -rf "$ISO/$CAP"
-			return 1
-		fi
-		;;
-	esac
-	: >"$BAR/go"
-	_i=0
-	while kill -0 "$BG_PID" 2>/dev/null && [ "$_i" -lt 60 ]; do
-		sleep 1
-		_i=$((_i + 1))
-	done
-	_held=0
-	if kill -0 "$BG_PID" 2>/dev/null; then
-		_held=1
-		kill -KILL "$BG_PID" 2>/dev/null
-	fi
-	wait "$BG_PID" 2>/dev/null
-	RS=$?
-	exec 4<&- 2>/dev/null
-	cp "$TMP/ann.err" "$TMP/rerr"
-	rerr_seen
-	_cn=$(cname)
-	[ -z "$_cn" ] || OWNED="$OWNED $_cn"
-	cstate "${_cn:-boxset-dev-none}"
-	_ents=$(find "$ISO/$CAP" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')
-	OBS="$ANNM: status $RS, still held by the sink after 60 s: $_held, container ${_cn:-none} $CST, DIR holds '$_ents', $(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | tail -n 1)"
-	reached
-	_ok=0
-	[ "$_held" = 0 ] && [ "$RS" = 125 ] && grep -Fq 'dev-run: output_write_failed' "$TMP/rerr" && [ "$CST" = absent ] &&
-		[ "$_ents" = "capture.manifest dev-desktop.png dev-mobile.png preview-desktop.png preview-mobile.png " ] && _ok=1
-	rm -rf "$ISO/$CAP"
-	[ "$_ok" = 1 ]
-}
-ANN_OLD='if c.capture != "" && c.captureOK && !c.announce('
-ANN_NEW='if c.capture != "" && c.captureOK {
-		'"$(gobar 180)"'
-	}
-	if c.capture != "" && c.captureOK && !c.announce('
-ANN_MUT_OLD='// the capture stays published: nothing after the commit point rolls back
-			c.die("output_write_failed", statusFail)'
-ANN_MUT_NEW='c.setStatus(0)'
-gvariant fault-announce controller.go "$ANN_OLD" "$ANN_NEW"
-gvariant mut-announce controller.go "$ANN_OLD" "$ANN_NEW" "$ANN_MUT_OLD" "$ANN_MUT_NEW"
-for ANNM in closed blocked; do
-	redgreen "final capture locator to a $ANNM stdout: a delivery failure ignored leaves status 0 although the locator never arrived" a_announce "$MUT/mut-announce.sh" "$MUT/fault-announce.sh"
-done
-# relative PATH (T26): forwarding timeout and Docker shims in a relative entry under the original repository cwd serve the bootstrap and every controller call
-a_relpath() { # a_relpath RUNNER
-	rm -rf "$ISO/rb"
-	mkdir -p "$ISO/rb" || { SETUP=1; return 1; }
-	: >"$TMP/relpath.rcpt"
-	_rt=$(command -v timeout)
-	_rd=$(command -v docker)
-	printf '#!/bin/sh\nprintf "timeout %%s PATH=%%s\\n" "$*" "$PATH" >>"%s"\nexec "%s" "$@"\n' "$TMP/relpath.rcpt" "$_rt" >"$ISO/rb/timeout"
-	printf '#!/bin/sh\nprintf "docker %%s PATH=%%s\\n" "$*" "$PATH" >>"%s"\nexec "%s" "$@"\n' "$TMP/relpath.rcpt" "$_rd" >"$ISO/rb/docker"
-	chmod +x "$ISO/rb/timeout" "$ISO/rb/docker" || { SETUP=1; return 1; }
-	_rp=rb:$PATH
-	# the lookup premise, independent of the controller: through this PATH the relative entry is the first match and is found as a relative path
-	_rv=$(cd "$ISO" && PATH=$_rp && command -v timeout)
-	[ "$_rv" = rb/timeout ] || { OBS="the relative lookup premise failed ('$_rv')"; SETUP=1; rm -rf "$ISO/rb"; return 1; }
-	(cd "$ISO" && PATH=$_rp "$1" -- sh -c 'printf rel; exit 3') >"$TMP/rout" 2>"$TMP/xerr"
-	RS=$?
-	# an intended refusal (a missing-executable reading of the relative lookup) is the fixed image_build_failed of the controller's first native call; only that exact line is exempt from infrastructure attribution
-	_spoken=0
-	intended_refusal image_build_failed "$TMP/xerr" && _spoken=1
-	_cn=$(cname)
-	[ -z "$_cn" ] || OWNED="$OWNED $_cn"
-	_ro=$(cat "$TMP/rout")
-	_rr=$(grep -c '^timeout .*docker run ' "$TMP/relpath.rcpt")
-	_rx=$(grep -c '^timeout .*docker exec ' "$TMP/relpath.rcpt")
-	_rdk=$(grep -c '^docker run ' "$TMP/relpath.rcpt")
-	_rq=$(grep -c '^docker ps ' "$TMP/relpath.rcpt")
-	_rbad=$(grep -vcF "PATH=$_rp" "$TMP/relpath.rcpt")
-	_rw=$(grep -c -- '--target work' "$TMP/relpath.rcpt")
-	_rb=$(grep -c -- '--target host-redact' "$TMP/relpath.rcpt")
-	OBS="status $RS, output '$_ro', forwarded: timeout-run $_rr, timeout-exec $_rx, docker-run $_rdk, docker-ps $_rq, work builds $_rw, bootstrap builds $_rb, receipts with a changed PATH $_rbad, image_build_failed spoken $_spoken"
-	# reached: the original ran the child (identity line); the mutant is reached only by its positive refusal evidence: the bootstrap forwarded through the relative entry and the controller's work build never did
-	{ { [ "$RS" = 3 ] && grep -Eq "$RUNNER_STARTED_RE" "$TMP/rerr"; } || { [ "$_spoken" = 1 ] && [ "$_rw" = 0 ] && [ "$_rb" -ge 1 ]; }; } && reached
-	rm -rf "$ISO/rb"
-	[ "$RS" = 3 ] && [ "$_ro" = rel ] && [ "$_rr" -ge 1 ] && [ "$_rx" -ge 1 ] && [ "$_rdk" -ge 1 ] && [ "$_rq" -ge 1 ] && [ "$_rbad" = 0 ]
-}
-gvariant mut-errdot-missing controller.go '	if errors.Is(cmd.Err, exec.ErrDot) {
-		cmd.Err = nil
-	}' '	_ = cmd'
-redgreen "relative PATH entry: exec.ErrDot treated as a missing executable" a_relpath "$MUT/mut-errdot-missing.sh" "$RUNNER"
-# relative TMPDIR (T26): the bootstrap resolves its private directory against the original cwd before creation, export and exec, without changing the environment
-a_reltmp() { # a_reltmp RUNNER
-	rm -rf "$ISO/rt"
-	mkdir "$ISO/rt" || { SETUP=1; return 1; }
-	printf 'canary bytes\n' >"$ISO/rt/canary"
-	(cd "$ISO" && TMPDIR=rt "$1" -- sh -c 'printf rel; exit 3') >"$TMP/rout" 2>"$TMP/xerr"
-	RS=$?
-	_spoken=0
-	intended_refusal redact_unavailable "$TMP/xerr" && _spoken=1
-	_cn=$(cname)
-	[ -z "$_cn" ] || OWNED="$OWNED $_cn"
-	{ { [ "$RS" = 3 ] && grep -Eq "$RUNNER_STARTED_RE" "$TMP/rerr"; } || [ "$_spoken" = 1 ]; } && reached
-	_ro=$(cat "$TMP/rout")
-	_rl=$(ls -A "$ISO/rt" | tr '\n' ' ')
-	OBS="status $RS, output '$_ro', rt holds '$_rl', canary '$(cat "$ISO/rt/canary" 2>/dev/null)'"
-	_ok=0
-	[ "$RS" = 3 ] && [ "$_ro" = rel ] && [ "$_rl" = "canary " ] && [ "$(cat "$ISO/rt/canary")" = "canary bytes" ] && _ok=1
-	rm -rf "$ISO/rt"
-	[ "$_ok" = 1 ]
-}
-variant mut-tmpdir-relative '_tb=$(cd -P -- "$_tb" 2>/dev/null && pwd -P) || die temp_dir_failed' '_tb=$_tb'
-redgreen "relative TMPDIR: the normalization-removed bootstrap" a_reltmp "$MUT/mut-tmpdir-relative.sh" "$RUNNER"
-a_tmpcol() { # a_tmpcol RUNNER (a fixed-RUNID copy): a pre-existing private-directory name is refused and never removed
-	_tc=$TMP/tcol
-	rm -rf "$_tc"
-	mkdir -p "$_tc/boxset-dev-run.0123456789abcdef" || { SETUP=1; return 1; }
-	printf 'foreign\n' >"$_tc/boxset-dev-run.0123456789abcdef/canary"
-	(cd "$ISO" && TMPDIR="$_tc" "$1" -- true) >"$TMP/rout" 2>"$TMP/xerr"
-	RS=$?
-	intended_refusal temp_dir_failed "$TMP/xerr" && reached
-	OBS="status $RS, foreign canary '$(cat "$_tc/boxset-dev-run.0123456789abcdef/canary" 2>/dev/null)'"
-	[ "$RS" = 125 ] && [ "$(cat "$_tc/boxset-dev-run.0123456789abcdef/canary" 2>/dev/null)" = foreign ]
-}
-RUNID_OLD='RUNID=$(od -An -N8 -tx1 /dev/urandom | tr -d '"' \n'"')'
-variant fixed-runid "$RUNID_OLD" 'RUNID=0123456789abcdef'
-variant mut-cleanup-unowned "$RUNID_OLD" 'RUNID=0123456789abcdef' 'if [ -n "$TMPD_OWN" ] && [ "$(find "$TMPD" -maxdepth 0 -printf '"'%D:%i'"' 2>/dev/null)" = "$TMPD_ID" ]; then' 'if true; then'
-redgreen "bootstrap TMPD collision: cleanup of a directory this invocation did not create" a_tmpcol "$MUT/mut-cleanup-unowned.sh" "$MUT/fixed-runid.sh"
-# NC05: a backup name that already exists is never this run's. The bootstrap copy has the fixed RUNID, so the run's own backup name is known before the run; the pre-existing name keeps its bytes and inode while
-# publication refuses (write_publish_failed). The mutant records ownership before the no-overwrite link succeeds, so its rollback removes what it never created.
-a_prev_collision() { # a_prev_collision RUNNER (SHAPE foreign|target-link)
-	_P=$ISO/testdata/parser
-	rm -rf "$_P"
-	mkdir -p "$_P"
-	printf 'prior series\n' >"$_P/series.jsonl"
-	_bk=$_P/.series.jsonl.0123456789abcdef.prev
-	case $SHAPE in
-	foreign) printf 'collision bytes\n' >"$_bk" ;;
-	target-link) ln "$_P/series.jsonl" "$_bk" ;;
-	esac
-	_s0=$(ident_h "$_P/series.jsonl")
-	_b0=$(ident_h "$_bk")
-	_bb=$(cat "$_bk" 2>/dev/null)
-	[ -n "$_b0" ] || { OBS="the pre-existing backup name could not be created"; SETUP=1; return 1; }
-	rrx "$ISO" "$1" --write testdata/parser -- sh -c 'printf newS >/src/testdata/parser/series.jsonl'
-	OBS="$SHAPE: status $RS, backup '$(cat "$_bk" 2>/dev/null)' (inode $(ident_h "$_bk") was $_b0), series '$(cat "$_P/series.jsonl" 2>/dev/null)'"
-	{ [ "$RS" = 125 ] && grep -Fq 'write_publish_failed root=testdata/parser' "$TMP/rerr"; } && reached
-	[ "$RS" = 125 ] && grep -Fq 'write_publish_failed root=testdata/parser' "$TMP/rerr" && [ "$(cat "$_bk" 2>/dev/null)" = "$_bb" ] && [ "$(ident_h "$_bk")" = "$_b0" ] &&
-		[ "$(cat "$_P/series.jsonl")" = "prior series" ] && [ "$(ident_h "$_P/series.jsonl")" = "$_s0" ] && [ -z "$(find "$_P" -name '.*.part')" ]
-}
-PREVLINK_OLD='if err := c.wroot.Link(n, bak); err != nil {
-				return c.failPub("write_publish_failed")
-			}
-			if got, ok := c.identOf(bak); !ok || got != qid {'
-PREVLINK_NEW='c.partP[n], c.partQ[n] = pid, qid
-			if err := c.wroot.Link(n, bak); err != nil {
-				return c.failPub("write_publish_failed")
-			}
-			if got, ok := c.identOf(bak); !ok || got != qid {'
-if gvariant prev-collision-orig controller.go && mutate_file "$MUT/prev-collision-orig.sh" "$RUNID_OLD" 'RUNID=0123456789abcdef'; then :; else rm -f "$MUT/prev-collision-orig.sh"; fi
-if gvariant mut-prev-collision controller.go "$PREVLINK_OLD" "$PREVLINK_NEW" && mutate_file "$MUT/mut-prev-collision.sh" "$RUNID_OLD" 'RUNID=0123456789abcdef'; then :; else rm -f "$MUT/mut-prev-collision.sh"; fi
-for SHAPE in foreign target-link; do
-	redgreen "pre-existing backup name ($SHAPE): ownership recorded before the link is acquired removes it" a_prev_collision "$MUT/mut-prev-collision.sh" "$MUT/prev-collision-orig.sh"
-done
-rm -rf "$ISO/testdata"
-a_rejpriv() { # a_rejpriv: a malformed private cleanup path is refused with the fixed word and never cleaned
-	_rd=$TMP/rejpriv
-	rm -rf "$_rd"
-	mkdir -p "$_rd/keep" || { SETUP=1; return 1; }
-	printf 'foreign\n' >"$_rd/keep/canary"
-	(cd "$ISO" && PATH=/nonexistent "$CLOCK" -run "$ISO" 0123456789abcdef "$_rd/keep" 5 - - -- true) >"$TMP/rout" 2>"$TMP/xerr"
-	RS=$?
-	intended_refusal redact_unavailable "$TMP/xerr" && reached
-	OBS="status $RS, stderr '$(cat "$TMP/xerr")', canary '$(cat "$_rd/keep/canary" 2>/dev/null)'"
-	[ "$RS" = 125 ] && [ "$(cat "$TMP/xerr")" = 'dev-run: redact_unavailable' ] && [ "$(cat "$_rd/keep/canary" 2>/dev/null)" = foreign ]
-}
-holds "a rejected private TMPD (wrong basename) is dev-run: redact_unavailable with status 125 and the foreign directory survives" a_rejpriv
-
-# ===== 10. host loss: the in-container PID 1 backstop (isolated, proven-live, test-owned) =====================
-# Every owned name is observed against its own absolute deadline by a test-owned watcher that keeps running while later
-# cases start, so a late disappearance is never credited. Every time here is CLOCK_MONOTONIC through the shared `redact -clock` reader: no StartedAt, wall reading
-# or conversion exists. The owned deadline is Docker's recorded container-start event plus D (a main container TIMEOUT + 60 + 10 s, a validator 21 s). Its lower
-# bound S is the start reading of the case's single logging-shim record of the `run` call naming the container (taken before the shim execs the real CLI); its upper
-# bound R is the first driver reading after `docker container inspect --format {{.State.Running}}` answered exactly `true` (a witness of the start event only, never of
-# a timer inside the container) plus one 10 ms floor. The registration is the window [S+D, R+D]: the true deadline is at least S+D and below R+D. Only status-checked
-# queries count; a failed query is unknown, never absence.
-#   gone             a query that completed before lo (floor charged) found the name absent: the only GREEN evidence.
-#   expired-present  a query that started at or after hi found the name still present: survival at the deadline, the RED
-#                    evidence of a mutant (the original survivor criterion). A last in-time sighting proves nothing.
-#   late-gone        the first query at or after hi found it absent: it may have disappeared in the unobserved final
-#                    fraction, so the tail is unknown and is never GREEN (and never RED).
-# Each case owns its contamination (launcher, readiness polling, runner stderr) in $HLD/KEY.taint; the deferred verdict
-# loads it (hl_flags) and never resets it away. Mutants are judged by the same predicate.
-HLCMD='touch /tmp/ready; setsid sh -c "touch /tmp/gready; exec sleep 300" >/dev/null 2>&1 & while [ ! -e /tmp/gready ]; do sleep 1; done; exec sleep 300'
+# ---- host-loss window helpers: hl_running, hl_register, hl_err_taint, hl_watcher and hl_start are the producers the permanent self-check above extracts from this file and perturbs.
+# No full-run case uses them: the shell leaves no in-container backstop to observe after the runner is killed.
 HL_S=
 HL_R=
 hl_running() { # hl_running NAME: HL_R is the upper bound of NAME's start event. The answer must be status 0 and exactly `true` plus LF; then R is the next driver reading plus one clock floor
@@ -5925,6 +2327,7 @@ hl_running() { # hl_running NAME: HL_R is the upper bound of NAME's start event.
 	mono_ns || return 1
 	HL_R=$((MONO_NS + MONO_RES))
 }
+# shellcheck disable=SC2034 # HL_S is the shim start reading of the registered case, set for the callers that judge the kill time
 hl_register() { # hl_register KEY NAME DLOG R D_NS: the monotonic window [S+D, R+D] of NAME's own deadline. S is the start reading of the single logging-shim run record naming NAME in DLOG; any other shape (no record, two, a malformed reading, R before S) is a refused registration, a case-owned setup taint, never narrowed or replaced by a fallback
 	_hk=$1
 	_hn=$2
@@ -5989,8 +2392,7 @@ hl_watcher() { # one bounded query per pending key every 2 s: a query never star
 		sleep 2
 	done
 }
-hl_watcher &
-HL_WATCH=$!
+# shellcheck disable=SC2034 # HL_PID is the held case's runner, set for the callers that kill it
 hl_start() { # hl_start NAME RUNNER ARGS...: runs a case with the logging shim to readiness; sets HL_PID HL_CID. A readiness probe that failed (any status but an exact present or absent) is that
 	# case's own unknown observation, kept in its deferred taint whatever a later probe shows
 	_hsn=$1
@@ -6005,217 +2407,6 @@ hl_start() { # hl_start NAME RUNNER ARGS...: runs a case with the logging shim t
 	[ "$_hsw" = 0 ] || { fail "host loss $_hsn" "child and detached grandchild never ready"; return 1; }
 	return 0
 }
-hl_kill() { # hl_kill NAME: runner alive, SIGKILL succeeds
-	kill -0 "$HL_PID" 2>/dev/null || { fail "host loss $1" "runner not alive before the kill"; return 1; }
-	kill -KILL "$HL_PID" || { fail "host loss $1" "SIGKILL failed"; return 1; }
-	wait "$HL_PID" 2>/dev/null || true
-	return 0
-}
-# hl_reap_helper CONTEXT: a forced runner loss at a host barrier leaves the capture-stage subshell
-# in its (bounded) barrier loop; kill exactly the recorded test-owned helper and verify it is gone.
-hl_reap_helper() {
-	if [ ! -s "$BAR/helper.pid" ]; then fail "$1" "the barrier seam recorded no helper pid"; return; fi
-	_hrp=$(cat "$BAR/helper.pid")
-	kill -KILL "$_hrp" 2>/dev/null
-	_hri=0
-	while kill -0 "$_hrp" 2>/dev/null && [ "$_hri" -lt 10 ]; do
-		sleep 1
-		_hri=$((_hri + 1))
-	done
-	if kill -0 "$_hrp" 2>/dev/null; then
-		fail "$1" "the barrier helper $_hrp survived the forced loss"
-	else
-		ctl_begin
-		pass "$1: no orphan barrier helper survives the forced loss"
-	fi
-}
-gvariant mut-nobackstop controller.go 'args = append(args, c.img, "/usr/bin/sleep", strconv.Itoa(c.timeout+60))' 'args = append(args, c.img, "/usr/bin/sleep", "86400")'
-gvariant mut-norm controller.go 'args := []string{"run", "-d", "--rm", "--name", c.ctr,' 'args := []string{"run", "-d", "--name", c.ctr,'
-gvariant mut-late-backstop controller.go 'args = append(args, c.img, "/usr/bin/sleep", strconv.Itoa(c.timeout+60))' 'args = append(args, c.img, "/usr/bin/sleep", strconv.Itoa(c.timeout+60+40))'
-hl_case() { # hl_case KEY RUNNER ARGS...: after readiness the container's running witness R is read, the runner is killed, and the case is registered with its own window; the kill must complete before S + TIMEOUT
-	_nm=$1
-	if hl_start "$@"; then
-		if hl_running "$HL_CID" && hl_kill "$_nm"; then
-			_kd=
-			mono_ns && _kd=$MONO_NS
-			hl_err_taint "$_nm" "$_nm"
-			rg_reset
-			reached
-			if [ -n "$_kd" ] && dlogs_same "$_nm" && hl_register "$_nm" "$HL_CID" "$TMP/$_nm.dlog" "$HL_R" 130000000000 && [ "$((_kd + MONO_RES))" -le "$((HL_S + 60000000000))" ]; then
-				pass "host loss $_nm: runner killed before its own S+TIMEOUT"
-			else
-				hl_taint "$_nm" setup "the shim run record, the running witness or the kill time could not be established"
-				fail "host loss $_nm" "no single shim run record, no running witness, or the kill came too late (S '${HL_S:-none}', kill '${_kd:-unread}')"
-			fi
-			return 0
-		fi
-		kill -KILL "$HL_PID" 2>/dev/null
-		wait "$HL_PID" 2>/dev/null || true
-		hl_taint "$_nm" setup "the container was not proven running or the runner was not killable"
-		fail "host loss $_nm" "the running witness failed or the runner could not be killed"
-	fi
-	return 1
-}
-hl_case orig "$RUNNER" --timeout 60 -- sh -c "$HLCMD"
-hl_case nobackstop "$MUT/mut-nobackstop.sh" --timeout 60 -- sh -c "$HLCMD"
-hl_case norm "$MUT/mut-norm.sh" --timeout 60 -- sh -c "$HLCMD"
-hl_case late "$MUT/mut-late-backstop.sh" --timeout 60 -- sh -c "$HLCMD"
-CAP=$(capdir)
-hl_case cap "$RUNNER" --timeout 60 --capture "$CAP" -- sh -c "$HLCMD"
-CAPHL=$CAP
-# transfer-phase host loss: held at the transfer barrier, then SIGKILL
-find "$BAR" -mindepth 1 -delete
-CAP=$(capdir)
-CAPTR=$CAP
-gvariant fault-transfer-hold controller.go 'sum += pr.n // staged and checked' 'sum += pr.n // staged and checked
-		if name == "dev-desktop" { '"$(gobar 180)"' }'
-bg_runlog hltr "$MUT/fault-transfer-hold.sh" --timeout 60 --capture "$CAP" -- sh -c "${BASE}shoot_all"
-HL_PID=$BG_PID
-HLC_tr=$(bg_ctr hltr) || HLC_tr=
-_i=0
-while [ ! -e "$BAR/ready" ] && [ "$_i" -lt 900 ]; do kill -0 "$HL_PID" 2>/dev/null || break; sleep 1; _i=$((_i + 1)); done
-rg_reset
-if [ -e "$BAR/ready" ] && kill -0 "$HL_PID" 2>/dev/null && hl_running "$HLC_tr" && kill -KILL "$HL_PID"; then
-	wait "$HL_PID" 2>/dev/null || true
-	_kd=
-	mono_ns && _kd=$MONO_NS
-	hl_err_taint tr hltr
-	reached
-	if [ -n "$_kd" ] && dlogs_same hltr && hl_register tr "$HLC_tr" "$TMP/hltr.dlog" "$HL_R" 130000000000 && [ "$((_kd + MONO_RES))" -le "$((HL_S + 60000000000))" ]; then
-		pass "host loss at the transfer barrier: runner killed while transferring"
-	else
-		hl_taint tr setup "the shim run record, the running witness or the kill time could not be established"
-		fail "host loss transfer" "no single shim run record, no running witness, or the kill came too late"
-	fi
-	hl_reap_helper "host loss at the transfer barrier"
-else
-	fail "host loss transfer" "barrier not reached, the container not proven running or the runner not killable"
-fi
-# stalled validator after runner loss: the validator is gone by its own S+11+10 and the runner-less main container by its own S+TIMEOUT+60+10. The
-# readiness polling's own queries are case-owned: a failed one is recorded as that case's unknown observation, whatever a later query shows.
-find "$BAR" -mindepth 1 -delete
-CAP=$(capdir)
-CAPST=$CAP
-gvariant fault-stalled controller.go '"/usr/local/libexec/boxset/capture-check", "-name", name, "-challenge", c.challenge}' '"/usr/bin/sleep", "100"}'
-bg_runlog hlst "$MUT/fault-stalled.sh" --timeout 60 --capture "$CAP" -- sh -c "${BASE}shoot_all"
-HL_PID=$BG_PID
-HLC_st=$(bg_ctr hlst) || HLC_st=
-_rid=${HLC_st#boxset-dev-}
-VN=boxset-dev-$_rid-v-dev-desktop
-_i=0
-_vs=unknown
-while [ "$_i" -lt 600 ]; do
-	_vs=$(cstate_to 30 "$VN")
-	if [ "$_vs" = unknown ]; then
-		hl_taint stval unknown "readiness query of $VN"
-		hl_taint stmain unknown "readiness query of $VN"
-	fi
-	[ "$_vs" != present ] || break
-	kill -0 "$HL_PID" 2>/dev/null || break
-	sleep 1
-	_i=$((_i + 1))
-done
-rg_reset
-if [ "$_vs" = present ] && hl_running "$VN" && _rv=$HL_R && hl_running "$HLC_st" && _rm=$HL_R && kill -KILL "$HL_PID"; then
-	wait "$HL_PID" 2>/dev/null || true
-	_kd=
-	mono_ns && _kd=$MONO_NS
-	hl_err_taint stval hlst
-	hl_err_taint stmain hlst
-	reached
-	if [ -n "$_kd" ] && dlogs_same hlst && hl_register stval "$VN" "$TMP/hlst.dlog" "$_rv" 21000000000 && hl_register stmain "$HLC_st" "$TMP/hlst.dlog" "$_rm" 130000000000 && [ "$((_kd + MONO_RES))" -le "$((HL_S + 60000000000))" ]; then
-		pass "host loss with a stalled validator: runner killed while the validator runs"
-	else
-		hl_taint stval setup "the shim run records, a running witness or the kill time could not be established"
-		hl_taint stmain setup "the shim run records, a running witness or the kill time could not be established"
-		fail "host loss stalled validator" "no single shim run record, no running witness, or the kill came too late"
-	fi
-else
-	fail "host loss stalled validator" "validator container never appeared, not proven running or runner not killable"
-fi
-# a real controller fatal after readiness (a compiled panic raised once the driver has seen the child ready) taints its deferred case whatever the container later does
-find "$BAR" -mindepth 1 -delete
-gvariant fault-ctrl-fatal controller.go 'func (c *ctl) runChild() (cs, rs int, tmo, ok bool) {' 'func (c *ctl) runChild() (cs, rs int, tmo, ok bool) {
-	go func() {
-		for i := 0; i < 1800; i++ {
-			if _, err := os.Stat("'$BAR'/fatal"); err == nil {
-				panic("injected controller fatal")
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-	}()'
-rg_reset
-if hl_start hlfatal "$MUT/fault-ctrl-fatal.sh" --timeout 60 -- sh -c "$HLCMD"; then
-	: >"$BAR/fatal"
-	_i=0
-	while kill -0 "$HL_PID" 2>/dev/null && [ "$_i" -lt 60 ]; do
-		sleep 1
-		_i=$((_i + 1))
-	done
-	wait "$HL_PID" 2>/dev/null || true
-	if grep -Eq "$CTRL_FATAL_RE" "$TMP/hlfatal.err" 2>/dev/null && hl_running "$HL_CID"; then
-		hl_err_taint fatal hlfatal
-		dlogs_same hlfatal && hl_register fatal "$HL_CID" "$TMP/hlfatal.dlog" "$HL_R" 130000000000 || hl_taint fatal setup "the shim run record or the running witness could not be established"
-	else
-		hl_taint fatal setup "the controller fatal was not observed with the container still running"
-		fail "host loss controller fatal" "no fatal trace on the runner's stderr, or the container was not running afterwards"
-	fi
-fi
-# every registered case resolves at its own deadline; unregistered cases already failed above
-_i=0
-while [ "$_i" -lt 200 ]; do
-	_open=0
-	for _k in orig nobackstop norm late cap tr stval stmain fatal; do
-		if [ -e "$HLD/$_k.reg" ] && [ ! -e "$HLD/$_k.res" ]; then _open=1; fi
-	done
-	[ "$_open" = 0 ] && break
-	sleep 3
-	_i=$((_i + 1))
-done
-true >"$HLD/stop" || fail "host loss watcher" "the watcher could not be stopped"
-wait "$HL_WATCH" 2>/dev/null || true
-hl_prov() { # hl_prov RUNNER: the wrapper sha and, for a compiled copy, the controller source sha it holds beside the original controller sha (the same provenance redgreen records)
-	_hpv="runner sha $(fhash "$1")"
-	if [ -s "${1%.sh}.csha" ]; then _hpv="$_hpv, controller sha $(cat "${1%.sh}.csha") (original controller sha $(fhash "$ISO/deploy/dev/redact/controller.go"))"; fi
-	printf '%s' "$_hpv"
-}
-hl_green() { # hl_green KEY CONTEXT RUNNER: absent by a status-checked query inside its own deadline, through the shared classifier
-	if hl_credit green "$1"; then pass "$2 (absence observed $(((HR_D - HR_T) / 1000000)) ms before its own deadline, floor charged; $(hl_prov "$3"))"; else fail "$2" "$RG_WHY result $HR_R (observed at $HR_T, own deadline lower bound $HR_D; $(hl_prov "$3"))"; fi
-}
-hl_red() { # hl_red KEY CONTEXT MUTANT ORIGINAL: the same predicate fails on the mutant: a query that started at or after its own deadline still found it present
-	_hos=$(fhash "$4")
-	if [ ! -s "${3%.sh}.csha" ] || [ "$(cat "${3%.sh}.csha")" = "$(fhash "$ISO/deploy/dev/redact/controller.go")" ]; then
-		fail "$2" "the mutant carries no compiled-controller provenance (its controller sha record is missing or equals the original controller)"
-		return
-	fi
-	if hl_credit red "$1"; then pass "$2 RED on mutant ($(hl_prov "$3")): still present to a status-checked query that started at or after its own deadline (the restored original runner sha $_hos is GREEN above)"; else fail "$2" "$RG_WHY result $HR_R on mutant ($(hl_prov "$3")) (observed at $HR_T, own deadline lower bound $HR_D)"; fi
-}
-hl_green orig "host loss: runner-less container gone by its StartedAt+TIMEOUT+60+10 (child and detached grandchild with it)" "$RUNNER"
-hl_red nobackstop "host loss: backstop-disabled mutant (restored original GREEN above)" "$MUT/mut-nobackstop.sh" "$RUNNER"
-hl_red norm "host loss: no---rm mutant (restored original GREEN above)" "$MUT/mut-norm.sh" "$RUNNER"
-hl_red late "host loss: late-backstop mutant that disappears after its own deadline but before the batch's latest" "$MUT/mut-late-backstop.sh" "$RUNNER"
-hl_green cap "host loss during the capture child: container gone by its own deadline" "$RUNNER"
-hl_green tr "host loss at the transfer barrier: container gone by its own deadline" "$MUT/fault-transfer-hold.sh"
-hl_green stmain "host loss with a stalled validator: the runner-less main container gone by its own deadline" "$MUT/fault-stalled.sh"
-hl_green stval "host loss with a stalled validator: the named validator gone by its own StartedAt+11+10" "$MUT/fault-stalled.sh"
-ctl_begin
-for _d in "$CAPHL" "$CAPTR" "$CAPST"; do
-	[ -d "$ISO/$_d" ] || SETUP=1
-	expect "host loss: nothing published into $_d" "$(find "$ISO/$_d" \( -name '*.png' -o -name capture.manifest \) 2>/dev/null | wc -l | tr -d ' ')" 0
-done
-for _o in cap hltr hlst; do [ -e "$TMP/$_o.out" ] || SETUP=1; done
-expect "host loss: no runner printed a capture PASS" "$(cat "$TMP/cap.out" "$TMP/hltr.out" "$TMP/hlst.out" 2>/dev/null | grep -c '^DEV-RUN-CAPTURE-PASS')" 0
-for _c in $(cat "$HLD/nobackstop.reg" "$HLD/norm.reg" "$HLD/late.reg" "$HLD/fatal.reg" 2>/dev/null | cut -d' ' -f1); do docker rm -f "$_c" >/dev/null 2>&1; done
-# the controller fatal case resolved gone, yet its fatal taint refuses both polarities (no credit through the deferred classifier)
-_hg=n
-_hr=n
-hl_credit green fatal && _hg=G
-hl_credit red fatal && _hr=R
-META=1
-expect "host loss with a controller fatal after readiness: the container is gone by its deadline, so the case would be GREEN, but its fatal taint refuses both polarities" "$HR_R:$_hg$_hr" "gone:nn"
-expect "host loss with a controller fatal after readiness: the taint is exactly the fatal output" "$(cat "$HLD/fatal.taint" 2>/dev/null)" "setup controller fatal output"
-META=0
-rm -rf "$ISO/$CAPHL" "$ISO/$CAPTR" "$ISO/$CAPST"
 
 # ===== 11. validator and redactor tests through the same runner (T31/T02 provider controls) =====================
 mkdir -p "$ISO/deploy/dev"
@@ -6255,7 +2446,7 @@ a_compose_consumers() {
 	_cd=$1
 	mkdir -p "$_cd/docs/spikes/issue-drafts"
 	rm -f "$_cd/docs/spikes/issue-drafts/s5-admission.md"
-	(cd "$_cd" && BOXSET_TEST_SECRET=https "$_cd/scripts/dev-run.sh" --write docs/spikes/issue-drafts -- sh -c 'printf "%s" "https://u:p@h/x?k=v"; printf "see https://u:p@h/x?k=v end" >/src/docs/spikes/issue-drafts/s5-admission.md; exit 1') >"$TMP/rout" 2>"$TMP/rerr"
+	(cd "$_cd" && BOXSET_TEST_SECRET=https "$_cd/scripts/dev-run.sh" --write docs/spikes/issue-drafts -- sh -c 'mkdir -p /src/docs/spikes/issue-drafts && printf "%s" "https://u:p@h/x?k=v"; printf "see https://u:p@h/x?k=v end" >/src/docs/spikes/issue-drafts/s5-admission.md; exit 1') >"$TMP/rout" 2>"$TMP/rerr"
 	RS=$?
 	rerr_seen
 	_cc=$(cname)
@@ -6345,15 +2536,15 @@ want() { # want NAME STATUS PATTERN
 	elif [ "$st" = "$2" ] && printf "%s\n" "$out" | grep -Eq "$3"; then echo "MUT $1 PASS"
 	else echo "MUT $1 FAIL: status $st: $(printf "%s\n" "$out" | head -n 4 | tr "\n" "|")"; fi
 }
-wantpass() { want "$1" 0 "^S5-ADMISSION-PASS blocked=0 unlisted=0"; }
+wantpass() { want "$1" 0 "^S5-MANIFEST-ONLY-PASS blocked=0 unlisted=0"; }
 wantnot() { # wantnot NAME STATUS PATTERN BADPATTERN: the intended outcome and no unintended block
 	if ! printf "%s\n" "$out" | grep -Eq "$4"; then want "$1" "$2" "$3"; else echo "MUT $1 FAIL: unintended output: $(printf "%s\n" "$out" | head -n 4 | tr "\n" "|")"; fi
 }
 osids=$(grep -E "^\| ADM-[0-9]+ \| apt \| os-(library|font|data) \|" /src/docs/spikes/s5-version-admission.md | cut -d" " -f2)
-want_all_os() { # want_all_os NAME PATTERN: every one of the 28 OS rows is blocked with PATTERN
+want_all_os() { # want_all_os NAME PATTERN: every one of the 29 OS rows is blocked with PATTERN
 	_n=0; _bad=0
 	for id in $osids; do _n=$((_n + 1)); printf "%s\n" "$out" | grep -Eq "^ADMISSION-BLOCKED $id: $2" || _bad=1; done
-	if [ "$SETUP_BAD" = 0 ] && [ "$st" = 1 ] && [ "$_bad" = 0 ] && [ "$_n" = 28 ]; then echo "MUT $1 PASS"; else echo "MUT $1 FAIL: status $st, os rows $_n (want 28), missing=$_bad, setup=$SETUP_BAD"; fi
+	if [ "$SETUP_BAD" = 0 ] && [ "$st" = 1 ] && [ "$_bad" = 0 ] && [ "$_n" = 29 ]; then echo "MUT $1 PASS"; else echo "MUT $1 FAIL: status $st, os rows $_n (want 29), missing=$_bad, setup=$SETUP_BAD"; fi
 }
 cat >/tmp/licmut.js <<"JS"
 const fs = require("fs");
@@ -6435,7 +2626,7 @@ reset; d=$(dago 366); sedx "$REP" "/^| ADM-004 /s/ 2026-10-10 / $d /"; admit
 want annual-366-days 1 "ADMISSION-BLOCKED ADM-004: maintenance_stale"
 reset; d=$(dago 365); sedx "$REP" "/^| ADM-004 /s/ 2026-10-10 / $d /"; admit
 wantpass annual-365-days-admits
-reset; sedx "$REP" "/^| ADM-004 /s/ release c6da4a4d3010e5553438c60f6bd76d981976867c / release 20261005T000000Z /"; admit
+reset; snap=$(sed -n "s/^ARG DEBIAN_SNAPSHOT=//p" "$DF"); [ -n "$snap" ] || SETUP_BAD=1; sedx "$REP" "/^| ADM-004 /s/ release c6da4a4d3010e5553438c60f6bd76d981976867c / release $snap /"; admit
 want snapshot-id-as-maintenance 1 "ADMISSION-BLOCKED ADM-004: evidence_invalid"
 reset; sedx "$REP" "/^| ADM-004 /s/ release c6da4a4d3010e5553438c60f6bd76d981976867c / release snapshot:20261005T000000Z /"; admit
 want snapshot-timestamp-as-maintenance 1 "ADMISSION-BLOCKED ADM-004: evidence_invalid"
@@ -6599,12 +2790,12 @@ s5_only() {
 # S5FIX: the checked in-image fixture shared by the report-copy controls (copies checked; the unmodified copy must pass first)
 S5FIX='R=/tmp/m; rm -rf $R && mkdir -p $R/deploy/dev $R/docs/spikes $R/web && cp /src/deploy/dev/Dockerfile $R/deploy/dev/ && cp /src/docs/spikes/s5-version-admission.md $R/docs/spikes/ && cp /src/web/package.json /src/web/bun.lock $R/web/ && cp /src/go.mod $R/ || { echo FIXTURE-FAIL copy; exit 97; }
 REP=$R/docs/spikes/s5-version-admission.md
-/src/scripts/s5-toolchain.sh --admission --root $R >$R/baseline.out 2>&1; grep -Eq "^S5-ADMISSION-PASS blocked=0 unlisted=0" $R/baseline.out || { echo FIXTURE-FAIL baseline; exit 98; }'
+/src/scripts/s5-toolchain.sh --admission --root $R >$R/baseline.out 2>&1; grep -Eq "^S5-MANIFEST-ONLY-PASS blocked=0 unlisted=0" $R/baseline.out || { echo FIXTURE-FAIL baseline; exit 98; }'
 # a_s5_scanner SCRIPT: an unlisted dependency in each of the four package.json sections, in compact
 # JSON (no indentation to scan), is reported by the real reader; every section must be found.
 a_s5_scanner() {
 	s5_install "$1" "$ISO/scripts/s5-mut.sh" || { OBS="the admission script could not be installed"; SETUP=1; return 1; }
-	rrx "$ISO" "$RUNNER" --timeout 300 -- sh -c 'for sec in dependencies devDependencies optionalDependencies peerDependencies; do R=/tmp/m; rm -rf $R && mkdir -p $R/deploy/dev $R/docs/spikes $R/web && cp /src/deploy/dev/Dockerfile $R/deploy/dev/ && cp /src/docs/spikes/s5-version-admission.md $R/docs/spikes/ && cp /src/web/package.json /src/web/bun.lock $R/web/ && cp /src/go.mod $R/ || { echo "SETUP-FAIL $sec"; continue; }; if ! S5_PKG=$R/web/package.json S5_SEC=$sec bun -e "const fs=require(\"fs\");const p=JSON.parse(fs.readFileSync(process.env.S5_PKG,\"utf8\"));p[process.env.S5_SEC]=p[process.env.S5_SEC]||{};p[process.env.S5_SEC][\"left-pad\"]=\"1.3.0\";fs.writeFileSync(process.env.S5_PKG,JSON.stringify(p));" || ! grep -q left-pad $R/web/package.json; then echo "SETUP-FAIL $sec"; continue; fi; out=$(/src/scripts/s5-mut.sh --admission --root $R 2>&1); st=$?; printf "%s\n" "$out" | grep "^ADMISSION-BLOCKED " | head -n 3 | sed "s/^/DETAIL $sec /"; echo "SECTION $sec STATUS $st COUNT $(printf "%s\n" "$out" | grep -c "ADMISSION-UNLISTED npm left-pad@1.3.0") OTHER $(printf "%s\n" "$out" | grep -E "^ADMISSION-(BLOCKED|UNLISTED) " | grep -vc "ADMISSION-UNLISTED npm left-pad@1.3.0") DONE $(printf "%s\n" "$out" | grep -Ec "^S5-ADMISSION-(PASS|FAIL) ")"; done; echo SCANNER-DONE'
+	rrx "$ISO" "$RUNNER" --timeout 300 -- sh -c 'for sec in dependencies devDependencies optionalDependencies peerDependencies; do R=/tmp/m; rm -rf $R && mkdir -p $R/deploy/dev $R/docs/spikes $R/web && cp /src/deploy/dev/Dockerfile $R/deploy/dev/ && cp /src/docs/spikes/s5-version-admission.md $R/docs/spikes/ && cp /src/web/package.json /src/web/bun.lock $R/web/ && cp /src/go.mod $R/ || { echo "SETUP-FAIL $sec"; continue; }; if ! S5_PKG=$R/web/package.json S5_SEC=$sec bun -e "const fs=require(\"fs\");const p=JSON.parse(fs.readFileSync(process.env.S5_PKG,\"utf8\"));p[process.env.S5_SEC]=p[process.env.S5_SEC]||{};p[process.env.S5_SEC][\"left-pad\"]=\"1.3.0\";fs.writeFileSync(process.env.S5_PKG,JSON.stringify(p));" || ! grep -q left-pad $R/web/package.json; then echo "SETUP-FAIL $sec"; continue; fi; out=$(/src/scripts/s5-mut.sh --admission --root $R 2>&1); st=$?; printf "%s\n" "$out" | grep "^ADMISSION-BLOCKED " | head -n 3 | sed "s/^/DETAIL $sec /"; echo "SECTION $sec STATUS $st COUNT $(printf "%s\n" "$out" | grep -c "ADMISSION-UNLISTED npm left-pad@1.3.0") OTHER $(printf "%s\n" "$out" | grep -E "^ADMISSION-(BLOCKED|UNLISTED) " | grep -vc "ADMISSION-UNLISTED npm left-pad@1.3.0") DONE $(printf "%s\n" "$out" | grep -Ec "^S5-(ADMISSION-(PASS|FAIL)|MANIFEST-ONLY-PASS) ")"; done; echo SCANNER-DONE'
 	rm -f "$ISO/scripts/s5-mut.sh"
 	# the scanner's runner status and EACH section's own reading are prerequisites: a section must have completed (the admission script's own summary
 	# line), ended with its accepting 0 or rejecting 1, and carry no blocked row and no unlisted row but the planted dependency. A blocked row
@@ -6632,7 +2823,7 @@ redgreen "line-scanner dependency mutant (compact JSON, all four sections)" a_s5
 mutate_file_copy s5-section-dropped '["dependencies","devDependencies","optionalDependencies","peerDependencies"]' '["devDependencies"]'
 redgreen "section-dropping dependency mutant (only devDependencies enumerated)" a_s5_scanner "$MUT/s5-section-dropped.sh" "$SRC/scripts/s5-toolchain.sh"
 
-# failing admission drafts, written in place through the fixed map. Early missing-input drafts are
+# failing admission drafts: the child creates /src/docs/spikes/issue-drafts/s5-admission.md itself and the runner publishes it. Early missing-input drafts are
 # fast; the final-admission drafts below run the real /src script after a real manifest check.
 fiso fault-admission
 rm -f "$FISO/docs/spikes/s5-version-admission.md"
@@ -6649,18 +2840,6 @@ a_admission_draft() { # holds when a failing admission leaves exactly its redact
 mutate_file_copy s5-draft-dropped 'if [ -n "$DRAFT" ]; then' 'if false; then'
 cp "$SRC/scripts/dev-run.sh" "$FISO/scripts/dev-run.sh"
 redgreen "draft-dropping admission mutant (early missing input)" a_admission_draft "$MUT/s5-draft-dropped.sh" "$SRC/scripts/s5-toolchain.sh"
-a_admission_capfull() { # holds when a full draft root makes S5 report the draft write failure and publish nothing
-	s5_install "$1" "$FISO/scripts/s5-toolchain.sh" || { OBS="the admission script could not be installed"; SETUP=1; return 1; }
-	find "$FISO/docs/spikes/issue-drafts" -mindepth 1 -delete
-	rrx "$FISO" "$FISO/scripts/dev-run.sh" --write docs/spikes/issue-drafts --timeout 300 -- sh -c 'head -c 33554432 /dev/zero >/src/docs/spikes/issue-drafts/s5-tools.md; [ "$(stat -c %s /src/docs/spikes/issue-drafts/s5-tools.md)" = 33554432 ] && echo FILL-OK; /src/scripts/s5-toolchain.sh --admission'
-	OBS="status $RS, $(grep -c S5-DRAFT-WRITE-FAILED "$TMP/rout") failure lines, fill $(grep -c '^FILL-OK$' "$TMP/rout")"
-	# the target: the draft root is really full and the failing admission reached its draft write
-	[ "$(grep -c '^FILL-OK$' "$TMP/rout")" = 1 ] && grep -Fq 'ADMISSION-BLOCKED inputs' "$TMP/rout" && s5_done && reached
-	[ "$RS" = 1 ] && grep -Fq 'S5-DRAFT-WRITE-FAILED name=s5-admission.md' "$TMP/rout" && grep -Fq 'dev-run: write_cap_reached root=docs/spikes/issue-drafts' "$TMP/rerr" && [ ! -e "$FISO/docs/spikes/issue-drafts/s5-admission.md" ]
-}
-mutate_file_copy s5-draft-error-swallowed 'if ! cat "$T/draft.out" >"$DRAFT" 2>/dev/null; then' 'if false; then'
-redgreen "draft-write-error-swallowing admission mutant" a_admission_capfull "$MUT/s5-draft-error-swallowed.sh" "$SRC/scripts/s5-toolchain.sh"
-redgreen "draft-dropping mutant under a full draft root" a_admission_capfull "$MUT/s5-draft-dropped.sh" "$SRC/scripts/s5-toolchain.sh"
 rm -rf "$FISO"
 
 # Final failed admission through /src: a real checksum defect in the report copy blocks ADM-003 in the
@@ -6713,7 +2892,7 @@ echo FIXTURE-OK
 	reached
 	[ "$RS" = 1 ] && grep -Eq "$3" "$TMP/rout"
 }
-a_cat_removed() { a_s5_report "$1" '/^| ADM-115 /s/| npm-dependency |/| os-library |/' 'ADMISSION-BLOCKED ADM-115: category_invalid' 'ADM-115'; }
+a_cat_removed() { a_s5_report "$1" '/^| ADM-115 /s/| npm-dependency |/| os-library |/' 'ADMISSION-BLOCKED ADM-115: category_invalid' 'ADM-115|npm svelte@5\.57\.2'; }
 mutate_file_copy s5-category-removed 'if [ "$cat_ok" = 0 ]; then' 'if false; then'
 redgreen "category-check-removed mutant admits the relabelled npm row" a_cat_removed "$MUT/s5-category-removed.sh" "$SRC/scripts/s5-toolchain.sh"
 mutate_file_copy s5-supported-ignored 'supported) _sup=1 ;;' 'supported) : ;;'
@@ -6764,8 +2943,8 @@ a_support_ctl() {
 	[ "$RS" = "$4" ] && grep -Eq "$5" "$TMP/rout" && { [ -z "${6:-}" ] || ! grep -Eq "$6" "$TMP/rout"; }
 }
 a_supported_wins() { a_support_ctl "$1" 'libx.* limited broad
-libx11 supported override' '/^| ADM-031 /s/status=clear/status=supported/' 1 'ADMISSION-BLOCKED ADM-032: distro_unsupported' 'ADMISSION-BLOCKED ADM-031' 'ADM-03[12]'; }
-a_full_string() { a_support_ctl "$1" 'libx1 limited prefix only' 's/^$//' 0 '^S5-ADMISSION-PASS blocked=0 unlisted=0' '' '' 'ADMISSION-BLOCKED ADM-031: distro_unsupported'; }
+libx11 supported override' '/^| ADM-031 /s/status=clear/status=supported/' 1 'ADMISSION-BLOCKED ADM-032: distro_unsupported' 'ADMISSION-BLOCKED ADM-031' 'ADM-03[1-8]'; }
+a_full_string() { a_support_ctl "$1" 'libx1 limited prefix only' 's/^$//' 0 '^S5-MANIFEST-ONLY-PASS blocked=0 unlisted=0' '' '' 'ADMISSION-BLOCKED ADM-031: distro_unsupported'; }
 redgreen "supported-override-ignored mutant" a_supported_wins "$MUT/s5-supported-ignored.sh" "$SRC/scripts/s5-toolchain.sh"
 redgreen "prefix-match mutant" a_full_string "$MUT/s5-prefix-match.sh" "$SRC/scripts/s5-toolchain.sh"
 # A matcher evaluation error (grep status above 1) is never a nonmatch: through the real script every
@@ -6774,8 +2953,8 @@ a_eval_error() {
 	a_support_ctl "$1" '' 's/^$//' 1 'ADMISSION-BLOCKED ADM-013: evidence_invalid: support-list pattern evaluation failed' '' '' 'ADMISSION-BLOCKED ADM-[0-9]+: evidence_invalid: support-list pattern evaluation failed'
 	_r=$?
 	_n=$(grep -c '^ADMISSION-BLOCKED ADM-[0-9]*: evidence_invalid: support-list pattern evaluation failed' "$TMP/rout")
-	OBS="$OBS; $_n OS rows evidence_invalid (want 28)"
-	[ "$_r" = 0 ] && [ "$_n" = 28 ]
+	OBS="$OBS; $_n OS rows evidence_invalid (want 29)"
+	[ "$_r" = 0 ] && [ "$_n" = 29 ]
 }
 mutate_file_copy s5-eval-error 'pcre_match() { LC_ALL=C grep -P -x -q -e "$1" 2>/dev/null; }' 'pcre_match() { cat >/dev/null; return 2; }'
 mutate_file_copy s5-eval-nonmatch 'pcre_match() { LC_ALL=C grep -P -x -q -e "$1" 2>/dev/null; }' 'pcre_match() { cat >/dev/null; return 2; }' '[ "$_rc" -le 1 ] || { SSTAT=evaluation_error; return; }' ':'
@@ -6833,7 +3012,7 @@ mutate_file_copy s5-lint-unrelated-novio 'fmt.Printf("%%d", "x")' 'fmt.Println("
 # Browser: only Playwright'"'"'s chromium-headless-shell, resolvable and launching.'
 RA_TARGET=lint
 refuses_both "linter target beside an unrelated blocked row (actual runner and provider): the no-violation mutant earns no RED and the original no GREEN, both are setup" a_real_admission "$MUT/s5-lint-unrelated-novio.sh" "$MUT/s5-lint-unrelated-orig.sh"
-mutate_file_copy s5-draft-on-success "printf 'S5-ADMISSION-PASS blocked=0 unlisted=0 rows=%s\\n' \"\$ROWS\"" "printf 'S5-ADMISSION-PASS blocked=0 unlisted=0 rows=%s\\n' \"\$ROWS\"; [ -z \"\$DRAFT\" ] || printf stale >\"\$DRAFT\""
+mutate_file_copy s5-draft-on-success "printf 'S5-ADMISSION-PASS blocked=0 unlisted=0 rows=%s\\n' \"\$ROWS\"" "printf 'S5-ADMISSION-PASS blocked=0 unlisted=0 rows=%s\\n' \"\$ROWS\"; mkdir -p /src/docs/spikes/issue-drafts && printf stale >/src/docs/spikes/issue-drafts/s5-admission.md"
 RA_TARGET=pass
 redgreen "draft-written-on-success mutant" a_real_admission "$MUT/s5-draft-on-success.sh" "$SRC/scripts/s5-toolchain.sh"
 
@@ -6893,15 +3072,15 @@ GO
 fi
 
 # next-consumer freshness: changed host fixture and Go source reach the next real consumer; locks match host bytes
-mkdir -p "$ISO/testdata/parser" "$ISO/internal/refreshprobe"
-printf 'fixture one\n' >"$ISO/testdata/parser/series.jsonl"
+mkdir -p "$ISO/testdata/refresh" "$ISO/internal/refreshprobe"
+printf 'fixture one\n' >"$ISO/testdata/refresh/fixture.txt"
 printf 'package refreshprobe\n\nconst Version = 1\n' >"$ISO/internal/refreshprobe/probe.go"
-CONSUME='sha256sum /src/testdata/parser/series.jsonl /src/internal/refreshprobe/probe.go /src/go.mod /src/web/bun.lock'
-hostsums() { (cd "$ISO" && for f in testdata/parser/series.jsonl internal/refreshprobe/probe.go go.mod web/bun.lock; do set -- $(sha256sum "$f"); printf '%s  /src/%s\n' "$1" "$f"; done); }
+CONSUME='sha256sum /src/testdata/refresh/fixture.txt /src/internal/refreshprobe/probe.go /src/go.mod /src/web/bun.lock'
+hostsums() { (cd "$ISO" && for f in testdata/refresh/fixture.txt internal/refreshprobe/probe.go go.mod web/bun.lock; do set -- $(sha256sum "$f"); printf '%s  /src/%s\n' "$1" "$f"; done); }
 rr -- sh -c "$CONSUME"
 first=$(cat "$TMP/rout")
 expect "first consumer reports the host fixture, Go source, go.mod and bun.lock hashes" "$RS:$first" "0:$(hostsums)"
-printf 'fixture two, changed on the host\n' >"$ISO/testdata/parser/series.jsonl"
+printf 'fixture two, changed on the host\n' >"$ISO/testdata/refresh/fixture.txt"
 printf 'package refreshprobe\n\nconst Version = 2\n' >"$ISO/internal/refreshprobe/probe.go"
 a_refresh() { # holds when the next consumer observes exactly the new bytes
 	rrx "$ISO" "$1" -- sh -c "$CONSUME"
@@ -6910,10 +3089,11 @@ a_refresh() { # holds when the next consumer observes exactly the new bytes
 	[ "$RS" = 0 ] && [ "$(cat "$TMP/rout")" = "$(hostsums)" ]
 }
 fiso stale-context
-gvariant mut-refresh-skipped controller.go '"--progress", "plain", "."}' '"--progress", "plain", "'$TMP'/stale-context"}'
+# the mutant is a runner copy whose work-image build reads the stale copy of the checkout instead of the current one
+variant mut-refresh-skipped '--progress plain . 2>&1' "--progress plain $TMP/stale-context 2>&1"
 rm -rf "$TMP/stale-context"
 mv "$FISO" "$TMP/stale-context"
-printf 'fixture one\n' >"$TMP/stale-context/testdata/parser/series.jsonl" 2>/dev/null || true
+printf 'fixture one\n' >"$TMP/stale-context/testdata/refresh/fixture.txt"
 printf 'package refreshprobe\n\nconst Version = 1\n' >"$TMP/stale-context/internal/refreshprobe/probe.go"
 redgreen "refresh-skipped mutant (stale build context)" a_refresh "$MUT/mut-refresh-skipped.sh" "$RUNNER"
 rm -rf "$TMP/stale-context" "$ISO/testdata" "$ISO/internal/refreshprobe"
