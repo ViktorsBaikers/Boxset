@@ -498,7 +498,7 @@ func (w *s2World) watchWrites() {
 	w.t.Helper()
 	ctx := w.t.Context()
 	err := w.db.Write(ctx, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite\_%' ESCAPE '\'`)
+		rows, err := tx.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite\_%' ESCAPE '\' AND sql NOT LIKE 'CREATE VIRTUAL%'`)
 		if err != nil {
 			return err
 		}
