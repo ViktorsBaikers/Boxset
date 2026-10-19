@@ -87,6 +87,49 @@ var crashScenarios = map[string]crashScenario{
 			return errors.New("crash scenario was not killed")
 		})
 	},
+	// changes episode and movie state through the transaction-level slot-state
+	// writers, checks the rollups equal the recompute inside the open
+	// transaction, and waits. args: series slot id, movie slot id.
+	"slot-state": func(ctx context.Context, l *Library, args []string, ready func(tx *sql.Tx)) error {
+		series, err := strconv.ParseInt(args[0], 10, 64)
+		if err != nil {
+			return err
+		}
+		movie, err := strconv.ParseInt(args[1], 10, 64)
+		if err != nil {
+			return err
+		}
+		return l.db.Write(ctx, func(tx *sql.Tx) error {
+			var before int64
+			if err := tx.QueryRowContext(ctx, `SELECT sum(revision) FROM title_rollup`).Scan(&before); err != nil {
+				return err
+			}
+			for _, c := range []SlotEpisodeChange{
+				{SlotID: SlotID(series), Season: 1, Number: 2, Monitored: true, State: "live", SizeBytes: 77},
+				{SlotID: SlotID(series), Season: 2, Number: 1, Monitored: true, State: "on_disk", SizeBytes: 55},
+			} {
+				if err := setSlotEpisode(ctx, tx, c); err != nil {
+					return err
+				}
+			}
+			if err := setMovieSlot(ctx, tx, MovieSlotChange{SlotID: SlotID(movie), State: "on_disk", SizeBytes: 9}); err != nil {
+				return err
+			}
+			var after int64
+			if err := tx.QueryRowContext(ctx, `SELECT sum(revision) FROM title_rollup`).Scan(&after); err != nil {
+				return err
+			}
+			if after <= before {
+				return errors.New("slot-state scenario moved no rollup")
+			}
+			if err := oracleCheck(ctx, tx); err != nil {
+				return err
+			}
+			ready(tx)
+			time.Sleep(2 * time.Minute) // the parent kills first; this only bounds an orphan
+			return errors.New("crash scenario was not killed")
+		})
+	},
 }
 
 const (
@@ -275,4 +318,69 @@ func TestKilledWriterLeavesNoPartialRowsWithHold(t *testing.T) {
 		t.Fatalf("after replay counts = %v, want %v", got, want)
 	}
 	requireFileRows(t, db, []string{fileRow(file)})
+}
+
+// A writer killed after it changed episode and movie state, with the rollups
+// equal to the recompute inside its open transaction, before it committed,
+// leaves the base rows and the rollups as they were, and both agree; replaying
+// the same changes lands both together.
+func TestKilledWriterProjectionMatchesOracle(t *testing.T) {
+	w := applyS2(t)
+	ctx := t.Context()
+	series, movie := w.slotID("tvdb:9001", "hd"), w.slotID("tmdb:603", "hd")
+	requireOracle(t, w.db)
+	baseRows := []string{`SELECT * FROM slot_episode`, `SELECT id, media_state, size_bytes FROM slot`, rollupDumpQuery}
+	snapshot := func(db *store.DB) [][]string {
+		var out [][]string
+		for _, q := range baseRows {
+			out = append(out, dump(t, db, q))
+		}
+		return out
+	}
+	before := snapshot(w.db)
+	beforeCounts := acqCounts(t, w.db)
+
+	seen := killChild(t, "slot-state", dbPath(t, w.db), strconv.FormatInt(int64(series), 10), strconv.FormatInt(int64(movie), 10))
+	if !maps.Equal(seen, beforeCounts) {
+		t.Fatalf("child saw %v inside its transaction, want the acquisition tables unchanged %v", seen, beforeCounts)
+	}
+
+	// Reopen the file: recovery leaves none of it, and rollups equal the recompute.
+	db, err := store.Open(ctx, dbPath(t, w.db), store.Options{})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	after := snapshot(db)
+	for i, q := range baseRows {
+		if !slices.Equal(before[i], after[i]) {
+			t.Fatalf("killed writer left rows of %q: before %v after %v", q, before[i], after[i])
+		}
+	}
+	requireOracle(t, db)
+
+	// Replay: the same changes land, base rows and rollups together.
+	l := New(db)
+	for _, c := range []SlotEpisodeChange{
+		{SlotID: series, Season: 1, Number: 2, Monitored: true, State: "live", SizeBytes: 77},
+		{SlotID: series, Season: 2, Number: 1, Monitored: true, State: "on_disk", SizeBytes: 55},
+	} {
+		if err := l.SetSlotEpisode(ctx, c); err != nil {
+			t.Fatalf("replay %+v: %v", c, err)
+		}
+	}
+	if err := l.SetMovieSlot(ctx, MovieSlotChange{SlotID: movie, State: "on_disk", SizeBytes: 9}); err != nil {
+		t.Fatalf("replay movie: %v", err)
+	}
+	requireOracle(t, db)
+	if got := snapshot(db); slices.Equal(got[2], before[2]) {
+		t.Fatal("the replay moved no rollup")
+	}
+	r, err := l.Rollups(ctx, w.titles["tvdb:9001"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i := slices.IndexFunc(r, func(x Rollup) bool { return x.SlotID == series }); i < 0 || r[i].SizeBytes != 1132 || r[i].OnDisk != 2 || r[i].Spine != "FLMFM" {
+		t.Fatalf("rollup after the replay = %+v, want 1132 bytes, 2 on disk, spine FLMFM", r)
+	}
 }
