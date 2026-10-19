@@ -193,10 +193,19 @@ RUN chown root:root /usr/local/libexec/boxset/capture-check \
 COPY web/package.json web/bun.lock /src/web/
 RUN cd /src/web && HOME=/home/boxset bun install --frozen-lockfile --ignore-scripts
 COPY go.mod go.sum* /src/
-# The download uses the runner's exact module locations (GOPATH/GOMODCACHE of the
-# child environment), so the offline -mod=readonly consumer finds this image-only cache.
-RUN cd /src && GOPATH=/go GOMODCACHE=/go/pkg/mod GOCACHE=/var/cache/go-build GOTOOLCHAIN=local GOFLAGS=-mod=readonly \
-    GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org go mod download
+# The offline -mod=readonly consumers (go list, go mod tidy -diff, go mod verify and the go.sum
+# regeneration of scripts/s5-toolchain.sh --admission) find this image-only cache at the runner's
+# exact module locations (GOPATH/GOMODCACHE of the child environment). It is filled from a
+# go.sum-less scratch copy of go.mod under GOSUMDB=sum.golang.org: `go mod download all` caches
+# the whole module graph, test-only dependencies of dependencies included, and the checksum
+# database records the regeneration reads. /src/go.sum is never written.
+RUN set -eu; \
+    mkdir /tmp/dl; \
+    cp /src/go.mod /tmp/dl/go.mod; \
+    cd /tmp/dl; \
+    GOPATH=/go GOMODCACHE=/go/pkg/mod GOCACHE=/var/cache/go-build GOTOOLCHAIN=local GOENV=off GOFLAGS=-mod=mod \
+    GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org go mod download all; \
+    rm -rf /tmp/dl
 COPY . /src/
 RUN set -eu; \
     find /src -path /src/web/node_modules -prune -o -type f -print0 \

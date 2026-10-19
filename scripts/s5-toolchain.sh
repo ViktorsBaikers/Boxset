@@ -17,6 +17,10 @@
 # `S5-MANIFEST-ONLY-PASS`, never admission. `--facts` prints
 # the installed per-package facts a row's licence cell needs; it admits nothing.
 # The support-list block is immutable report data; this script never fetches.
+# Go rows (DEC-011, DEC-012): every go.mod require and, at the real root, every module that
+# `go list -deps -test ./...` compiles has a row; an indirect require may carry a pseudo-version;
+# the real root also needs a clean `go mod tidy -diff` and a go.sum that regenerates byte for
+# byte under GOSUMDB=sum.golang.org.
 #
 # `--tools` runs the eight web tools (vite-build, svelte-check, eslint, prettier,
 # vitest-browser, vite-dev, playwright-axe, sv) with Bun against the synthetic probe
@@ -617,13 +621,23 @@ enum_deps() {
 enum_deps "$PKG" >"$T/deps" 2>"$T/deps.err" || block bun "cannot enumerate web/package.json dependencies: $(head -c 300 "$T/deps.err")"
 
 # --- go.mod: only module, go and require directives are admitted ---------------------------
-# $T/gomod.req lists path<TAB>version of every require (single-line or block, direct or
-# indirect); any other directive stays unlisted.
+# $T/gomod.req lists path<TAB>version<TAB>direct|indirect of every require (single-line or
+# block). The class is read from the trailing comment before it is dropped: only Go's
+# `// indirect` marker makes a require indirect (DEC-011); every other require is direct and
+# `go mod tidy -diff` at the real root rejects a hand-set marker. Any other directive stays
+# unlisted.
 TARGET_LIST='linux/amd64 linux/arm64 linux/arm windows/amd64 windows/arm64 darwin/amd64 freebsd/amd64 freebsd/arm64'
 GOROWS=0
 : >"$T/gomod.req"
 _inreq=0
 while IFS= read -r _l || [ -n "$_l" ]; do
+	_cls=direct
+	case $_l in
+	*//*)
+		set -- ${_l#*//}
+		case ${1:-} in indirect | indirect\;*) _cls=indirect ;; esac
+		;;
+	esac
 	_l=${_l%%//*}
 	set -- $_l
 	[ $# -gt 0 ] || continue
@@ -631,7 +645,7 @@ while IFS= read -r _l || [ -n "$_l" ]; do
 		if [ $# = 1 ] && [ "$1" = ")" ]; then
 			_inreq=0
 		elif [ $# = 2 ]; then
-			printf '%s\t%s\n' "$1" "$2" >>"$T/gomod.req"
+			printf '%s\t%s\t%s\n' "$1" "$2" "$_cls" >>"$T/gomod.req"
 		else
 			unlisted go.mod "requirement line '$_l'"
 		fi
@@ -643,7 +657,7 @@ while IFS= read -r _l || [ -n "$_l" ]; do
 		if [ $# = 2 ] && [ "$2" = "(" ]; then
 			_inreq=1
 		elif [ $# = 3 ]; then
-			printf '%s\t%s\n' "$2" "$3" >>"$T/gomod.req"
+			printf '%s\t%s\t%s\n' "$2" "$3" "$_cls" >>"$T/gomod.req"
 		else
 			unlisted go.mod "require line '$_l'"
 		fi
@@ -681,6 +695,7 @@ while IFS='|' read -r _ id kind category name version pin source publisher licen
 	bun=${bun# }
 	bun=${bun% }
 	ROWS=$((ROWS + 1))
+	gocls=
 
 	if [ "$(grep -c "^| $id |" "$T/rows")" != 1 ]; then block "$id" "duplicate id"; fi
 	if [ "$(grep -c "^| ADM-[0-9]* | $kind | [a-z-]* | $name |" "$T/rows")" != 1 ]; then block "$id" "duplicate $kind $name"; fi
@@ -836,22 +851,42 @@ while IFS='|' read -r _ id kind category name version pin source publisher licen
 		fi
 		;;
 	go)
-		# Go module row: name is the module path, version an exact release, pin its go.sum h1: hash.
+		# Go module row: name is the module path, version an exact release (an indirect require
+		# may carry a pseudo-version, DEC-011), pin its go.sum h1: hash.
 		GOROWS=$((GOROWS + 1))
-		printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || block "$id" "go version $version is not an exact vMAJOR.MINOR.PATCH release"
+		gocls=direct
+		if printf '%s\t%s\tindirect\n' "$name" "$version" | grep -Fxqf - "$T/gomod.req" 2>/dev/null; then gocls=indirect; fi
+		gopseudo=
+		if printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+			:
+		elif [ "$gocls" = indirect ] && printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{14}-[0-9a-f]{12}$'; then
+			gopseudo=${version##*-}
+		else
+			block "$id" "go version $version is not an exact vMAJOR.MINOR.PATCH release (only an indirect require may be a pseudo-version)"
+		fi
 		printf '%s' "$pin" | grep -Eq '^h1:[A-Za-z0-9+/]{43}=$' || block "$id" "pin is not a go.sum h1: hash"
-		printf '%s\t%s\n' "$name" "$version" | grep -Fxqf - "$T/gomod.req" 2>/dev/null || block "$id" "go.mod does not require $name $version exactly"
-		# source: go-proxy https://proxy.golang.org origin=<https URL> commit=<40 hex> ref=refs/tags/<version>
+		printf '%s\t%s\t%s\n' "$name" "$version" "$gocls" | grep -Fxqf - "$T/gomod.req" 2>/dev/null || block "$id" "go.mod does not require $name $version exactly"
+		# source: go-proxy https://proxy.golang.org origin=<https URL> commit=<40 hex> ref=refs/tags/<version>;
+		# a pseudo-version row has no ref, and its 12 hex are the prefix of the commit
 		set -- $source
 		s3=${3:-}
 		s4=${4:-}
 		s5=${5:-}
 		src_origin=${s3#origin=}
 		src_commit=${s4#commit=}
-		{ [ $# = 5 ] && [ "${1:-}" = go-proxy ] && [ "${2:-}" = https://proxy.golang.org ] && [ "$s3" != "$src_origin" ] && [ "$s4" != "$src_commit" ] &&
-			[ "$s5" = "ref=refs/tags/$version" ] && case $src_origin in https://?*) true ;; *) false ;; esac &&
-			printf '%s' "$src_commit" | grep -Eq '^[0-9a-f]{40}$'; } ||
-			block "$id" "source_mismatch: source cell '$source' is not go-proxy https://proxy.golang.org origin=<https URL> commit=<40 hex> ref=refs/tags/$version"
+		if [ -n "$gopseudo" ]; then
+			go_ref=
+			go_nwords=4
+			go_form="go-proxy https://proxy.golang.org origin=<https URL> commit=<40 hex starting $gopseudo> with no ref"
+		else
+			go_ref=refs/tags/$version
+			go_nwords=5
+			go_form="go-proxy https://proxy.golang.org origin=<https URL> commit=<40 hex> ref=refs/tags/$version"
+		fi
+		{ [ $# = "$go_nwords" ] && [ "${1:-}" = go-proxy ] && [ "${2:-}" = https://proxy.golang.org ] && [ "$s3" != "$src_origin" ] && [ "$s4" != "$src_commit" ] &&
+			{ [ -n "$gopseudo" ] || [ "$s5" = "ref=refs/tags/$version" ]; } && case $src_origin in https://?*) true ;; *) false ;; esac &&
+			printf '%s' "$src_commit" | grep -Eq '^[0-9a-f]{40}$' && case $src_commit in "$gopseudo"*) true ;; *) false ;; esac; } ||
+			block "$id" "source_mismatch: source cell '$source' is not $go_form"
 		# licence: <SPDX name> license-sha256=<64 hex> of the module root LICENSE
 		want_lic=
 		for tok in $licence; do
@@ -868,7 +903,11 @@ while IFS='|' read -r _ id kind category name version pin source publisher licen
 		if [ "$ROOT" = /src ]; then
 			# Real-root phase, never fetching (the runner's GOFLAGS=-mod=readonly GOPROXY=off GOMODCACHE).
 			grep -Fxq "$name $version $pin" "$ROOT/go.sum" 2>/dev/null || block "$id" "go.sum lacks '$name $version $pin'"
-			grep -Fq "$name $version/go.mod h1:" "$ROOT/go.sum" 2>/dev/null || block "$id" "go.sum lacks the $name $version/go.mod hash"
+			_gmok=0
+			while read -r gp gv gh _; do
+				if [ "$gp $gv" = "$name $version/go.mod" ] && printf '%s' "$gh" | grep -Eq '^h1:[A-Za-z0-9+/]{43}=$'; then _gmok=1; fi
+			done <"$ROOT/go.sum"
+			[ "$_gmok" = 1 ] || block "$id" "go.sum lacks a well-formed $name $version/go.mod hash"
 			gmc=$(go env GOMODCACHE 2>/dev/null)
 			gl=$(cd "$ROOT" && go list -m -f '{{.Version}} {{.Dir}}' "$name" 2>&1) || gl=
 			gl_v=${gl%% *}
@@ -882,7 +921,7 @@ while IFS='|' read -r _ id kind category name version pin source publisher licen
 				[ "$got_lic" = "$want_lic" ] || block "$id" "licence_mismatch: license-sha256=$want_lic, module LICENSE is ${got_lic:-missing}"
 				esc=$(printf '%s' "$name" | sed 's/[A-Z]/!&/g' | tr 'A-Z' 'a-z')
 				got_info=$(S5_INFO=$gmc/cache/download/$esc/@v/$version.info bun -e 'const i=JSON.parse(require("fs").readFileSync(process.env.S5_INFO,"utf8"));const o=i.Origin||{};console.log([i.Version||"",o.URL||"",o.Hash||"",o.Ref||""].join("\t"))' 2>/dev/null)
-				want_info=$(printf '%s\t%s\t%s\t%s' "$version" "$src_origin" "$src_commit" "refs/tags/$version")
+				want_info=$(printf '%s\t%s\t%s\t%s' "$version" "$src_origin" "$src_commit" "$go_ref")
 				[ "$got_info" = "$want_info" ] || block "$id" "source_mismatch: module cache .info says '$got_info', source cell says '$want_info'"
 			else
 				block "$id" "go list -m resolved '$gl' for $name, want $version under ${gmc:-GOMODCACHE}"
@@ -976,7 +1015,7 @@ while IFS='|' read -r _ id kind category name version pin source publisher licen
 				age=$(age_days "$ev_date")
 				if [ "$age" -lt 0 ]; then
 					block "$id" "evidence_invalid: evidence dated $ev_date is after the run date $TODAY"
-				elif [ "$age" -gt 365 ]; then
+				elif [ "$age" -gt 365 ] && [ "$gocls" != indirect ]; then
 					block "$id" "maintenance_stale: $ev_type dated $ev_date is $age days before $TODAY"
 				fi
 			fi
@@ -1019,23 +1058,54 @@ while IFS= read -r line; do
 		;;
 	esac
 done <"$T/froms"
-# Every go.mod require has exactly one go row; at the real root go.sum holds only the rows'
-# module lines and `go mod verify` proves the cached bytes against it.
-while IFS="$(printf '\t')" read -r pkg ver; do
+# Every go.mod require has exactly one go row. At the real root every module the main module
+# compiles, as listed by `go list -deps -test ./...` for the host and each committed target with
+# CGO_ENABLED=0, has one too (DEC-012); go.sum lines outside that set need no row. `go mod verify`
+# proves the cached bytes against go.sum but never consults the checksum database, so go.sum is
+# also regenerated from a go.sum-less copy of go.mod under GOSUMDB=sum.golang.org (GOENV=off,
+# because an empty variable does not override a go env file) and must match byte for byte, and
+# `go mod tidy -diff` must print nothing.
+while IFS="$(printf '\t')" read -r pkg ver _; do
 	[ -n "$pkg" ] || continue
 	grep -Fq "| go | go-dependency | $pkg | $ver |" "$T/rows" || unlisted go "$pkg@$ver"
 done <"$T/gomod.req"
 if [ "$ROOT" = /src ]; then
-	while read -r gp gv gh _; do
-		[ -n "$gp" ] || continue
-		case $gv in
-		*/go.mod) { grep -Fq "| go | go-dependency | $gp | ${gv%/go.mod} |" "$T/rows" && printf '%s' "$gh" | grep -Eq '^h1:[A-Za-z0-9+/]{43}=$'; } || unlisted go.sum "$gp $gv" ;;
-		*) grep -Fq "| go | go-dependency | $gp | $gv | $gh |" "$T/rows" || unlisted go.sum "$gp $gv" ;;
-		esac
-	done <"$ROOT/go.sum"
+	: >"$T/compiled"
+	for _tg in host $TARGET_LIST; do
+		set -- CGO_ENABLED=0
+		if [ "$_tg" != host ]; then
+			set -- "$@" "GOOS=${_tg%/*}" "GOARCH=${_tg#*/}"
+		fi
+		if _lo=$(cd "$ROOT" && env "$@" go list -deps -test -f '{{with .Module}}{{if not .Main}}{{.Path}}{{"\t"}}{{.Version}}{{end}}{{end}}' ./... 2>"$T/golist.err"); then
+			printf '%s\n' "$_lo" >>"$T/compiled"
+		else
+			block go.mod "go list -deps -test ./... failed for $_tg: $(head -c 300 "$T/golist.err" | tr '\n' ' ')"
+		fi
+	done
+	LC_ALL=C sort -u "$T/compiled" | grep . >"$T/compiled.set"
+	[ -s "$T/compiled.set" ] || block go.mod "go list -deps -test ./... listed no compiled module"
+	while IFS="$(printf '\t')" read -r cmod cver _; do
+		[ -n "$cmod" ] || continue
+		grep -Fq "| go | go-dependency | $cmod | $cver |" "$T/rows" || unlisted go-compiled "$cmod@$cver"
+	done <"$T/compiled.set"
 	if [ "$GOROWS" -gt 0 ]; then
 		gvout=$(cd "$ROOT" && go mod verify 2>&1)
 		[ "$gvout" = "all modules verified" ] || block go.mod "go mod verify said '$gvout'"
+	fi
+	tdout=$(cd "$ROOT" && go mod tidy -diff 2>&1)
+	tdst=$?
+	if [ "$tdst" -ne 0 ] || [ -n "$tdout" ]; then
+		block go.mod "go mod tidy -diff is not clean (status $tdst): $(printf '%s' "$tdout" | head -c 300 | tr '\n' ' ')"
+	fi
+	if mkdir "$T/regen" && cp "$ROOT/go.mod" "$T/regen/go.mod"; then
+		if rgout=$(cd "$ROOT" && env GOENV=off GOFLAGS= GOPROXY=off GOSUMDB=sum.golang.org GONOSUMDB= GOPRIVATE= GONOSUMCHECK= GOINSECURE= go mod tidy -modfile="$T/regen/go.mod" 2>&1); then
+			cmp -s "$T/regen/go.mod" "$ROOT/go.mod" || block go.mod "go.mod differs from its regeneration under GOSUMDB=sum.golang.org"
+			cmp -s "$T/regen/go.sum" "$ROOT/go.sum" || block go.sum "go.sum differs from its regeneration under GOSUMDB=sum.golang.org"
+		else
+			block go.mod "go mod tidy -modfile under GOSUMDB=sum.golang.org failed: $(printf '%s' "$rgout" | head -c 300 | tr '\n' ' ')"
+		fi
+	else
+		block go.mod "cannot prepare the go.sum regeneration copy"
 	fi
 fi
 GODIR=$(grep '^go ' "$GOMOD") && GODIR=${GODIR#go }

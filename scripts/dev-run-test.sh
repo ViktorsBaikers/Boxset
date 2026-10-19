@@ -2723,6 +2723,27 @@ reset; licmut ADM-013 copyright-sha256 -; admit
 want licence-missing-sha 1 "ADMISSION-BLOCKED ADM-013: licence_mismatch: licence cell lacks"
 reset; licmut ADM-013 dep5 -; admit
 want licence-missing-dep5 1 "ADMISSION-BLOCKED ADM-013: licence_mismatch: licence cell lacks"
+# DEC-011 go rows: a pseudo-version is admitted for an indirect require only, with no ref, and only when its 12 hex are the prefix of the source commit
+GOPSEUDO=v2.8.5-20261007231709-e8c451ca75d2
+reset; sedx "$R/go.mod" "s#github.com/dlclark/regexp2/v2 v2.8.4#github.com/dlclark/regexp2/v2 $GOPSEUDO#"; sedx "$REP" "/^| ADM-200 /s#| github.com/dlclark/regexp2/v2 | v2.8.4 |#| github.com/dlclark/regexp2/v2 | $GOPSEUDO |#"; admit
+want direct-pseudo-version-blocked 1 "ADMISSION-BLOCKED ADM-200: go version $GOPSEUDO is not an exact vMAJOR.MINOR.PATCH release"
+reset; sedx "$R/go.mod" "s#github.com/dlclark/regexp2/v2 v2.8.4#github.com/dlclark/regexp2/v2 $GOPSEUDO // indirect#"; sedx "$REP" "/^| ADM-200 /s#| github.com/dlclark/regexp2/v2 | v2.8.4 |#| github.com/dlclark/regexp2/v2 | $GOPSEUDO |#"; sedx "$REP" "/^| ADM-200 /s# ref=refs/tags/v2.8.4 | Doug# | Doug#"; admit
+wantpass indirect-pseudo-version-admits
+reset; sedx "$R/go.mod" "s#github.com/dlclark/regexp2/v2 v2.8.4#github.com/dlclark/regexp2/v2 $GOPSEUDO // indirect#"; sedx "$REP" "/^| ADM-200 /s#| github.com/dlclark/regexp2/v2 | v2.8.4 |#| github.com/dlclark/regexp2/v2 | $GOPSEUDO |#"; sedx "$REP" "/^| ADM-200 /s# ref=refs/tags/v2.8.4 | Doug# | Doug#"; sedx "$REP" "/^| ADM-200 /s#commit=e8c451ca75d2#commit=f8c451ca75d2#"; admit
+want indirect-pseudo-commit-mismatch 1 "ADMISSION-BLOCKED ADM-200: source_mismatch"
+reset; sedx "$R/go.mod" "s#github.com/dlclark/regexp2/v2 v2.8.4#github.com/dlclark/regexp2/v2 $GOPSEUDO // indirect#"; sedx "$REP" "/^| ADM-200 /s#| github.com/dlclark/regexp2/v2 | v2.8.4 |#| github.com/dlclark/regexp2/v2 | $GOPSEUDO |#"; admit
+want indirect-pseudo-with-ref-blocked 1 "ADMISSION-BLOCKED ADM-200: source_mismatch"
+# a single-line require is read like a block entry: its class and its row rule do not change
+reset; sedx "$R/go.mod" "s#\tgithub.com/dlclark/regexp2/v2 v2.8.4#)\n\nrequire github.com/dlclark/regexp2/v2 v2.8.4\n\nrequire (#"; admit
+wantpass single-line-require-with-row-admits
+reset; sedx "$R/go.mod" "s#\tgithub.com/dlclark/regexp2/v2 v2.8.4#)\n\nrequire github.com/dlclark/regexp2/v2 v2.8.4\n\nrequire example.invalid/unlisted v1.0.0\n\nrequire (#"; admit
+want single-line-require-without-row-unlisted 1 "ADMISSION-UNLISTED go example.invalid/unlisted@v1\\.0\\.0"
+reset; sedx "$R/go.mod" "s#\tgithub.com/dlclark/regexp2/v2 v2.8.4#)\n\nrequire github.com/dlclark/regexp2/v2 $GOPSEUDO // indirect\n\nrequire (#"; sedx "$REP" "/^| ADM-200 /s#| github.com/dlclark/regexp2/v2 | v2.8.4 |#| github.com/dlclark/regexp2/v2 | $GOPSEUDO |#"; sedx "$REP" "/^| ADM-200 /s# ref=refs/tags/v2.8.4 | Doug# | Doug#"; admit
+wantpass single-line-indirect-pseudo-version-admits
+reset; sedx "$R/go.mod" "s#\tgithub.com/dlclark/regexp2/v2 v2.8.4#)\n\nrequire github.com/dlclark/regexp2/v2 $GOPSEUDO\n\nrequire (#"; sedx "$REP" "/^| ADM-200 /s#| github.com/dlclark/regexp2/v2 | v2.8.4 |#| github.com/dlclark/regexp2/v2 | $GOPSEUDO |#"; admit
+want single-line-direct-pseudo-version-blocked 1 "ADMISSION-BLOCKED ADM-200: go version $GOPSEUDO is not an exact vMAJOR.MINOR.PATCH release"
+reset; sedx "$R/go.mod" "s#\tgithub.com/dlclark/regexp2/v2 v2.8.4#)\n\nrequire github.com/dlclark/regexp2/v2 v2.8.4\n\nrequire example.invalid/unlisted-indirect v1.0.0 // indirect\n\nrequire (#"; admit
+want single-line-indirect-require-without-row-unlisted 1 "ADMISSION-UNLISTED go example.invalid/unlisted-indirect@v1\\.0\\.0"
 echo MUTATIONS-DONE'
 rr --timeout 600 -- sh -c "$MUTS"
 # every scenario credit needs the script to have completed: its runner status 0 and its closing marker once; an aborted
@@ -2732,6 +2753,7 @@ expect "admission mutation script runner exits 0" "$RS" 0
 expect "admission mutation script completed" "$(grep -c '^MUTATIONS-DONE$' "$TMP/rout")" 1
 # The required scenario list is fixed here, independent of what the script printed.
 REQ_MUTS='original-structure gcc-newer-same-source-work-admits tampered-checksum floating-caret floating-tilde floating-star apt-range-row apt-wildcard-row apt-range-dockerfile apt-wildcard-dockerfile literal-tilde-version-mismatch annual-366-days annual-365-days-admits snapshot-id-as-maintenance snapshot-timestamp-as-maintenance snapshot-url-as-maintenance-bun missing-p07 unlisted-base-image category-npm-as-os-library category-archive-as-os-library category-apt-fetch-as-os-data category-gcc-as-os-library category-qemu-as-os-library category-image-as-os-data category-os-data-name-outside-set os-row-with-release-evidence direct-tool-with-distro-support snapshot-url-as-maintenance gcc-work-subject-gcc14 gcc-366-days os-codename-bookworm os-security-until-past dockerfile-suite-forky support-limited-libx11 support-ended-today support-ends-tomorrow-admits support-supported-override support-full-string-match support-invalid-unknown-status-all-os-rows support-invalid-nonsupported-without-version-all-os-rows support-invalid-bad-date-all-os-rows support-invalid-bad-pattern-all-os-rows support-flipped-fenced-byte-all-os-rows support-url-commit-differs-all-os-rows support-release-12-all-os-rows support-second-block-all-os-rows support-missing-block-all-os-rows support-obsolete-ended-file-all-os-rows row-status-differs-from-evaluation row-lists-commit-differs source-mismatch licence-installed-values-admit licence-flipped-sha licence-flipped-dep5 licence-missing-sha licence-missing-dep5'
+REQ_MUTS="$REQ_MUTS direct-pseudo-version-blocked indirect-pseudo-version-admits indirect-pseudo-commit-mismatch indirect-pseudo-with-ref-blocked single-line-require-with-row-admits single-line-require-without-row-unlisted single-line-indirect-pseudo-version-admits single-line-direct-pseudo-version-blocked single-line-indirect-require-without-row-unlisted"
 for sec in dependencies devDependencies optionalDependencies peerDependencies; do
 	for fmt in 2 8 0; do REQ_MUTS="$REQ_MUTS unlisted-$sec-indent-$fmt"; done
 done
@@ -3016,6 +3038,56 @@ mutate_file_copy s5-draft-on-success "printf 'S5-ADMISSION-PASS blocked=0 unlist
 RA_TARGET=pass
 redgreen "draft-written-on-success mutant" a_real_admission "$MUT/s5-draft-on-success.sh" "$SRC/scripts/s5-toolchain.sh"
 
+# DEC-012 go rules at the real root of an isolated checkout, through that checkout's own runner: every module the checkout compiles needs a go row,
+# and go.sum must be what `go mod tidy` writes. Each check is RED on a script mutant without it and GREEN on the original.
+# s5_root_run SCRIPT DIR: SCRIPT (or its mutant) runs the real admission at the real root of DIR; the admission must reach its summary line
+s5_root_run() {
+	s5_install "$1" "$2/scripts/s5-mut.sh" || { OBS="the admission script could not be installed"; SETUP=1; return 1; }
+	rrx "$2" "$2/scripts/dev-run.sh" --timeout 600 -- scripts/s5-mut.sh --admission
+	rm -f "$2/scripts/s5-mut.sh"
+	OBS="status $RS, admission output: $(grep -E '^(ADMISSION-|S5-ADMISSION)' "$TMP/rout" | head -n 4 | tr '\n' '|')"
+	s5_done || { SETUP=1; return 1; }
+}
+GOSUM_FORGED_H1=h1:$(printf '%043d=' 0 | tr 0 A)
+fiso s5-compiled
+GC_FIXTURE=0
+if [ "$(grep -c '^| ADM-200 | go | go-dependency |' "$ISO/docs/spikes/s5-version-admission.md")" = 1 ] &&
+	grep -v '^| ADM-200 |' "$ISO/docs/spikes/s5-version-admission.md" >"$FISO/docs/spikes/s5-version-admission.md" &&
+	! cmp -s "$ISO/docs/spikes/s5-version-admission.md" "$FISO/docs/spikes/s5-version-admission.md" &&
+	cp "$SRC/scripts/dev-run.sh" "$FISO/scripts/dev-run.sh"; then
+	GC_FIXTURE=1
+else
+	fail "compiled module admission setup" "the ADM-200 go row could not be removed from the report copy"
+fi
+a_s5_compiled() { # holds when the module the checkout compiles, left without a row, is reported ADMISSION-UNLISTED go-compiled
+	[ "$GC_FIXTURE" = 1 ] || { OBS="the report copy without its compiled module row was not constructed"; SETUP=1; return 1; }
+	s5_root_run "$1" "$FISO" || return 1
+	s5_only 'go|go-compiled' || return 1
+	grep -Fxq 'ADMISSION-UNLISTED go github.com/dlclark/regexp2/v2@v2.8.4' "$TMP/rout" && reached
+	[ "$RS" = 1 ] && grep -Fxq 'ADMISSION-UNLISTED go-compiled github.com/dlclark/regexp2/v2@v2.8.4' "$TMP/rout"
+}
+mutate_file_copy s5-compiled-check-removed 'grep -Fq "| go | go-dependency | $cmod | $cver |" "$T/rows" || unlisted go-compiled "$cmod@$cver"' ':'
+redgreen "compiled-module-check-removed mutant (a compiled module without a go row)" a_s5_compiled "$MUT/s5-compiled-check-removed.sh" "$SRC/scripts/s5-toolchain.sh"
+rm -rf "$FISO"
+fiso s5-tidy
+TD_FIXTURE=0
+if printf 'example.invalid/forged v1.0.0 %s\nexample.invalid/forged v1.0.0/go.mod %s\n' "$GOSUM_FORGED_H1" "$GOSUM_FORGED_H1" >>"$FISO/go.sum" &&
+	! cmp -s "$ISO/go.sum" "$FISO/go.sum" && cp "$SRC/scripts/dev-run.sh" "$FISO/scripts/dev-run.sh"; then
+	TD_FIXTURE=1
+else
+	fail "tidy-dirty go.sum setup" "the forged go.sum lines could not be appended to the checkout copy"
+fi
+a_s5_tidy() { # holds when a go.sum that go mod tidy would rewrite is reported by the tidy check itself
+	[ "$TD_FIXTURE" = 1 ] || { OBS="the checkout copy with a tidy-dirty go.sum was not constructed"; SETUP=1; return 1; }
+	s5_root_run "$1" "$FISO" || return 1
+	s5_only 'go\.mod|go\.sum' || return 1
+	grep -Fq 'ADMISSION-BLOCKED go.sum: go.sum differs from its regeneration' "$TMP/rout" && reached
+	[ "$RS" = 1 ] && grep -Fq 'ADMISSION-BLOCKED go.mod: go mod tidy -diff is not clean' "$TMP/rout"
+}
+mutate_file_copy s5-tidy-check-removed 'if [ "$tdst" -ne 0 ] || [ -n "$tdout" ]; then' 'if false; then'
+redgreen "tidy-check-removed mutant (a go.sum that go mod tidy would rewrite)" a_s5_tidy "$MUT/s5-tidy-check-removed.sh" "$SRC/scripts/s5-toolchain.sh"
+rm -rf "$FISO"
+
 # The root-owned H2 currency procedure (pre-run check, actual admission, post-run check,
 # evidence acceptance and changed-post invalidation) is root evidence in the feature
 # workspace; no copied decision helper in this driver stands in for it.
@@ -3025,6 +3097,16 @@ if [ ! -f "$ISO/web/bun.lock" ]; then
 	fail "lock export" "web/bun.lock is absent: run the documented web lock bootstrap first (docs/spikes/s5-version-admission.md)"
 else
 	locksum=$(sha256sum <"$ISO/web/bun.lock")
+	# DEC-012: the Go lock export of the unmodified checkout reproduces the committed go.mod and go.sum byte for byte
+	rm -rf "$TMP/exp-orig"
+	mkdir -p "$TMP/exp-orig"
+	ctl_begin
+	(cd "$ISO" && docker build -f deploy/dev/Dockerfile --target lock-export --build-arg LOCK_ECOSYSTEM=go --output "type=local,dest=$TMP/exp-orig" .) >"$TMP/lock-orig.log" 2>&1
+	_lx=$?
+	[ "$_lx" = 0 ] || SETUP=1
+	expect "Go lock export of the unmodified checkout ran" "$_lx" 0
+	expect "Go lock export reproduces the committed go.mod" "$(sha256sum <"$TMP/exp-orig/go.mod")" "$(sha256sum <"$ISO/go.mod")"
+	expect "Go lock export reproduces the committed go.sum" "$(sha256sum <"$TMP/exp-orig/go.sum")" "$(sha256sum <"$ISO/go.sum")"
 	mkdir -p "$ISO/internal/lockfixture"
 	cat >"$ISO/internal/lockfixture/fixture.go" <<'GO'
 package lockfixture
