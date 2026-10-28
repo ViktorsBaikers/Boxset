@@ -1,0 +1,134 @@
+/* Tailwind v4 with DESIGN.md as the only theme. The default theme (palette, scales) is never
+   imported, so every utility maps to a token below. */
+@layer theme, base, components, utilities;
+
+@import 'tailwindcss/preflight.css' layer(base);
+@import 'tailwindcss/utilities.css' layer(utilities);
+
+@font-face {
+	font-family: Archivo;
+	font-style: normal;
+	font-weight: 100 900;
+	font-stretch: 62% 125%;
+	font-display: swap;
+	src: url('@fontsource-variable/archivo/files/archivo-latin-standard-normal.woff2') format('woff2');
+	unicode-range:
+		U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+		U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@theme {
+	--color-ground: light-dark(#f6f5f2, #111015);
+	--color-board: light-dark(#ffffff, #1a1920);
+	--color-board-raised: light-dark(#ffffff, #221f29);
+	--color-rule: light-dark(#dedbd3, #2b2933);
+	--color-rule-strong: light-dark(#c9c5bb, #3a3743);
+	--color-ink: light-dark(#17181d, #ece6da);
+	--color-ink-muted: light-dark(#55524c, #a39d92);
+	--color-ink-dim: light-dark(#6c6963, #8f897e);
+	--color-ink-inverse: light-dark(#f6f5f2, #111015);
+	--color-rail: #17295f;
+	--color-rail-hi: #22397f;
+	--color-rail-rule: #2c4590;
+	--color-rail-ink: #e9edf7;
+	--color-rail-muted: #9fb0d9;
+	--color-rail-well: #0f1d47;
+	--color-live: #ffb547;
+	--color-live-ink: light-dark(#8a5200, #ffb547);
+	--color-on-live: #1b1205;
+	--color-fault: light-dark(#c2341f, #ff6b5d);
+	--color-fault-surface: light-dark(#fbe9e6, #24151a);
+	--color-fault-rule: light-dark(#efc2b9, #5a2a27);
+	--color-fault-on-rail: #ff8a7d;
+	--color-soon: light-dark(#2f4fa3, #9fb0d9);
+	--color-focus: light-dark(#17295f, #ece6da);
+	--color-scrim: rgb(0 0 0 / 0.66);
+	--color-scrim-strong: rgb(17 16 21 / 0.86);
+	--color-scrim-hover: rgb(17 16 21 / 0.96);
+	--color-on-scrim: #ffffff;
+	--color-on-scrim-soft: #ece6da;
+	--color-spine-on: light-dark(#17181d, #ece6da);
+	--color-spine-off: light-dark(#b9b5ab, #5d5850);
+
+	--font-sans: Archivo, system-ui, -apple-system, 'Segoe UI', sans-serif;
+	--default-font-family: var(--font-sans);
+
+	--text-headline: 1.875rem;
+	--text-headline--line-height: 1;
+	--text-headline--letter-spacing: -0.01em;
+	--text-headline--font-weight: 700;
+	--text-title: 0.9375rem;
+	--text-title--line-height: 1.15;
+	--text-title--font-weight: 700;
+	--text-body: 0.875rem;
+	--text-body--line-height: 1.45;
+	--text-body--font-weight: 400;
+	--text-control: 0.8125rem;
+	--text-control--line-height: 1.45;
+	--text-control--font-weight: 500;
+	--text-data: 0.75rem;
+	--text-data--line-height: 1.45;
+	--text-data--font-weight: 400;
+	--text-label-tag: 0.6875rem;
+	--text-label-tag--line-height: 1;
+	--text-label-tag--letter-spacing: 0.08em;
+	--text-label-tag--font-weight: 700;
+	--text-wordmark: 1.5rem;
+	--text-wordmark--line-height: 1;
+	--text-wordmark--letter-spacing: 0.04em;
+	--text-wordmark--font-weight: 800;
+	--font-variation-wordmark: 'wdth' 70;
+
+	--radius-hair: 2px;
+	--radius-cover: 4px;
+	--radius-control: 6px;
+	--radius-panel: 8px;
+	--radius-round: 999px;
+
+	--spacing-1: 0.25rem;
+	--spacing-2: 0.5rem;
+	--spacing-3: 0.75rem;
+	--spacing-4: 1rem;
+	--spacing-5: 1.25rem;
+	--spacing-6: 1.5rem;
+	--spacing-7: 1.75rem;
+	--spacing-8: 2rem;
+	--spacing-10: 2.5rem;
+
+	--ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+	--default-transition-duration: 150ms;
+	--default-transition-timing-function: var(--ease-out);
+}
+
+@layer base {
+	:root {
+		color-scheme: dark;
+	}
+	[data-theme='light'] {
+		color-scheme: light;
+	}
+	[data-theme='system'] {
+		color-scheme: light dark;
+	}
+	body {
+		@apply bg-ground font-sans text-body text-ink;
+	}
+	:focus-visible {
+		outline: 2px solid var(--color-focus);
+		outline-offset: 2px;
+	}
+	@media (prefers-reduced-motion: reduce) {
+		*,
+		*::before,
+		*::after {
+			transition-duration: 0ms !important;
+			animation-duration: 0ms !important;
+		}
+	}
+}
+
+@layer components {
+	.wordmark {
+		font-variation-settings: var(--font-variation-wordmark);
+	}
+}

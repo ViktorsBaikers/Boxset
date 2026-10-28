@@ -1,0 +1,20 @@
+22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw,errors=remount-ro
+30 22 0:40 / /mnt/nfs rw,relatime shared:2 - nfs 10.0.0.2:/export rw,vers=3,proto=tcp
+31 22 0:41 / /mnt/nfs4 rw,relatime shared:3 - nfs4 10.0.0.2:/export rw,vers=4.2,proto=tcp
+32 22 0:42 / /mnt/cifs rw,relatime shared:4 - cifs //nas/share rw,vers=3.1.1
+33 22 0:43 / /mnt/smb3 rw,relatime shared:5 - smb3 //nas/share rw,vers=3.1.1
+34 22 0:44 / /mnt/fuse-sshfs rw,nosuid,nodev,relatime shared:6 - fuse.sshfs host:/srv rw,user_id=1000,group_id=1000
+35 22 0:45 / /mnt/fuse rw,nosuid,nodev,relatime shared:7 - fuse fusectl rw
+36 22 0:46 / /mnt/virtiofs rw,relatime shared:8 - virtiofs shared rw
+37 22 0:47 / /mnt/fakeowner rw,relatime shared:9 - fakeowner /host_mnt/Users rw
+38 22 0:48 / /mnt/9p rw,relatime shared:10 - 9p C:\134 rw,aname=drvfs;path=C:\134;uid=1000
+39 22 0:49 / /mnt/drvfs rw,relatime shared:11 - drvfs C:\134 rw
+40 22 0:50 / /mnt/my\040share rw,relatime shared:12 - cifs //nas/my\040share rw,vers=3.1.1
+41 22 8:2 / /top rw,relatime shared:13 - ext4 /dev/sda2 rw
+42 41 0:51 / /top rw,relatime - nfs 10.0.0.2:/top rw,vers=3
+43 22 8:3 / /hidden/config rw,relatime shared:14 - ext4 /dev/sda3 rw
+44 22 0:55 / /hidden rw,relatime shared:15 - nfs 10.0.0.2:/hidden rw,vers=4.2
+46 45 0:56 / /ord rw,relatime shared:16 - nfs 10.0.0.2:/ord rw,vers=4.2
+45 22 8:4 / /ord rw,relatime shared:17 - ext4 /dev/sda4 rw
+47 22 8:5 / /mnt/fuseblk rw,nosuid,nodev,relatime shared:18 - fuseblk /dev/sdb1 rw,user_id=0,group_id=0,allow_other,blksize=4096
+48 22 0:57 / /mnt/fuseblk-sub rw,nosuid,nodev,relatime shared:19 - fuseblk.ntfs /dev/sdb2 rw

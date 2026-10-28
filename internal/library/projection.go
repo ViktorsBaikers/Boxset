@@ -190,7 +190,7 @@ func windowMarks(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	marks := make([]byte, 0, spineMarks)
 	for rows.Next() {
 		var state string
@@ -212,7 +212,7 @@ func (l *Library) Rollups(ctx context.Context, id TitleID) ([]Rollup, error) {
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var r Rollup
 			var next sql.NullInt64

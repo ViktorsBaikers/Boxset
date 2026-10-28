@@ -31,7 +31,8 @@ var (
 	// ErrIdentityConflict is returned when an identity would merge or move: a
 	// known source pointing elsewhere, a second source for one slot in one
 	// instance, one metadata_id with two kinds, or a file path held by another
-	// slot. Nothing it names is changed; an import conflict also leaves one hold.
+	// slot. Nothing it names is changed; an enrollment conflict leaves one hold
+	// and an import conflict one per affected target.
 	ErrIdentityConflict = errors.New("library: identity conflict")
 	// ErrInvalidInput is returned before any write for malformed input.
 	ErrInvalidInput = errors.New("library: invalid input")
@@ -211,12 +212,15 @@ func (l *Library) AddPersona(ctx context.Context, persona, slotKey string) error
 
 // AddMembership reuses the title with req.MetadataID (or creates it), reuses
 // each template slot by (title, slot_key) and creates the missing ones from
-// the library defaults with owner local.
+// the library defaults with owner local. A metadata id that already exists as
+// the other kind is ErrIdentityConflict: one title-wide identity_conflict hold
+// is committed, so every slot of that title pauses, and nothing else changes.
 func (l *Library) AddMembership(ctx context.Context, req MembershipRequest) (MembershipResult, error) {
 	if err := checkTitle(req.MetadataID, req.Kind, req.Name); err != nil {
 		return MembershipResult{}, err
 	}
 	var res MembershipResult
+	var conflict error
 	err := l.db.Write(ctx, func(tx *sql.Tx) error {
 		def, err := loadDefaults(ctx, tx, req.LibraryID)
 		if err != nil {
@@ -227,15 +231,24 @@ func (l *Library) AddMembership(ctx context.Context, req MembershipRequest) (Mem
 			return err
 		}
 		res, _, err = enroll(ctx, tx, req.LibraryID, def, req.MetadataID, req.Kind, req.Name, keys, OwnerLocal)
+		if errors.Is(err, ErrIdentityConflict) {
+			conflict = err // returned after the commit, so enroll's hold persists
+			return nil
+		}
 		return err
 	})
 	if err != nil {
 		return MembershipResult{}, err
 	}
+	if conflict != nil {
+		return MembershipResult{}, conflict
+	}
 	return res, nil
 }
 
-// ApplyPersona is AddMembership for the one slot key the persona maps to.
+// ApplyPersona is AddMembership for the one slot key the persona maps to. A
+// metadata id that already exists as the other kind is ErrIdentityConflict
+// with the same one committed title-wide hold.
 func (l *Library) ApplyPersona(ctx context.Context, req PersonaRequest) (MembershipResult, error) {
 	if err := checkKey("persona", req.Persona); err != nil {
 		return MembershipResult{}, err
@@ -244,6 +257,7 @@ func (l *Library) ApplyPersona(ctx context.Context, req PersonaRequest) (Members
 		return MembershipResult{}, err
 	}
 	var res MembershipResult
+	var conflict error
 	err := l.db.Write(ctx, func(tx *sql.Tx) error {
 		def, err := loadDefaults(ctx, tx, req.LibraryID)
 		if err != nil {
@@ -254,10 +268,17 @@ func (l *Library) ApplyPersona(ctx context.Context, req PersonaRequest) (Members
 			return notFound(err, "persona "+strconv.Quote(req.Persona))
 		}
 		res, _, err = enroll(ctx, tx, req.LibraryID, def, req.MetadataID, req.Kind, req.Name, []string{key}, OwnerLocal)
+		if errors.Is(err, ErrIdentityConflict) {
+			conflict = err // returned after the commit, so enroll's hold persists
+			return nil
+		}
 		return err
 	})
 	if err != nil {
 		return MembershipResult{}, err
+	}
+	if conflict != nil {
+		return MembershipResult{}, conflict
 	}
 	return res, nil
 }
@@ -268,9 +289,13 @@ func (l *Library) ApplyPersona(ctx context.Context, req PersonaRequest) (Members
 // metadata id that already exists as the other kind are identity conflicts:
 // one identity_conflict hold per source and affected target is recorded (a
 // replay adds none): the slot, or for a kind clash the whole title, that the conflict
-// affects so that acquiring it pauses. The result carries the Pause and the
-// error wraps ErrIdentityConflict. No title, slot, sync_map or owner row
-// changes. Replaying a mapped record changes nothing.
+// affects so that acquiring it pauses. A known source remapped to a metadata
+// id that exists as the other kind affects two targets: its mapped slot and
+// that whole title, both held in the one commit. The result carries the Pause
+// (for that remap the source_remapped one) and the error wraps
+// ErrIdentityConflict. No title, slot, sync_map or owner row changes.
+// Replaying a mapped record changes no title, slot, sync_map or owner row; it
+// only adds that library's membership when missing.
 func (l *Library) ImportSource(ctx context.Context, rec SourceRecord) (ImportResult, error) {
 	if err := rec.validate(); err != nil {
 		return ImportResult{}, err
@@ -310,6 +335,21 @@ func (l *Library) ImportSource(ctx context.Context, rec SourceRecord) (ImportRes
 		switch {
 		case err == nil:
 			if metadataID != rec.MetadataID || kind != rec.Kind || slotKey != rec.SlotKey {
+				// The destination may independently be the other kind, which conflicts with
+				// its whole title. Its hold goes first so that the Pause and error the
+				// second pause leaves in out and conflict are the source_remapped ones.
+				var otherTitle int64
+				var otherKind string
+				switch err := tx.QueryRowContext(ctx, `SELECT id, kind FROM title WHERE metadata_id = ?`, rec.MetadataID).Scan(&otherTitle, &otherKind); {
+				case err == nil && otherKind != rec.Kind:
+					if err := pause("title_kind_mismatch",
+						fmt.Sprintf("%s is a %s, not a %s", rec.MetadataID, otherKind, rec.Kind),
+						otherTitle, 0, map[string]string{"mapped_kind": otherKind}); err != nil {
+						return err
+					}
+				case err != nil && !errors.Is(err, sql.ErrNoRows):
+					return err
+				}
 				return pause("source_remapped",
 					fmt.Sprintf("%s source %s of %s maps to %s/%s, not %s/%s", rec.Kind, rec.SourceID, rec.InstanceID, metadataID, slotKey, rec.MetadataID, rec.SlotKey),
 					titleID, slotID, map[string]string{"mapped_metadata_id": metadataID, "mapped_slot_key": slotKey})
@@ -403,7 +443,7 @@ func (l *Library) TitleSlots(ctx context.Context, id TitleID) ([]Slot, error) {
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var s Slot
 			var state sql.NullString
@@ -426,7 +466,12 @@ type slotRef struct {
 }
 
 // enroll upserts the title, reuses or creates one slot per key, and records
-// the library membership. Every conflict check precedes the first write.
+// the library membership. The kind mismatch, its only ErrIdentityConflict, is
+// found before any title, slot or membership write. It records one title-wide
+// identity_conflict hold, whichever caller asks and whichever library, so
+// every slot of the title pauses and a replay adds none. A failing hold write
+// is returned as itself. The caller returns the conflict after its Write has
+// committed, so the hold persists.
 func enroll(ctx context.Context, tx *sql.Tx, lib LibraryID, def LibraryDefaults, metadataID, kind, name string, keys []string, owner string) (MembershipResult, []slotRef, error) {
 	var res MembershipResult
 	var tid int64
@@ -434,6 +479,10 @@ func enroll(ctx context.Context, tx *sql.Tx, lib LibraryID, def LibraryDefaults,
 	err := tx.QueryRowContext(ctx, `SELECT id, kind FROM title WHERE metadata_id = ?`, metadataID).Scan(&tid, &have)
 	if err == nil {
 		if have != kind {
+			params := map[string]string{"cause": "title_kind_mismatch", "metadata_id": metadataID, "kind": kind, "mapped_kind": have}
+			if err := putHold(ctx, tx, ReasonIdentityConflict, fmt.Sprintf("enroll@title:%d", tid), TitleID(tid), 0, params); err != nil {
+				return res, nil, err
+			}
 			return res, nil, fmt.Errorf("%w: %s is a %s, not a %s", ErrIdentityConflict, metadataID, have, kind)
 		}
 	} else if errors.Is(err, sql.ErrNoRows) {
@@ -523,7 +572,7 @@ func templateKeys(ctx context.Context, tx *sql.Tx, id LibraryID) ([]string, erro
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var keys []string
 	for rows.Next() {
 		var k string
@@ -597,7 +646,7 @@ func checkToken(field, s string, max int, lower bool, extra string) error {
 	}
 	for i := range len(s) {
 		c := s[i]
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || !lower && c >= 'A' && c <= 'Z' || strings.IndexByte(extra, c) >= 0) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'z') && (lower || c < 'A' || c > 'Z') && strings.IndexByte(extra, c) < 0 {
 			return invalid(field, "has a character outside its alphabet")
 		}
 	}

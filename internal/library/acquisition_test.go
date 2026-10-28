@@ -164,7 +164,7 @@ func TestRacingEquivalentRequestsOneAcquisition(t *testing.T) {
 }
 
 func TestDistinctReleasesStayDistinct(t *testing.T) {
-	w := applyS2(t)
+	w := applyS2Eligible(t)
 	// The fixture's conflicting imports put tmdb:603/uhd under an identity conflict, so dc stands in for it.
 	hd, dc := w.slotID("tmdb:603", "hd"), w.slotID("tmdb:603", "dc")
 
@@ -197,7 +197,7 @@ func TestDistinctReleasesStayDistinct(t *testing.T) {
 // gets one row and exactly its own slot set, though equivalent requests repeat
 // and the identities share slots.
 func TestDistinctReleasesStayDistinctUnderRace(t *testing.T) {
-	w := applyS2(t)
+	w := applyS2Eligible(t)
 	ctx := t.Context()
 	// tmdb:603/uhd is under the fixture's identity conflict, so the series hd slot takes its place.
 	hd, dc, shd := w.slotID("tmdb:603", "hd"), w.slotID("tmdb:603", "dc"), w.slotID("tvdb:9001", "hd")
@@ -287,7 +287,7 @@ func TestDistinctReleasesStayDistinctUnderRace(t *testing.T) {
 }
 
 func TestSecondCopyOfReleaseConverges(t *testing.T) {
-	w := applyS2(t)
+	w := applyS2Eligible(t)
 	// tmdb:603/uhd is under the fixture's identity conflict, so the series hd slot takes its place.
 	hd, dc, shd := w.slotID("tmdb:603", "hd"), w.slotID("tmdb:603", "dc"), w.slotID("tvdb:9001", "hd")
 
@@ -308,10 +308,12 @@ func TestSecondCopyOfReleaseConverges(t *testing.T) {
 }
 
 func TestMembershipRemovalPreservesShared(t *testing.T) {
-	w := applyS2(t)
+	w := applyS2Eligible(t)
 	ctx := t.Context()
 	hd, shd := w.slotID("tmdb:603", "hd"), w.slotID("tvdb:9001", "hd") // tmdb:603/uhd is under the fixture's identity conflict
-	mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseA, Slots: []SlotID{hd, shd}})
+	if out := mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseA, Slots: []SlotID{hd, shd}}); !out.Created || !slices.Equal(out.Attached, []SlotID{hd, shd}) || len(out.Paused) != 0 {
+		t.Fatalf("setup outcome %+v, want created with hd and shd attached", out)
+	}
 	if err := w.lib.RecordFile(ctx, FileRecord{SlotID: hd, RootKey: "movies", RelativePath: "Synthetic Movie A/a.mkv", SizeBytes: 4096}); err != nil {
 		t.Fatalf("RecordFile: %v", err)
 	}
@@ -344,7 +346,7 @@ func TestMembershipRemovalPreservesShared(t *testing.T) {
 }
 
 func TestReplayConverges(t *testing.T) {
-	w := applyS2(t)
+	w := applyS2Eligible(t)
 	ctx := t.Context()
 	hd, shd := w.slotID("tmdb:603", "hd"), w.slotID("tvdb:9001", "hd") // tmdb:603/uhd is under the fixture's identity conflict
 	req := AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseA, Slots: []SlotID{hd, shd}}
@@ -381,10 +383,12 @@ func TestReplayConverges(t *testing.T) {
 // Rejected input writes nothing. The name extends TestReplayConverges so the
 // proof's -run pattern selects it.
 func TestReplayConvergesRejectedInputWritesNothing(t *testing.T) {
-	w := applyS2(t)
+	w := applyS2Eligible(t)
 	ctx := t.Context()
 	hd, uhd := w.slotID("tmdb:603", "hd"), w.slotID("tmdb:603", "uhd")
-	mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseA, Slots: []SlotID{hd}})
+	if out := mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseA, Slots: []SlotID{hd}}); !out.Created || !slices.Equal(out.Attached, []SlotID{hd}) || len(out.Paused) != 0 {
+		t.Fatalf("setup outcome %+v, want created with hd attached", out)
+	}
 	if err := w.lib.RecordFile(ctx, FileRecord{SlotID: hd, RootKey: "movies", RelativePath: "a/b.mkv", SizeBytes: 10}); err != nil {
 		t.Fatalf("RecordFile: %v", err)
 	}

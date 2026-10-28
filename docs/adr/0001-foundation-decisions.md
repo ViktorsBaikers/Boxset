@@ -24,26 +24,28 @@ Eleven research dossiers (about 1,520 cited sources in total) and two source-cod
 
 **Current-authority index ([ADR 0006 G01](0006-boundaries-hot-paths-and-plan-hygiene.md)).** Before implementing a row, read every clause listed for it; where they disagree, the later clause wins. Rows not listed (D-07 to D-10, D-12, D-22 to D-24) are unchanged. [ADR 0007](0007-slot-state-migration-and-runtime-limits.md) H01–H13 extends the index below.
 
+The explicit owner correction of 2026-10-17, recorded in current `AGENTS.md` and foundation INV-001, governs neutral names, source headers and REF-FREE study/fixture provenance over historical origin-header directions. GPL obligations remain. [ADR 0012](0012-admission-probe-child-and-retention-boundaries.md) adds only the named admission, probe, child-lifetime, retention and bootstrap corrections below; planning acceptance is not runtime proof.
+
 | Row | Also read |
 |---|---|
 | D-01 | 0005 T09 (cgo only for race tests); 0007 H08 (arm/v7 artwork codec); 0010 (dev server is the only measurement host; ARM targets: build/emulated correctness only) |
 | D-02 | 0004 §6 (input, format and evaluation limits) |
 | D-03 | 0002 §2 (validators); 0004 §8 (cursors); 0006 G10 (no dynamic brotli) |
 | D-04 | 0002 §3; 0004 §11 |
-| D-05 | 0007 H05/H06/H07 (byte-capped buffers, auto_vacuum and WAL limit, immutable migrations); 0003 (FULL); 0005 T01 (connections, readers, mapping cap); 0004 §5/§12; 0006 G05 (hot writes), G09 (data-directory filesystems), G12 (GOMEMLIMIT, collation) |
-| D-06 | 0008 I03 (server limits, read admission); 0002 §6/§11; 0004 §3; 0005 T03/T10; 0006 G08 (decision-pass queries), G11 (no gocron) |
+| D-05 | 0007 H05/H06/H07 (byte-capped buffers, auto_vacuum and WAL limit, immutable migrations); 0003 (FULL); 0005 T01 (connections, readers, mapping cap); 0004 §5/§12; 0006 G05 (hot writes), G09 (data-directory filesystems), G12 (GOMEMLIMIT, collation); 0012 K05 (creation bootstrap before bookkeeping) |
+| D-06 | 0008 I03 (server limits, read admission); 0002 §6/§11; 0004 §3; 0005 T03/T10; 0006 G08 (decision-pass queries), G11 (no gocron); 0012 K01 (pre-body password-route population), K03 (attempt lifetime) |
 | D-11 | 0009 J02 (per-script font fallbacks, non-Latin case art) |
 | D-13 | 0004 §2 (canonical titles, memberships, slots); 0007 H01 (per-slot episode monitoring, `slot_episode`), H02 (slot naming/search language) |
 | D-14 | 0004 §7; 0005 T10; 0007 H11 (project-key injection, OAuth apps) |
 | D-15 | 0008 I01 (feed XML cleaning), I02 (magnet redirects, NZB/torrent artifacts), I04 (pinned LAN certificates) |
 | D-16 | 0007 H01 (personas read/write their slot's episodes); 0004 §2 (personas map to slot keys); 0005 T05; 0006 G07 (compat spool) |
 | D-17 | 0002 §9; 0004 §1/§2; 0007 H03 (two-phase import) |
-| D-18 | 0004 §13 (setup token); 0009 J04 (setup-route throttling); 0008 I05 (exec instructions, optional user-chosen env token); 0005 T05; 0006 G02 (CSP, cookie names), G06 (credential hashing) |
-| D-19 | 0005 T04/T09 |
+| D-18 | 0004 §13 (setup token); 0009 J04 (setup-route throttling); 0008 I05 (exec instructions, optional user-chosen env token); 0005 T05; 0006 G02 (CSP, cookie names), G06 (credential hashing); 0012 K01 (login/setup/hash-waiter population) |
+| D-19 | 0005 T04/T09; 0012 K02/K03 (packaged probe/child boundaries) |
 | D-20 | 0008 I06 (metric labels); 0007 H05 (byte-capped ring buffer), H13 (crash file, rotating logs) |
-| D-21 | 0007 H09 (child environment), H10 (template allowlist) |
+| D-21 | 0007 H09 (child environment), H10 (template allowlist); 0012 K02/K03 (probe authority and managed descendants) |
 | D-25 | 0010 (development on the dev server, loopback-only ports); 0005 T09; 0006 G09 (dev volumes), G12 (race job scope); 0011 (development-image Debian OS library/font/data maintenance evidence) |
-| D-26 | 0009 J01 (data-derived colours and ink); 0002 §4 (private, variant URLs); 0004 §6/§9; 0005 T06; 0007 H08 (JPEG where wazero lacks its compiler) |
+| D-26 | 0009 J01 (data-derived colours and ink); 0002 §4 (private, variant URLs); 0004 §6/§9; 0005 T06; 0007 H08 (JPEG where wazero lacks its compiler); 0012 K03 (artwork-attempt restart fencing before effects) |
 | D-27 | 0009 J03 (counts, anchors, A–Z and scrollbar jumps); 0002 §1/§5/§10; 0004 §9/§11; 0005 T02/T07; 0006 G12 (preload `crossorigin`) |
 
 | ID | Area | Decision | Primary evidence |

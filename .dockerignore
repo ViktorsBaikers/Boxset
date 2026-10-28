@@ -9,7 +9,14 @@
 !deploy/dev/Dockerfile
 !deploy/dev/capture-check
 !deploy/dev/redact
+!deploy/dev/watch.ts
+!cmd
 !internal
+# The shell is built only inside a runner child or a Docker stage, never taken from the host:
+# any host build output below internal/server/dist stays out of every image except the
+# tracked placeholder that lets `go build` embed the directory.
+internal/server/dist/*
+!internal/server/dist/.keep
 !bench
 !testdata
 !docs/spikes/*.md

@@ -7,6 +7,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"maps"
 	"os"
 	"os/exec"
@@ -14,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -149,25 +152,28 @@ func crashChild(name string) int {
 	ctx := context.Background()
 	sc, ok := crashScenarios[name]
 	if !ok {
-		os.Stderr.WriteString("unknown crash scenario " + name + "\n")
+		fmt.Fprint(os.Stderr, "unknown crash scenario "+name+"\n")
 		return 2
 	}
 	db, err := store.Open(ctx, os.Getenv(crashEnvDB), store.Options{})
 	if err != nil {
-		os.Stderr.WriteString("child store.Open: " + err.Error() + "\n")
+		fmt.Fprint(os.Stderr, "child store.Open: "+err.Error()+"\n")
 		return 2
 	}
 	ready := func(tx *sql.Tx) {
 		counts, err := countTables(tx, acqTables)
 		if err != nil {
-			os.Stderr.WriteString("child count: " + err.Error() + "\n")
+			fmt.Fprint(os.Stderr, "child count: "+err.Error()+"\n")
 			os.Exit(2)
 		}
 		line, _ := json.Marshal(counts)
-		os.Stdout.WriteString(crashReady + string(line) + "\n")
+		if _, err := os.Stdout.WriteString(crashReady + string(line) + "\n"); err != nil {
+			fmt.Fprint(os.Stderr, "child ready: "+err.Error()+"\n")
+			os.Exit(2)
+		}
 	}
 	err = sc(ctx, New(db), strings.Split(os.Getenv(crashEnvArgs), "\n"), ready)
-	os.Stderr.WriteString("child scenario ended: " + err.Error() + "\n")
+	fmt.Fprint(os.Stderr, "child scenario ended: "+err.Error()+"\n")
 	return 3
 }
 
@@ -178,8 +184,7 @@ func killChild(t *testing.T, scenario, path string, args ...string) map[string]i
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^$")
-	cmd.Env = append(os.Environ(), crashEnvScenario+"="+scenario, crashEnvDB+"="+path, crashEnvArgs+"="+strings.Join(args, "\n"))
+	cmd := crashCommand(ctx, scenario, path, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	stdout, err := cmd.StdoutPipe()
@@ -208,6 +213,57 @@ func killChild(t *testing.T, scenario, path string, args ...string) map[string]i
 	return counts
 }
 
+// crashCommand is the child of scenario on the store at path, bound to ctx.
+// Its environment is closed to the scenario inputs, and it runs in its own
+// process group, which the deadline kills.
+func crashCommand(ctx context.Context, scenario, path string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^$")
+	cmd.Env = []string{crashEnvScenario + "=" + scenario, crashEnvDB + "=" + path, crashEnvArgs + "=" + strings.Join(args, "\n")}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	return cmd
+}
+
+// A child that cannot write its READY report must say so on stderr and exit
+// with status 2: the parent was never told the transaction is open, and the
+// child would otherwise sleep on until the deadline. /dev/full takes the open
+// and fails every write.
+func TestCrashReadyWriteFailure(t *testing.T) {
+	w := applyS2(t)
+	full, err := os.OpenFile("/dev/full", os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("the failing stdout: %v", err)
+	}
+	t.Cleanup(func() { _ = full.Close() })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	cmd := crashCommand(ctx, "membership-acquisition", dbPath(t, w.db), strconv.FormatInt(int64(w.libs["Collector"]), 10))
+	cmd.Stdout = full
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatalf("child stderr: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	text, readErr := io.ReadAll(io.LimitReader(stderr, 4<<10))
+	waitErr := cmd.Wait()
+	if readErr != nil {
+		t.Fatalf("read child stderr: %v", readErr)
+	}
+	var exit *exec.ExitError
+	switch {
+	case ctx.Err() != nil:
+		t.Fatalf("the child ignored its failed READY write and was still running at the deadline: %v, stderr %q", waitErr, text)
+	case !errors.As(waitErr, &exit) || exit.ExitCode() != 2:
+		t.Fatalf("the child after a failed READY write: %v, want exit status 2, stderr %q", waitErr, text)
+	}
+	diagnostic := strings.ToLower(string(text))
+	if !strings.Contains(diagnostic, "ready") || !strings.Contains(diagnostic, syscall.ENOSPC.Error()) {
+		t.Fatalf("the child's stderr does not name the failed READY write and its cause: %q", text)
+	}
+}
+
 // dbPath returns the file behind db.
 func dbPath(t *testing.T, db *store.DB) string {
 	t.Helper()
@@ -222,10 +278,13 @@ func dbPath(t *testing.T, db *store.DB) string {
 }
 
 func TestKilledWriterLeavesNoPartialRows(t *testing.T) {
-	w := applyS2(t)
+	w := applyS2Eligible(t)
 	ctx := t.Context()
 	// One committed acquisition must survive the kill untouched.
-	mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseA, Slots: []SlotID{w.slotID("tmdb:603", "hd")}})
+	hd := w.slotID("tmdb:603", "hd")
+	if out := mustRequest(t, w.lib, AcquisitionRequest{ClientID: "qbit", ReleaseKey: releaseA, Slots: []SlotID{hd}}); !out.Created || !slices.Equal(out.Attached, []SlotID{hd}) || len(out.Paused) != 0 {
+		t.Fatalf("setup outcome %+v, want created with hd attached", out)
+	}
 	before := acqSnapshot(t, w.db)
 	beforeCounts := acqCounts(t, w.db)
 
@@ -274,7 +333,7 @@ func TestKilledWriterLeavesNoPartialRows(t *testing.T) {
 // A writer killed after it inserted a hold and an eligible attachment, before it
 // committed, leaves neither; replaying the request lands one acquisition and one hold.
 func TestKilledWriterLeavesNoPartialRowsWithHold(t *testing.T) {
-	w := applyS2(t)
+	w := applyS2Eligible(t)
 	ctx := t.Context()
 	paused, eligible := w.slotID("tmdb:604", "hd"), w.slotID("tmdb:603", "hd") // unresolved owner pauses; local attaches
 	file := FileRecord{SlotID: eligible, RootKey: "movies", RelativePath: "Synthetic Movie A/a.mkv", SizeBytes: 4096}

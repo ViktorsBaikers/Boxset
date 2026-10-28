@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ViktorsBaikers/Boxset/bench/internal/benchprofile"
 	"github.com/ViktorsBaikers/Boxset/internal/parse/corpus"
 )
 
@@ -58,7 +59,7 @@ func testEnv(t *testing.T) *judgeEnv {
 			t.Fatal(err)
 		}
 	}
-	return &judgeEnv{root: testRoot, imageRoot: img, uid: uint32(os.Getuid()), ref: testReference(t)}
+	return &judgeEnv{root: testRoot, img: benchprofile.NewImage(img, uint32(os.Getuid()), nil), ref: testReference(t)}
 }
 
 // syncManifest rewrites the image manifest from the files under docs, in
@@ -66,7 +67,7 @@ func testEnv(t *testing.T) *judgeEnv {
 func syncManifest(t *testing.T, env *judgeEnv, skip ...string) {
 	t.Helper()
 	var b bytes.Buffer
-	err := filepath.WalkDir(filepath.Join(env.imageRoot, "docs"), func(p string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(filepath.Join(env.img.Root, "docs"), func(p string, d fs.DirEntry, err error) error {
 		if err != nil || !d.Type().IsRegular() || slices.Contains(skip, p) {
 			return err
 		}
@@ -74,7 +75,7 @@ func syncManifest(t *testing.T, env *judgeEnv, skip ...string) {
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(env.imageRoot, p)
+		rel, err := filepath.Rel(env.img.Root, p)
 		if err != nil {
 			return err
 		}
@@ -84,14 +85,14 @@ func syncManifest(t *testing.T, env *judgeEnv, skip ...string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env.manifest = b.Bytes()
+	env.img.Manifest = b.Bytes()
 }
 
 // publishFiles writes the named files of one run, locks them the way the image
 // does and lists them in the manifest. It returns the run directory.
 func publishFiles(t *testing.T, env *judgeEnv, run string, files map[string][]byte) string {
 	t.Helper()
-	dir := env.runPath(run)
+	dir := env.img.RunPath(run)
 	for name, data := range files {
 		p := filepath.Join(dir, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -115,10 +116,10 @@ func publishFiles(t *testing.T, env *judgeEnv, run string, files map[string][]by
 	return dir
 }
 
-func recFiles(t *testing.T, recs [3]Facts) map[string][]byte {
+func recFiles(t *testing.T, recs [3]benchprofile.Facts) map[string][]byte {
 	t.Helper()
 	files := map[string][]byte{}
-	for i, stage := range factStages {
+	for i, stage := range benchprofile.FactStages {
 		data, err := json.Marshal(recs[i])
 		if err != nil {
 			t.Fatal(err)
@@ -142,7 +143,7 @@ func sampleBytes(t *testing.T, set *sampleSet) []byte {
 }
 
 // publish publishes records and samples as one run of the image.
-func publish(t *testing.T, env *judgeEnv, run string, recs [3]Facts, set *sampleSet) string {
+func publish(t *testing.T, env *judgeEnv, run string, recs [3]benchprofile.Facts, set *sampleSet) string {
 	t.Helper()
 	files := recFiles(t, recs)
 	files["samples/"+samplesName] = sampleBytes(t, set)
@@ -215,7 +216,7 @@ func syntheticSetOn(t *testing.T, root string, day time.Time, run string, rounds
 		Source:       indepSHA(t, root, indepSources(t, root), true),
 		Names:        namesHash(items), Go: "go-test", GOOS: "linux", GOARCH: "amd64", CGO: "0", Race: "false",
 		Cases: cases, Items: len(items), Rounds: rounds, Seed: 1, OK: len(items), CompileNS: 1,
-		StartDate: day.Format(factsDateLayout), EndDate: day.Format(factsDateLayout),
+		StartDate: day.Format(benchprofile.DateLayout), EndDate: day.Format(benchprofile.DateLayout),
 	}
 	for r := 1; r <= rounds; r++ {
 		order := rand.New(rand.NewPCG(1, uint64(r))).Perm(len(items))
@@ -229,7 +230,7 @@ func syntheticSetOn(t *testing.T, root string, day time.Time, run string, rounds
 }
 
 // recsFor is validRecs for another run and another instant (seconds since the epoch).
-func recsFor(run string, t0 int64) [3]Facts {
+func recsFor(run string, t0 int64) [3]benchprofile.Facts {
 	recs := validRecs()
 	for i := range recs {
 		recs[i].Run = run
@@ -250,9 +251,9 @@ func judged(t *testing.T, env *judgeEnv, run, base string) (int, string) {
 	var out bytes.Buffer
 	baseDir := ""
 	if base != "" {
-		baseDir = env.runPath(base)
+		baseDir = env.img.RunPath(base)
 	}
-	return judgeWith(env, env.runPath(run), baseDir, &out), out.String()
+	return judgeWith(env, env.img.RunPath(run), baseDir, &out), out.String()
 }
 
 func wantJudged(t *testing.T, env *judgeEnv, run, reason string) {
@@ -392,24 +393,26 @@ func TestLatencyGateComparableBase(t *testing.T) {
 	// fail the head's 10% bound if it were compared (it is 20 times faster), and none is.
 	for _, tc := range []struct {
 		name   string
-		mutate func(s *sampleSet, recs *[3]Facts)
+		mutate func(s *sampleSet, recs *[3]benchprofile.Facts)
 	}{
-		{"race build", func(s *sampleSet, _ *[3]Facts) { s.Header.Race = "true" }},
-		{"cgo build", func(s *sampleSet, _ *[3]Facts) { s.Header.CGO = "1" }},
-		{"unknown cgo", func(s *sampleSet, _ *[3]Facts) { s.Header.CGO = "unknown" }},
-		{"other os", func(s *sampleSet, _ *[3]Facts) { s.Header.GOOS = "darwin" }},
-		{"other arch", func(s *sampleSet, _ *[3]Facts) { s.Header.GOARCH = "arm64" }},
-		{"other sample run", func(s *sampleSet, _ *[3]Facts) { s.Header.Run = "bench-20261015T101500Z" }},
-		{"other sample inputs", func(s *sampleSet, _ *[3]Facts) { s.Header.InputsSHA = strings.Repeat("c", 64) }},
-		{"fewer rounds", func(s *sampleSet, _ *[3]Facts) {
+		{"race build", func(s *sampleSet, _ *[3]benchprofile.Facts) { s.Header.Race = "true" }},
+		{"cgo build", func(s *sampleSet, _ *[3]benchprofile.Facts) { s.Header.CGO = "1" }},
+		{"unknown cgo", func(s *sampleSet, _ *[3]benchprofile.Facts) { s.Header.CGO = "unknown" }},
+		{"other os", func(s *sampleSet, _ *[3]benchprofile.Facts) { s.Header.GOOS = "darwin" }},
+		{"other arch", func(s *sampleSet, _ *[3]benchprofile.Facts) { s.Header.GOARCH = "arm64" }},
+		{"other sample run", func(s *sampleSet, _ *[3]benchprofile.Facts) { s.Header.Run = "bench-20261015T101500Z" }},
+		{"other sample inputs", func(s *sampleSet, _ *[3]benchprofile.Facts) { s.Header.InputsSHA = strings.Repeat("c", 64) }},
+		{"fewer rounds", func(s *sampleSet, _ *[3]benchprofile.Facts) {
 			s.Header.Rounds--
 			s.Rounds = s.Rounds[:len(s.Rounds)-1]
 		}},
-		{"other local offset", func(s *sampleSet, _ *[3]Facts) { s.Header.UTCOffset = 3600 }},
-		{"names not those of its date", func(s *sampleSet, _ *[3]Facts) { s.Header.Names = strings.Repeat("e", 64) }},
-		{"case identity swapped", func(s *sampleSet, _ *[3]Facts) { s.Items[0].ID, s.Items[1].ID = s.Items[1].ID, s.Items[0].ID }},
-		{"other corpus", func(s *sampleSet, _ *[3]Facts) { s.Header.CorpusSeries = strings.Repeat("e", 64) }},
-		{"ineligible host facts", func(_ *sampleSet, recs *[3]Facts) { recs[1].ForeignAllowedMax = 1 }},
+		{"other local offset", func(s *sampleSet, _ *[3]benchprofile.Facts) { s.Header.UTCOffset = 3600 }},
+		{"names not those of its date", func(s *sampleSet, _ *[3]benchprofile.Facts) { s.Header.Names = strings.Repeat("e", 64) }},
+		{"case identity swapped", func(s *sampleSet, _ *[3]benchprofile.Facts) {
+			s.Items[0].ID, s.Items[1].ID = s.Items[1].ID, s.Items[0].ID
+		}},
+		{"other corpus", func(s *sampleSet, _ *[3]benchprofile.Facts) { s.Header.CorpusSeries = strings.Repeat("e", 64) }},
+		{"ineligible host facts", func(_ *sampleSet, recs *[3]benchprofile.Facts) { recs[1].ForeignAllowedMax = 1 }},
 	} {
 		t.Run("not a base: "+tc.name, func(t *testing.T) {
 			env := testEnv(t)
@@ -576,7 +579,7 @@ func TestLatencyGateRequiredFieldsThroughTheJudge(t *testing.T) {
 	if code, out := judged(t, publishData(t, data), testRun, ""); code != exitPass {
 		t.Fatalf("control: exit %d: %q", code, out)
 	}
-	for _, key := range jsonKeys(reflect.TypeFor[header]()) {
+	for _, key := range benchprofile.JSONKeys(reflect.TypeFor[header]()) {
 		t.Run("header null "+key, func(t *testing.T) {
 			wantJudged(t, publishData(t, editLine(t, data, 0, func(m map[string]any) { m[key] = nil })), testRun, "samples_malformed")
 		})
@@ -648,7 +651,7 @@ func TestLatencyGateSamplesAreStructurallyChecked(t *testing.T) {
 			p := filepath.Join(t.TempDir(), samplesName)
 			writeFile(t, p, tc.data)
 			_, err := readSamples(p)
-			if _, ok := invalidReason(err); !ok {
+			if _, ok := benchprofile.InvalidReason(err); !ok {
 				t.Fatalf("readSamples = %v, want INVALID", err)
 			}
 		})
@@ -705,9 +708,9 @@ func TestLatencyGateJudgesOnlyTheImage(t *testing.T) {
 	}{
 		{"run directory", func(_ *judgeEnv, dir string) string { return dir }, 0o755},
 		{"samples directory", func(_ *judgeEnv, dir string) string { return filepath.Join(dir, "samples") }, 0o755},
-		{"data directory without the sticky bit", func(env *judgeEnv, _ string) string { return filepath.Dir(env.runPath(testRun)) }, 0o777},
-		{"spikes directory without the sticky bit", func(env *judgeEnv, _ string) string { return filepath.Dir(filepath.Dir(env.runPath(testRun))) }, 0o777},
-		{"image root without the sticky bit", func(env *judgeEnv, _ string) string { return env.imageRoot }, 0o777},
+		{"data directory without the sticky bit", func(env *judgeEnv, _ string) string { return filepath.Dir(env.img.RunPath(testRun)) }, 0o777},
+		{"spikes directory without the sticky bit", func(env *judgeEnv, _ string) string { return filepath.Dir(filepath.Dir(env.img.RunPath(testRun))) }, 0o777},
+		{"image root without the sticky bit", func(env *judgeEnv, _ string) string { return env.img.Root }, 0o777},
 		{"run directory, sticky", func(_ *judgeEnv, dir string) string { return dir }, os.ModeSticky | 0o777},
 	} {
 		t.Run("writable parent: "+tc.name, func(t *testing.T) {
@@ -718,7 +721,7 @@ func TestLatencyGateJudgesOnlyTheImage(t *testing.T) {
 	}
 	t.Run("owned by another user", func(t *testing.T) {
 		env, _ := good(t)
-		env.uid++
+		env.img.UID++
 		wantJudged(t, env, testRun, "record_mutable")
 	})
 	t.Run("not in the manifest", func(t *testing.T) {
@@ -730,7 +733,7 @@ func TestLatencyGateJudgesOnlyTheImage(t *testing.T) {
 	})
 	t.Run("another digest", func(t *testing.T) {
 		env, _ := good(t)
-		env.manifest = bytes.Replace(env.manifest, []byte("/src/docs/spikes/data/"+testRun+"/during.json"), []byte("/src/docs/spikes/data/"+testRun+"/other.json"), 1)
+		env.img.Manifest = bytes.Replace(env.img.Manifest, []byte("/src/docs/spikes/data/"+testRun+"/during.json"), []byte("/src/docs/spikes/data/"+testRun+"/other.json"), 1)
 		wantJudged(t, env, testRun, "image_mismatch")
 	})
 	t.Run("changed after the manifest", func(t *testing.T) {
@@ -742,7 +745,7 @@ func TestLatencyGateJudgesOnlyTheImage(t *testing.T) {
 		if err := os.Remove(p); err != nil {
 			t.Fatal(err)
 		}
-		data, _ := json.Marshal(validFacts(stageAfter))
+		data, _ := json.Marshal(validFacts(benchprofile.StageAfter))
 		writeFile(t, p, append(data, ' '))
 		chmod(t, p, 0o444)
 		chmod(t, dir, 0o555)
@@ -750,7 +753,7 @@ func TestLatencyGateJudgesOnlyTheImage(t *testing.T) {
 	})
 	t.Run("listed twice", func(t *testing.T) {
 		env, _ := good(t)
-		env.manifest = append(slices.Clone(env.manifest), env.manifest...)
+		env.img.Manifest = append(slices.Clone(env.img.Manifest), env.img.Manifest...)
 		wantJudged(t, env, testRun, "image_mismatch")
 	})
 	t.Run("run outside the image", func(t *testing.T) {
@@ -763,10 +766,12 @@ func TestLatencyGateJudgesOnlyTheImage(t *testing.T) {
 		if code := judgeWith(env, other, "", &out); code != exitInvalid || out.String() != "PARSER-LATENCY-INVALID reason=run_location\n" {
 			t.Fatalf("exit %d: %q", code, out.String())
 		}
-		for _, bad := range []string{".", "..", filepath.Join(filepath.Dir(dir), "x"), dir + "/samples", "bench-1"} {
+		// The argument is resolved against the working directory, as it always was: a
+		// path that names the run relative to the image root is not the run.
+		for _, notARun := range []string{".", "..", filepath.Join(filepath.Dir(dir), "x"), dir + "/samples", "bench-1", filepath.Join("docs", "spikes", "data", testRun)} {
 			out.Reset()
-			if code := judgeWith(env, bad, "", &out); code != exitInvalid || strings.Contains(out.String(), "PASS") {
-				t.Errorf("%q: exit %d: %q", bad, code, out.String())
+			if code := judgeWith(env, notARun, "", &out); code != exitInvalid || out.String() != "PARSER-LATENCY-INVALID reason=run_location\n" {
+				t.Errorf("%q: exit %d: %q", notARun, code, out.String())
 			}
 		}
 	})
@@ -785,21 +790,21 @@ func TestLatencyGateJudgesOnlyTheImage(t *testing.T) {
 			files[name] = bytes.ReplaceAll(data, []byte(testRun), []byte(alike))
 		}
 		for name, data := range files {
-			p := filepath.Join(env.runPath(alike), filepath.FromSlash(name))
+			p := filepath.Join(env.img.RunPath(alike), filepath.FromSlash(name))
 			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			writeFile(t, p, data)
 		}
 		wantJudged(t, env, alike, "record_mutable")
-		for _, d := range []string{filepath.Join(env.runPath(alike), "samples"), env.runPath(alike)} {
+		for _, d := range []string{filepath.Join(env.img.RunPath(alike), "samples"), env.img.RunPath(alike)} {
 			if err := os.Chmod(d, 0o555); err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = os.Chmod(d, 0o755) })
 		}
 		for name := range files {
-			if err := os.Chmod(filepath.Join(env.runPath(alike), filepath.FromSlash(name)), 0o444); err != nil {
+			if err := os.Chmod(filepath.Join(env.img.RunPath(alike), filepath.FromSlash(name)), 0o444); err != nil {
 				t.Fatal(err)
 			}
 		}

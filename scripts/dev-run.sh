@@ -1,6 +1,6 @@
 #!/bin/sh
 # Canonical Boxset dev runner (host, repository root only):
-#   scripts/dev-run.sh [--write docs/spikes/issue-drafts|docs/spikes/data/bench-<UTC>/samples] [--capture DIR] [--bench CPUSET] [--timeout SECONDS] -- COMMAND [ARG...]
+#   scripts/dev-run.sh [--write docs/spikes/issue-drafts|docs/spikes/data/bench-<UTC>/samples] [--capture DIR] [--bench CPUSET] [--bench-data PATH] [--timeout SECONDS] -- COMMAND [ARG...]
 #
 # Rebuilds the `work` image from the current allowlisted inputs (frozen locks,
 # never a lock regeneration) and runs COMMAND with its exact argv in one fresh,
@@ -45,7 +45,7 @@
 # hidepid, a second /proc mount or any mount over a task entry (bench_invalid side=proc), whoever the caller, is rejected before Docker. The host, never the
 # child, observes the run: RUN/before.json (after the container exists, before it starts),
 # RUN/during.json (every observation while it runs, once a second) and RUN/after.json (after it
-# stopped) are aggregates of fixed numbers, enums and booleans only (schema: bench/parser/eligibility.go;
+# stopped) are aggregates of fixed numbers, enums and booleans only (schema: bench/internal/benchprofile;
 # no task listing, command line, environment, CPU list, path or host name). They are written from the
 # host and published beside RUN/samples, never mounted into or writable by the child. Each
 # observation reads the threads of this machine and the /config filesystem and entries again; it
@@ -57,7 +57,45 @@
 # regular file, at most 32 MiB, through the redactor) together with the three records, into the
 # fresh RUN directory; a nonzero child, an observation that could not be read (bench_evidence_failed)
 # or any export failure publishes nothing. Observation is not a reservation: the owner reserves the
-# cores, and `bench/parser -judge RUN` (the next invocation, from a refreshed image) decides.
+# cores, and the next invocation, from a refreshed image, decides by record version — `bench/parser -judge
+# RUN` for a V1 run and `bench/access -judge RUN` for a data mode's V2 records.
+# --timeout is whole seconds: above 600 s only together with --bench, and never above 3600; every other
+# form is `dev-run: timeout_invalid`.
+#
+# --bench-data PATH (PATH = exactly the work child of this invocation's own --write run,
+# docs/spikes/data/bench-<UTC>/work) is valid only with --bench; a missing --bench, an absolute path, a
+# `..` component, a link, another stamp, a repeated flag or an existing run is
+# `dev-run: bench_invalid side=data` before Docker, exit 125, never side=write. The host uid is never
+# restricted: the child stays fixed 1000:1000. After the image build the runner creates RUN and then
+# RUN/work (plain checked mkdir), keeps both device:inode pairs in memory, binds RUN/work writable at
+# /bench-data beside the unchanged read-only /config, adds only the literal BOXSET_DATA_DIR=/bench-data to
+# the child, and requires the created container to show exactly those two binds. Before the start, while
+# the container is stopped, a tar holding exactly one entry — the directory bench-data, uid=gid=1000,
+# mode 0700, no payload and no other entry — is streamed through `docker cp -a - CTR:/`, so the trusted
+# daemon sets the fresh mount root; the host then requires RUN/work uid 1000, mode 0700, the same device
+# and inode, and empty. A failure of that step is bench_evidence_failed, nothing starts and nothing is
+# published, and there is no fallback to a world-writable directory, a privileged child, an added
+# capability, a host chown or a host-uid requirement. A data run's records are V2: one JSON object per
+# stage with exactly the keys {"schema":2,"stage","run","image","inputs","host","data"}, where host
+# holds the V1 host fields unchanged in name, type, range and order and the five identity keys sit on the
+# envelope; data is
+# {"data_fs":"ext4"|"xfs"|"other","data_nvme","data_writable","data_bound","data_mounted"} and each value is
+# true only where it held at every observation of its stage: the work directory's backing filesystem and
+# NVMe device; owner uid 1000, owner write, no group or other write and a read-write bind; the same device
+# and inode under the same RUN identity, empty at before; the mount, read through `docker inspect` at
+# before and after and through /proc/<pid>/root/bench-data while the child runs. No path, user, host name
+# or inode number is recorded. Without --bench-data the records stay the V1 objects unchanged.
+#
+# Cleanup in data mode is the recorded sequence and nothing else: only after the measured container's
+# checked removal, and only while both identities still match, a bounded same-image helper container
+# (fixed uid 1000, --cap-drop ALL, --network none, --log-driver=none, only the RUN/work bind at
+# /bench-data) runs exactly `sh -euc 'chmod -R u+rwX /bench-data; find /bench-data -mindepth 1 -delete'`
+# and is then removed with a checked removal; the host then removes the now-empty work through its own RUN
+# and publishes the four files into the empty RUN. Every exit without publication attempts the same
+# identity-gated cleanup. A mismatch, a helper failure, a non-empty work or a container still present is
+# `dev-run: bench_data_cleanup_failed` and nothing is published; a mismatch or a failed cleanup never
+# authorizes traversing a substituted path and may leave a reported synthetic residual
+# (`dev-run: bench_data_residual=PATH`) for the owner to remove.
 # Bootstrap before the redactor exists prints only a fixed reason word; recovery:
 # docs/spikes/s5-version-admission.md.
 #
@@ -109,8 +147,27 @@ BENCHCPU=
 BENCHLIST=
 BENCHRUN=
 BENCHCFG=
+HAVE_BENCHDATA=0
+BENCHDATA=
+WORKSRC=
+RUN_DEVID=
+WORK_DEVID=
+DATADONE=0
+DATAMADE=0
+DATACLEANED=0
+DATACLEANFAIL=0
+DATARES=
+DMNT=
+MOUNT_RW=
 SAMPLER=
 CID=
+CHILD=
+BOUND=
+REMOVED=
+REMOVING=
+PENDING=
+CLEANFAIL=0
+COMPLETE=0
 
 die() {
 	printf 'dev-run: %s\n' "$1" >&2
@@ -118,7 +175,7 @@ die() {
 }
 
 usage() {
-	printf '%s\n' 'usage: scripts/dev-run.sh [--write docs/spikes/issue-drafts|docs/spikes/data/bench-<UTC>/samples] [--capture DIR] [--bench CPUSET] [--timeout SECONDS] -- COMMAND [ARG...]' >&2
+	printf '%s\n' 'usage: scripts/dev-run.sh [--write docs/spikes/issue-drafts|docs/spikes/data/bench-<UTC>/samples] [--capture DIR] [--bench CPUSET] [--bench-data PATH] [--timeout SECONDS] -- COMMAND [ARG...]' >&2
 	die usage
 }
 
@@ -192,22 +249,115 @@ if [ "${1:-}" = --backing-nvme-check ]; then
 	exit 0
 fi
 
-# Removes only what this invocation created: its labelled container (the label
-# carries the random run id) and its scratch directory, if still ours.
+full_id() {
+	[ "${#1}" = 64 ] || return 1
+	case $1 in *[!0-9a-f]*) return 1 ;; esac
+}
+# A receipt alone is insufficient: creation facts must agree before it becomes owned.
+bind_container() {
+	full_id "$1" || return 1
+	case $2 in "$CTR" | "$CTR-v-dev-desktop" | "$CTR-v-dev-mobile" | "$CTR-v-preview-desktop" | "$CTR-v-preview-mobile" | "$CTR-v-bench-data") ;; *) return 1 ;; esac
+	_bc=$(timeout 30 docker inspect --format '{{.Id}} {{.Name}} {{index .Config.Labels "boxset.dev-run"}} {{.Image}}' "$1" 2>/dev/null) || return 1
+	[ "$_bc" = "$1 /$2 $RUNID $IMG" ] || return 1
+	BOUND="$BOUND$1 $2
+"
+	PENDING=
+}
+container_absent() {
+	full_id "$1" || return 1
+	_ca=$(timeout 30 docker ps -a --no-trunc --filter "id=$1" --format '{{.ID}}' 2>/dev/null && printf x) || return 1
+	[ "$_ca" = x ]
+}
+remove_container() {
+	full_id "$1" || return 1
+	case "
+$BOUND" in *"
+$1 $2
+"*) ;; *) return 1 ;; esac
+	case " $REMOVED " in *" $1 "*) return 0 ;; esac
+	_rc=$(timeout 30 docker inspect --format '{{.Id}} {{.Name}} {{index .Config.Labels "boxset.dev-run"}} {{.Image}}' "$1" 2>/dev/null) || return 1
+	[ "$_rc" = "$1 /$2 $RUNID $IMG" ] || return 1
+	_rs=$(timeout 30 docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$1" 2>/dev/null) || return 1
+	case $_rs in
+	running\ *)
+		timeout 30 docker kill "$1" >/dev/null 2>&1 || return 1
+		_rw=$(timeout 60 docker wait "$1" 2>/dev/null) || return 1
+		case $_rw in '' | *[!0-9]*) return 1 ;; esac
+		_rs=$(timeout 30 docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$1" 2>/dev/null) || return 1
+		[ "$_rs" = "exited $_rw" ] || return 1
+		;;
+	esac
+	case $_rs in
+	created\ * | exited\ *)
+		_re=${_rs#* }
+		case $_re in '' | *[!0-9]*) return 1 ;; esac
+		;;
+	*) return 1 ;;
+	esac
+	# Attached output and stream/sink statuses precede this terminal observation.
+	_rc=$(timeout 30 docker inspect --format '{{.Id}} {{.Name}} {{index .Config.Labels "boxset.dev-run"}} {{.Image}}' "$1" 2>/dev/null) || return 1
+	[ "$_rc" = "$1 /$2 $RUNID $IMG" ] || return 1
+	[ "$CLEANFAIL" = 0 ] || return 1
+	REMOVING=$1
+	timeout 60 docker rm "$1" >/dev/null 2>&1 || return 1
+	container_absent "$1" || return 1
+	REMOVED="$REMOVED $1"
+	REMOVING=
+}
 cleanup() {
+	_incoming=$?
+	trap - EXIT
+	trap 'CLEANFAIL=1' HUP INT TERM
+	[ -z "$REMOVING" ] || CLEANFAIL=1
 	[ -z "$SAMPLER" ] || : >"$T/f/stop" 2>/dev/null
-	if [ -n "$RUNID" ]; then
-		_ids=$(timeout 30 docker ps -aq --filter "label=boxset.dev-run=$RUNID" 2>/dev/null)
-		[ -z "$_ids" ] || timeout 60 docker rm -f $_ids >/dev/null 2>&1
+	if [ -n "$PENDING" ]; then
+		_pi=$(timeout 30 docker inspect --format '{{.Id}}' "$PENDING" 2>/dev/null) && bind_container "$_pi" "$PENDING" || CLEANFAIL=1
+	fi
+	if [ "$CLEANFAIL" = 0 ]; then
+		while read -r _ci _cn; do
+			[ -n "$_ci" ] || continue
+			remove_container "$_ci" "$_cn" || CLEANFAIL=1
+		done <<EOF
+$BOUND
+EOF
+	fi
+	if [ "$CLEANFAIL" != 0 ]; then
+		printf 'dev-run: cleanup_failed\n' >&2
+		[ "$_incoming" != 0 ] || _incoming=125
+	fi
+	# Every exit without publication attempts the same identity-gated cleanup of the data directory. A
+	# mismatch or a failed cleanup never traverses a substituted path and leaves a reported residual for
+	# the owner to remove. The reason word has one owner: this path prints it, once, and only for a
+	# cleanup that failed (the main path marks DATACLEANFAIL and stops without printing it), so one
+	# failure is never reported twice; a publication failure keeps its own word and leaves this path the
+	# residual of the directory it could not finish.
+	if [ "${HAVE_BENCHDATA:-0}" = 1 ] && [ "${DATADONE:-0}" = 0 ] && [ "${DATAMADE:-0}" = 1 ]; then
+		if [ "${DATACLEANED:-0}" = 0 ] && [ "${DATACLEANFAIL:-0}" = 0 ]; then
+			bench_data_cleanup || DATACLEANFAIL=1
+		fi
+		DATARES=
+		{ [ "$(timeout 30 stat -c '%d:%i' -- "$BENCHRUN" 2>/dev/null)" = "$RUN_DEVID" ] && rmdir -- "$BENCHRUN" 2>/dev/null; } || DATARES=$BENCHRUN
+		if [ "${DATACLEANFAIL:-0}" = 1 ]; then
+			printf 'dev-run: bench_data_cleanup_failed\n' >&2
+			[ "$_incoming" != 0 ] || _incoming=125
+		fi
+		if [ -n "$DATARES" ]; then
+			printf 'dev-run: bench_data_residual=%s\n' "$DATARES" >&2
+			[ "$_incoming" != 0 ] || _incoming=125
+		fi
 	fi
 	# A capture directory this run created and did not finish publishing.
 	if [ "$CAPMADE" = 1 ] && [ "$CAPDONE" = 0 ] && [ -d "$CAPTURE" ] && [ ! -L "$CAPTURE" ] && [ -O "$CAPTURE" ]; then
 		rm -rf "$CAPTURE"
 	fi
 	if [ -n "$OWN" ] && [ -d "$T" ] && [ ! -L "$T" ] && [ -O "$T" ]; then
-		rm -rf "$T"
+		if [ "$CLEANFAIL" = 0 ] && [ "$COMPLETE" = 1 ] && [ "$_incoming" = "$CHILD" ]; then
+			rm -rf "$T"
+		else
+			printf 'dev-run: diagnostics_retained=%s\n' "$T" >&2
+		fi
 	fi
-	return 0
+	exit "$_incoming"
 }
 trap cleanup EXIT
 trap 'printf "dev-run: interrupted\n" >&2; exit 125' HUP INT TERM
@@ -226,6 +376,12 @@ while [ $# -gt 0 ]; do
 		{ [ $# -ge 2 ] && [ "$HAVE_BENCH" = 0 ]; } || usage
 		HAVE_BENCH=1
 		BENCHCPU=$2
+		shift
+		;;
+	--bench-data)
+		{ [ $# -ge 2 ] && [ "$HAVE_BENCHDATA" = 0 ]; } || die 'bench_invalid side=data'
+		HAVE_BENCHDATA=1
+		BENCHDATA=$2
 		shift
 		;;
 	--write)
@@ -247,6 +403,21 @@ done
 [ "${1:-}" = -- ] || usage
 shift
 [ $# -gt 0 ] || usage
+
+# --bench-data is valid only with --bench, whatever else the invocation gets wrong: a missing --bench is
+# never reported as side=write.
+if [ "$HAVE_BENCHDATA" = 1 ] && [ "$HAVE_BENCH" = 0 ]; then die 'bench_invalid side=data'; fi
+# --timeout is whole seconds. Until 600 s every run may ask for it; above that only a benchmark run may,
+# and never above 3600 s. The rule is checked here, before the benchmark configuration, so an out-of-range
+# deadline is refused as timeout_invalid whatever else the invocation asks for.
+case $TIMEOUT in
+'' | 0* | *[!0-9]*) die timeout_invalid ;;
+esac
+if [ "$TIMEOUT" -le 600 ]; then
+	[ "${#TIMEOUT}" -le 3 ] || die timeout_invalid
+else
+	{ [ "$HAVE_BENCH" = 1 ] && [ "${#TIMEOUT}" -le 4 ] && [ "$TIMEOUT" -le 3600 ]; } || die timeout_invalid
+fi
 
 # bench_ids LIST: IDS = the CPU ids of a list such as 0-3,8 (comma-separated N or N-M of at most four
 # digits without leading zeros, N <= M, at most 1024 ids in all); status 1 for anything else. Builtins
@@ -287,16 +458,37 @@ if [ "$HAVE_BENCH" = 1 ]; then
 	*) die 'bench_invalid side=samples' ;;
 	esac
 	BENCHRUN=${WRITE%/samples}
+	if [ "$HAVE_BENCHDATA" = 1 ]; then
+		# --bench-data is exactly the work child of this invocation's own write run: the same stamp, a
+		# relative path without a link anywhere above it, and a run that does not exist yet.
+		case $BENCHDATA in
+		docs/spikes/data/bench-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z/work) ;;
+		*) die 'bench_invalid side=data' ;;
+		esac
+		[ "${BENCHDATA%/work}" = "$BENCHRUN" ] || die 'bench_invalid side=data'
+		{ [ ! -e "$BENCHRUN" ] && [ ! -L "$BENCHRUN" ]; } || die 'bench_invalid side=data'
+		# Every component of this run's own path, judged directly in order: the three workspace directories, the
+		# run itself and the work leaf. A link anywhere above the leaf is refused here, before Docker, so a
+		# checkout whose data directory is a link cannot pass this block and fail later as write_root_invalid.
+		for _c in docs docs/spikes docs/spikes/data "$BENCHRUN" "$BENCHDATA"; do
+			[ ! -L "$_c" ] || die 'bench_invalid side=data'
+			[ ! -e "$_c" ] || [ -d "$_c" ] || die 'bench_invalid side=data'
+		done
+		# The leaf's own ban, in the recorded wording. The fresh-run rule above already refuses the run directory when it
+		# exists at all, and a link leaf implies an existing one, so this line restates the ban and is never the first refusal.
+		{ [ ! -e "$BENCHDATA" ] && [ ! -L "$BENCHDATA" ]; } || die 'bench_invalid side=data'
+		# The work directory as the daemon receives it: an absolute path without the characters a
+		# --mount option would split on (the same rule the scratch directory meets).
+		_hr=$(pwd -P 2>/dev/null) || die 'bench_invalid side=data'
+		case $_hr in '' | *[,:]*) die 'bench_invalid side=data' ;; esac
+		WORKSRC=$_hr/$BENCHRUN/work
+	fi
 	BENCHCFG=${BOXSET_BENCH_CONFIG:-}
 	[ -n "$BENCHCFG" ] || die 'bench_unavailable side=config'
 	case $BENCHCFG in /*) ;; *) die 'bench_invalid side=config' ;; esac
 	case $BENCHCFG in *[!A-Za-z0-9_./+@=-]* | */ | *//* | */./* | */../* | */. | */..) die 'bench_invalid side=config' ;; esac
 	{ [ -d "$BENCHCFG" ] && [ ! -L "$BENCHCFG" ]; } || die 'bench_invalid side=config'
 fi
-case $TIMEOUT in
-'' | 0* | *[!0-9]*) die timeout_invalid ;;
-esac
-{ [ "${#TIMEOUT}" -le 3 ] && [ "$TIMEOUT" -le 600 ]; } || die timeout_invalid
 if [ "$HAVE_WRITE" = 1 ]; then
 	case $WRITE in
 	docs/spikes/issue-drafts) ;;
@@ -353,7 +545,7 @@ write_chain_ok() {
 }
 [ "$HAVE_WRITE" = 0 ] || write_chain_ok || die write_root_invalid
 
-for _t in docker mktemp timeout od tr rm mv mkdir cat find sha256sum chmod grep head tar env sed wc; do
+for _t in docker mktemp timeout od tr rm mv mkdir rmdir cat find sha256sum chmod grep head tar env sed wc; do
 	command -v "$_t" >/dev/null 2>&1 || die host_tool_missing
 done
 if [ "$HAVE_BENCH" = 1 ]; then
@@ -466,6 +658,112 @@ sha256:????????????????????????????????????????????????????????????????) ;;
 *) die build_failed ;;
 esac
 
+# --- benchmark data directory (--bench-data) ---------------------------------------------------
+# The host creates, observes and removes the child's data directory; the child only ever writes through
+# its bind. Nothing here ever traverses a path whose identity stopped matching.
+# bench_mounts: DMNT (1 or 0) for the created container's exact mount set — none, the one read-only
+# /config bind, or with data mode that bind beside the writable work bind, whose running container must
+# also show the work directory's device and inode at /bench-data — and MOUNT_RW (1 when the work bind is
+# the expected read-write bind). Status 1 when a fact cannot be read; a set that reads but is not the
+# expected one is DMNT=0 and stays recorded, so the judge decides. The /proc leg is a fact only while a
+# running child shows it: a child that exits between the state read and the path read is a vanished
+# process, not an unreadable observation, so one second inspection decides — no longer running makes the
+# leg not applicable (the read mount set stands), still running with an unreadable root stays status 1.
+bench_mounts() {
+	DMNT=1
+	MOUNT_RW=0
+	_mi=$(timeout 30 docker inspect --format '{{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}} {{.RW}}{{println}}{{end}}' "$CTR" 2>/dev/null) || return 1
+	_n=0
+	_cfg=0
+	while IFS= read -r _ml; do
+		[ -n "$_ml" ] || continue
+		_n=$((_n + 1))
+		case $_ml in
+		"bind $BENCHCFG /config false") _cfg=$((_cfg + 1)) ;;
+		"bind $WORKSRC /bench-data true") MOUNT_RW=1 ;;
+		esac
+	done <<EOF
+$_mi
+EOF
+	case $HAVE_BENCH$HAVE_BENCHDATA in
+	00) { [ "$_n" = 0 ] && [ "$_cfg" = 0 ] && [ "$MOUNT_RW" = 0 ]; } || DMNT=0 ;;
+	10) { [ "$_n" = 1 ] && [ "$_cfg" = 1 ] && [ "$MOUNT_RW" = 0 ]; } || DMNT=0 ;;
+	11) { [ "$_n" = 2 ] && [ "$_cfg" = 1 ] && [ "$MOUNT_RW" = 1 ]; } || DMNT=0 ;;
+	*) DMNT=0 ;;
+	esac
+	if [ "$HAVE_BENCHDATA" = 1 ]; then
+		_mp=$(timeout 30 docker inspect --format '{{.State.Pid}} {{.State.Running}}' "$CTR" 2>/dev/null) || return 1
+		set -- $_mp
+		[ $# = 2 ] || return 1
+		if [ "$2" = true ]; then
+			[ "$1" -gt 0 ] 2>/dev/null || return 1
+			if _md=$(timeout 30 stat -c '%d:%i' -- "/proc/$1/root/bench-data" 2>/dev/null); then
+				[ "$_md" = "$WORK_DEVID" ] || DMNT=0
+			else
+				_mp=$(timeout 30 docker inspect --format '{{.State.Running}}' "$CTR" 2>/dev/null) || return 1
+				[ "$_mp" = false ] || return 1
+			fi
+		fi
+	fi
+}
+# bench_root: the child's data directory starts as the mount created for it — owned by the child's own
+# uid, mode 0700 and empty. The stream holds exactly one entry, the literal directory bench-data
+# (uid=gid=1000, mode 0700, no payload, no other entry), and the trusted daemon, never this host user,
+# applies that ownership and mode to the fresh mount root. The host then requires the directory it kept by
+# identity: uid 1000, mode 0700, the same device and inode, empty.
+bench_root() {
+	mkdir -m 0700 -- "$T/mnt" "$T/mnt/bench-data" || return 1
+	{ tar -cf - --format=ustar --numeric-owner --owner=1000 --group=1000 --mtime=@0 -C "$T/mnt" bench-data; printf '%s' "$?" >"$T/tars"; } |
+		timeout 60 docker cp -a - "$CTR:/" >/dev/null 2>&1
+	_cps=$?
+	{ [ "$(cat "$T/tars" 2>/dev/null)" = 0 ] && [ "$_cps" = 0 ]; } || return 1
+	_rf=$(timeout 30 stat -c '%u %a %d:%i' -- "$BENCHRUN/work" 2>/dev/null) || return 1
+	set -- $_rf
+	{ [ $# = 3 ] && [ "$1" = 1000 ] && [ "$2" = 700 ] && [ "$3" = "$WORK_DEVID" ]; } || return 1
+	_rl=$(timeout 30 find "$BENCHRUN/work" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) || return 1
+	[ -z "$_rl" ] || return 1
+	[ "$(timeout 30 stat -c '%d:%i' -- "$BENCHRUN" 2>/dev/null)" = "$RUN_DEVID" ]
+}
+# bench_data_cleanup: the recorded cleanup of the data directory, and nothing else. The measured container
+# must be gone and both identities must still match; a bounded same-image helper (fixed uid 1000, no
+# capabilities, no network, no daemon log, only the work bind at /bench-data) empties the directory the
+# child owns, is removed with a checked removal, and the host removes the now-empty work through its own
+# run directory. A mismatch or any failure leaves the path alone and reports status 1.
+bench_data_cleanup() {
+	[ "$CLEANFAIL" = 0 ] || return 1
+	{ [ -z "$CID" ] || container_absent "$CID"; } || return 1
+	[ "$(timeout 30 stat -c '%d:%i' -- "$BENCHRUN" 2>/dev/null)" = "$RUN_DEVID" ] || return 1
+	[ "$(timeout 30 stat -c '%d:%i' -- "$BENCHRUN/work" 2>/dev/null)" = "$WORK_DEVID" ] || return 1
+	{ [ -d "$BENCHRUN" ] && [ ! -L "$BENCHRUN" ] && [ -d "$BENCHRUN/work" ] && [ ! -L "$BENCHRUN/work" ]; } || return 1
+	_hc=$CTR-v-bench-data
+	PENDING=$_hc
+	timeout 60 docker create --name "$_hc" --label "boxset.dev-run=$RUNID" --network none \
+		--cap-drop ALL --security-opt no-new-privileges --log-driver=none --user 1000:1000 \
+		--mount "type=bind,source=$WORKSRC,target=/bench-data" "$IMG" \
+		sh -euc 'chmod -R u+rwX /bench-data; find /bench-data -mindepth 1 -delete' >"$T/create.id" 2>/dev/null || return 1
+	_hid=$(cat "$T/create.id" 2>/dev/null) || return 1
+	bind_container "$_hid" "$_hc" || return 1
+	_ho=$(timeout 30 docker inspect --format '{{.HostConfig.LogConfig.Type}} {{.Config.User}} {{range .Mounts}}{{.Destination}} {{.RW}}{{end}}' "$_hc" 2>/dev/null) || return 1
+	[ "$_ho" = 'none 1000:1000 /bench-data true' ] || return 1
+	timeout --foreground --kill-after=5s 120s docker start -a "$_hc" >/dev/null 2>&1 </dev/null || return 1
+	_hs=$(timeout 30 docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$_hc" 2>/dev/null) || return 1
+	[ "$_hs" = 'exited 0' ] || return 1
+	remove_container "$_hid" "$_hc" || return 1
+	rmdir -- "$BENCHRUN/work"
+}
+if [ "$HAVE_BENCHDATA" = 1 ]; then
+	# The run directory and its work child exist before the container is created: plain checked mkdir, host
+	# owned, and both device:inode pairs are kept in memory for every later identity check.
+	mkdir -p -- "${BENCHRUN%/*}" || die publish_failed
+	mkdir -- "$BENCHRUN" 2>/dev/null || die 'bench_invalid side=data'
+	DATAMADE=1
+	mkdir -m 0700 -- "$BENCHRUN/work" 2>/dev/null || die bench_evidence_failed
+	RUN_DEVID=$(timeout 30 stat -c '%d:%i' -- "$BENCHRUN" 2>/dev/null) || die bench_evidence_failed
+	WORK_DEVID=$(timeout 30 stat -c '%d:%i' -- "$BENCHRUN/work" 2>/dev/null) || die bench_evidence_failed
+	case $RUN_DEVID in [0-9]*:[0-9]*) ;; *) die bench_evidence_failed ;; esac
+	case $WORK_DEVID in [0-9]*:[0-9]*) ;; *) die bench_evidence_failed ;; esac
+fi
+
 # --- container -------------------------------------------------------------------
 CTR=boxset-dev-run-$RUNID
 # The literal child environment, exactly as `docker create` receives it.
@@ -496,32 +794,41 @@ EOF
 if [ "$HAVE_CAPTURE" = 1 ]; then
 	printf 'BOXSET_CAPTURE_DIR=/capture\nBOXSET_CAPTURE_CHALLENGE=%s\n' "$CHAL" >>"$T/lit" || die create_failed
 fi
-# create_ctr CHILD_ARGV...: docker create of the owned container, never with a mount; the image is
-# followed by the byte-exact child argv.
+# Data mode adds only its own synthetic data directory.
+if [ "$HAVE_BENCHDATA" = 1 ]; then
+	printf 'BOXSET_DATA_DIR=/bench-data\n' >>"$T/lit" || die create_failed
+fi
+# create_ctr CHILD_ARGV...: docker create of the owned container, with no mount, or with --bench the
+# read-only /config bind and with --bench-data the writable work bind beside it; the image is followed by
+# the byte-exact child argv. The limits and the bind set are built once here and every mode shares the one
+# create below, so a change to either can never drift from the other; both mount readbacks still fail
+# closed on whatever this line produced.
 create_ctr() {
+	PENDING=$CTR
+	_lim=
+	_mnt_cfg=
+	_mnt_data=
 	if [ "$HAVE_BENCH" = 1 ]; then
-		timeout 60 docker create --name "$CTR" --label "boxset.dev-run=$RUNID" --network none \
-			--cap-drop ALL --security-opt no-new-privileges --log-driver=none --user 1000:1000 --workdir /src \
-			--cpuset-cpus "$BENCHCPU" --memory 4g --memory-swap 4g \
-			--mount "type=bind,source=$BENCHCFG,target=/config,readonly" \
-			--env-file "$T/lit" "$IMG" "$@" >/dev/null 2>&1
-	else
-		timeout 60 docker create --name "$CTR" --label "boxset.dev-run=$RUNID" --network none \
-			--cap-drop ALL --security-opt no-new-privileges --log-driver=none --user 1000:1000 --workdir /src \
-			--env-file "$T/lit" "$IMG" "$@" >/dev/null 2>&1
+		_lim=1
+		_mnt_cfg="type=bind,source=$BENCHCFG,target=/config,readonly"
+		[ "$HAVE_BENCHDATA" = 0 ] || _mnt_data="type=bind,source=$WORKSRC,target=/bench-data"
 	fi
+	timeout 60 docker create --name "$CTR" --label "boxset.dev-run=$RUNID" --network none \
+		--cap-drop ALL --security-opt no-new-privileges --log-driver=none --user 1000:1000 --workdir /src \
+		${_lim:+--cpuset-cpus "$BENCHCPU" --memory 4g --memory-swap 4g} \
+		${_mnt_cfg:+--mount "$_mnt_cfg"} ${_mnt_data:+--mount "$_mnt_data"} \
+		--env-file "$T/lit" "$IMG" "$@" >"$T/create.id" 2>/dev/null
 }
 create_ctr "$@" || die create_failed
+CID=$(cat "$T/create.id" 2>/dev/null) || die create_failed
+bind_container "$CID" "$CTR" || die create_failed
 [ "$(timeout 30 docker inspect --format '{{.HostConfig.LogConfig.Type}}' "$CTR" 2>/dev/null)" = none ] || die log_driver_invalid
-# Effective mounts: none, or with --bench
-# exactly the one read-only /config bind of the owner's directory.
-_mnt=$(timeout 30 docker inspect --format '{{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}} {{.RW}}{{println}}{{end}}' "$CTR" 2>/dev/null) || die mounts_invalid
-if [ "$HAVE_BENCH" = 1 ]; then
-	[ "$_mnt" = "bind $BENCHCFG /config false" ] || die mounts_invalid
-else
-	[ -z "$_mnt" ] || die mounts_invalid
-fi
-_mnt=
+# Effective mounts: none, or with --bench exactly the one read-only /config bind of the owner's
+# directory, and with --bench-data the writable work bind beside it.
+bench_mounts || die mounts_invalid
+[ "$DMNT" = 1 ] || die mounts_invalid
+# With --bench-data the mount root is set here, while the container is stopped and its bind set verified.
+[ "$HAVE_BENCHDATA" = 0 ] || bench_root || die bench_evidence_failed
 # Effective environment: every created-container line is a literal above or the
 # image's own, and every literal survived unchanged (nothing injected, nothing replaced).
 timeout 30 docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CTR" >"$T/eff" 2>/dev/null || die env_invalid
@@ -541,10 +848,11 @@ printf 'dev-run: image=%s inputs=%s timeout=%ss container=%s log=none\n' "$IMG" 
 
 # --- benchmark host evidence (--bench) -----------------------------------------------------
 # The host observes; the child never sees or writes these. Every record is aggregates of fixed
-# numbers, enums and booleans (bench/parser/eligibility.go owns the schema): no CPU list, task
+# numbers, enums and booleans (schema: bench/internal/benchprofile): no CPU list, task
 # listing, command line, environment, path or host name. A value that cannot be read fails closed
 # (bench_evidence_failed, nothing published); a value that reads but is not eligible is recorded and
-# the judge decides.
+# the judge decides, except the storage word, which refuses the run before measurement when it is neither
+# ext4 nor XFS.
 # bench_topology: TOPO_CPUS, TOPO_CORES, TOPO_TPC (largest SMT sibling count of a member), TOPO_SIBOUT
 # (siblings that are not members) and TOPO_NUMA of the reserved set. An unreadable CPU zeroes cores,
 # threads and nodes, which the judge rejects.
@@ -830,16 +1138,29 @@ END {
 }' "$T/f/tasks") || return 1
 	printf '%s\n' "$_ovo"
 }
-# bench_config: CFG_EXT4, CFG_NVME and CFG_EMPTY (1 or 0) of the read-only /config's backing directory,
-# read now. A failed read of any kind (df, or the directory scan: an unreadable directory is not an empty
-# one) fails the call; empty is only a scan that succeeded and found no entry. Names found are never kept.
-bench_config() {
-	_dfo=$(timeout 30 df --output=source,fstype -- "$BENCHCFG" 2>/dev/null) || return 1
-	set -- $(printf '%s\n' "$_dfo" | awk 'NR == 2 { print $1, $2 }')
+# bench_backing DIR: BACK_FS (the filesystem word DIR is on: ext4, xfs or other), BACK_OK (1 when BACK_FS
+# is a benchmark filesystem, ext4 or XFS) and BACK_NVME (1 when its block device is NVMe) from df and
+# backing_nvme; status 1 when any fact cannot be read (the device is never named).
+bench_backing() {
+	_bso=$(timeout 30 df --output=source,fstype -- "$1" 2>/dev/null) || return 1
+	set -- $(printf '%s\n' "$_bso" | awk 'NR == 2 { print $1, $2 }')
 	[ $# = 2 ] || return 1
-	CFG_EXT4=0
-	[ "$2" != ext4 ] || CFG_EXT4=1
+	BACK_FS=other
+	BACK_OK=0
+	case $2 in ext4 | xfs) BACK_FS=$2 BACK_OK=1 ;; esac
 	backing_nvme /sys "$1" || return 1
+	BACK_NVME=$CFG_NVME
+}
+# bench_config: CFG_FS (the /config backing filesystem word: ext4, xfs or other), CFG_NVME and CFG_EMPTY
+# (1 or 0) of the read-only /config's backing directory, read now. A failed read of any kind (df, or the
+# directory scan: an unreadable directory is not an empty one), or a filesystem that is neither ext4 nor
+# XFS, fails the call before measurement; empty is only a scan that succeeded and found no entry. Names
+# found are never kept.
+bench_config() {
+	bench_backing "$BENCHCFG" || return 1
+	CFG_FS=$BACK_FS
+	CFG_NVME=$BACK_NVME
+	[ "$BACK_OK" = 1 ] || return 1
 	_cid=$(timeout 30 stat -c '%d:%i' -- "$BENCHCFG" 2>/dev/null) || return 1
 	[ "$_cid" = "$CFG_ID" ] || return 1
 	_first=$(timeout 30 find "$BENCHCFG" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) || return 1
@@ -847,11 +1168,44 @@ bench_config() {
 	[ -n "$_first" ] || CFG_EMPTY=1
 	_first=
 }
-# bench_obs FILE: appends one observation line `unix allowed runnable load_milli mem_available_kib
-# swap_in swap_out ext4 nvme empty`; status 1 (nothing appended) when any value cannot be read. The
-# /config facts are read again at every observation, so a change between stages reaches the record.
+# bench_data_obs EMPTY: DFS (the work directory's filesystem word: ext4, xfs or other), DNV (whether its
+# device is NVMe), DWR (owned by the child's uid with owner write, no group or other write, and the
+# read-write bind), DBND (the work directory under the same run identity and, while EMPTY is 1, empty) and
+# DMNT (the mount) for one observation; status 1 when any value cannot be read or the filesystem is neither
+# ext4 nor XFS. A value that reads but does not hold is recorded as 0 and the judge decides, as for every
+# host fact.
+bench_data_obs() {
+	_eq=${1:-0}
+	bench_backing "$BENCHRUN/work" || return 1
+	DFS=$BACK_FS
+	DNV=$BACK_NVME
+	[ "$BACK_OK" = 1 ] || return 1
+	_ws=$(timeout 30 stat -c '%u %a %d:%i' -- "$BENCHRUN/work" 2>/dev/null) || return 1
+	set -- $_ws
+	[ $# = 3 ] || return 1
+	case $2 in '' | *[!0-7]*) return 1 ;; esac
+	DWR=0
+	if [ "$1" = 1000 ] && [ $((0$2 & 0200)) -ne 0 ] && [ $((0$2 & 0022)) -eq 0 ]; then
+		DWR=1
+	fi
+	DBND=0
+	if [ "$3" = "$WORK_DEVID" ] && [ "$(timeout 30 stat -c '%d:%i' -- "$BENCHRUN" 2>/dev/null)" = "$RUN_DEVID" ]; then
+		DBND=1
+	fi
+	bench_mounts || return 1
+	[ "$MOUNT_RW" = 1 ] || DWR=0
+	if [ "$DBND" = 1 ] && [ "$_eq" = 1 ]; then
+		_we=$(timeout 30 find "$BENCHRUN/work" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) || return 1
+		[ -z "$_we" ] || DBND=0
+	fi
+}
+# bench_obs FILE [EMPTY]: appends one observation line `unix allowed runnable load_milli mem_available_kib
+# swap_in swap_out filesystem nvme empty`, then in data mode its five data facts; status 1 (nothing appended)
+# when any value cannot be read. The /config and data facts are read again at every observation, so a
+# change between stages reaches the record. EMPTY=1 (the before stage) also requires an empty data root.
 bench_obs() {
 	_of=$1
+	_oeq=${2:-0}
 	_u=$(date -u +%s) || return 1
 	_la=$(awk '{ printf "%d", $1 * 1000 }' /proc/loadavg 2>/dev/null) || return 1
 	_mem=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo 2>/dev/null) || return 1
@@ -864,11 +1218,32 @@ bench_obs() {
 	bench_config || return 1
 	set -- $_ov
 	{ [ $# = 4 ] && [ "$3" -ge 1 ]; } 2>/dev/null || return 1
-	# The view must be the whole machine's: the tasks read are (nearly) all the kernel counts.
-	_tot=$(awk '{ split($4, a, "/"); print a[2] }' /proc/loadavg 2>/dev/null) || return 1
-	case $_tot in '' | *[!0-9]*) return 1 ;; esac
-	[ $(($3 * 100)) -ge $((_tot * 97)) ] || return 1
-	printf '%s %s %s %s %s %s %s %s %s\n' "$_u" "$1 $2" "$_la" "$_mem" "$_sw" "$CFG_EXT4" "$CFG_NVME" "$CFG_EMPTY" "$4" >>"$_of"
+	# The view must be the whole machine's: the tasks read are (nearly) all the kernel counts. The kernel's own
+	# total is read after the scan, so on a machine whose threads churn the running/total snapshot and the scan
+	# can land on either side of a burst and read short of the bound with no task masked; a shortfall is
+	# therefore re-read, never assumed. A masked view reads short at every reading, so one observation takes at
+	# most three: the scan and total above, then two more of both.
+	_try=0
+	while :; do
+		_tot=$(awk '{ split($4, a, "/"); print a[2] }' /proc/loadavg 2>/dev/null) || return 1
+		case $_tot in '' | *[!0-9]*) return 1 ;; esac
+		[ $(($3 * 100)) -ge $((_tot * 97)) ] && break
+		[ "$_try" -lt 2 ] || return 1
+		_try=$((_try + 1))
+		bench_proc_ok || return 4
+		_ov=$(bench_overlap) || return 1
+		bench_proc_ok || return 4
+		set -- $_ov
+		{ [ $# = 4 ] && [ "$3" -ge 1 ]; } 2>/dev/null || return 1
+	done
+	# The whole line is composed before anything is appended: a fact that cannot be read leaves the
+	# observation file exactly as it was.
+	_line="$_u $1 $2 $_la $_mem $_sw $CFG_FS $CFG_NVME $CFG_EMPTY $4"
+	if [ "$HAVE_BENCHDATA" = 1 ]; then
+		bench_data_obs "$_oeq" || return 1
+		_line="$_line $DFS $DNV $DWR $DBND $DMNT"
+	fi
+	printf '%s\n' "$_line" >>"$_of"
 }
 # bench_static: the container id and its limits as Docker created it, set once as CID and FACT_*.
 bench_static() {
@@ -890,18 +1265,23 @@ bench_static() {
 	bench_topology
 }
 # bench_emit STAGE OBSFILE OUTFILE: the stage record from its observation lines (every field a
-# nonnegative integer, else status 1) and the topology read now. The /config facts are true only when
-# true at every observation of the stage.
+# nonnegative integer, else status 1) and the topology read now. The /config facts, and in data mode its
+# data facts, are true only when true at every observation of the stage. Without --bench-data the record is
+# the V1 object; with it the record is V2, the same host fields unchanged under their own key, the five
+# identity keys on the envelope and the data block beside them.
 bench_emit() {
 	bench_topology || return 1
-	awk -v stage="$1" -v run="${BENCHRUN##*/}" -v image="$IMG" -v inputs="$INPUTS" \
+	awk -v stage="$1" -v run="${BENCHRUN##*/}" -v image="$IMG" -v inputs="$INPUTS" -v data="$HAVE_BENCHDATA" \
 		-v cpus="$TOPO_CPUS" -v cores="$TOPO_CORES" -v tpc="$TOPO_TPC" -v sibout="$TOPO_SIBOUT" -v numa="$TOPO_NUMA" \
 		-v memlim="$FACT_MEM" -v swaplim="$FACT_SWAP" -v cpusetok="$FACT_CPUSET" -v ro="$FACT_RO" '
-NF != 11 { bad = 1; next }
+BEGIN { nf = data ? 16 : 11 }
+NF != nf { bad = 1; next }
 {
-	for (i = 1; i <= 11; i++) if ($i !~ /^[0-9]+$/) bad = 1
+	for (i = 1; i <= nf; i++) if (i != 8 && (!data || i != 12) && $i !~ /^[0-9]+$/) bad = 1
+	if ($8 !~ /^(ext4|xfs|other)$/) bad = 1
+	if (data && $12 !~ /^(ext4|xfs|other)$/) bad = 1
 	n++
-	if (n == 1) { first = $1; mem = $5; si = $6; so = $7; e4 = 1; nv = 1; em = 1 }
+	if (n == 1) { first = $1; mem = $5; si = $6; so = $7; fs = $8; nv = 1; em = 1; dfs = $12; dnve = 1; dwre = 1; dbde = 1; dmne = 1 }
 	last = $1
 	ei = $6
 	eo = $7
@@ -909,20 +1289,34 @@ NF != 11 { bad = 1; next }
 	if ($3 + 0 > rm) rm = $3 + 0
 	if ($4 + 0 > lm) lm = $4 + 0
 	if ($5 + 0 < mem + 0) mem = $5
-	if ($8 != 1) e4 = 0
+	if ($8 != fs) fs = "other"
 	if ($9 != 1) nv = 0
 	if ($10 != 1) em = 0
 	if ($11 + 0 > sm) sm = $11 + 0
+	if (data) {
+		if ($12 != dfs) dfs = "other"
+		if ($13 != 1) dnve = 0
+		if ($14 != 1) dwre = 0
+		if ($15 != 1) dbde = 0
+		if ($16 != 1) dmne = 0
+	}
 }
 END {
 	if (bad || n < 1) exit 1
-	printf "{\"schema\":1,\"stage\":\"%s\",\"run\":\"%s\",\"image\":\"%s\",\"inputs\":\"%s\",", stage, run, image, inputs
+	if (data)
+		printf "{\"schema\":2,\"stage\":\"%s\",\"run\":\"%s\",\"image\":\"%s\",\"inputs\":\"%s\",\"host\":{", stage, run, image, inputs
+	else
+		printf "{\"schema\":1,\"stage\":\"%s\",\"run\":\"%s\",\"image\":\"%s\",\"inputs\":\"%s\",", stage, run, image, inputs
 	printf "\"start_unix\":%.0f,\"end_unix\":%.0f,\"observations\":%.0f,", first, last, n
 	printf "\"cpus\":%.0f,\"cores\":%.0f,\"threads_per_core_max\":%.0f,\"siblings_outside_set\":%.0f,\"numa_nodes\":%.0f,", cpus, cores, tpc, sibout, numa
 	printf "\"foreign_allowed_max\":%.0f,\"foreign_runnable_max\":%.0f,\"sibling_runnable_max\":%.0f,\"load1_milli_max\":%.0f,\"mem_available_kib_min\":%.0f,", am, rm, sm, lm, mem
 	printf "\"swap_in_start\":%.0f,\"swap_in_end\":%.0f,\"swap_out_start\":%.0f,\"swap_out_end\":%.0f,", si, ei, so, eo
 	printf "\"mem_limit_bytes\":%.0f,\"memswap_limit_bytes\":%.0f,\"cpuset_matches\":%s,", memlim, swaplim, cpusetok
-	printf "\"config_fs\":\"%s\",\"config_nvme\":%s,\"config_empty\":%s,\"config_readonly\":%s}\n", e4 ? "ext4" : "other", nv ? "true" : "false", em ? "true" : "false", ro
+	printf "\"config_fs\":\"%s\",\"config_nvme\":%s,\"config_empty\":%s,\"config_readonly\":%s", fs, nv ? "true" : "false", em ? "true" : "false", ro
+	if (data)
+		printf "},\"data\":{\"data_fs\":\"%s\",\"data_nvme\":%s,\"data_writable\":%s,\"data_bound\":%s,\"data_mounted\":%s}}\n", dfs, dnve ? "true" : "false", dwre ? "true" : "false", dbde ? "true" : "false", dmne ? "true" : "false"
+	else
+		printf "}\n"
 }' "$2" >"$3"
 }
 # bench_prove: the container runs on this machine's kernel and has the observed directory mounted. The
@@ -960,7 +1354,7 @@ bench_sampler() {
 if [ "$HAVE_BENCH" = 1 ]; then
 	mkdir -m 0700 -- "$T/f" || die bench_evidence_failed
 	bench_must bench_static
-	bench_must bench_obs "$T/f/before.obs"
+	bench_must bench_obs "$T/f/before.obs" 1
 	bench_must bench_emit before "$T/f/before.obs" "$T/f/before.json"
 fi
 
@@ -1117,9 +1511,12 @@ echo ran >>"$DR_SEEN"
 VOBS=0
 new_validator() {
 	_vc=$CTR-v-$1
+	PENDING=$_vc
 	timeout 60 docker create --name "$_vc" --label "boxset.dev-run=$RUNID" --network none --read-only \
 		--cap-drop ALL --security-opt no-new-privileges --log-driver=none --user 1000:1000 --memory 64m --memory-swap 64m --pids-limit 64 -i "$IMG" \
-		/usr/local/libexec/boxset/capture-check -name "$1" -challenge "$CHAL" >/dev/null 2>&1 || die capture_copy_failed
+		/usr/local/libexec/boxset/capture-check -name "$1" -challenge "$CHAL" >"$T/create.id" 2>/dev/null || die capture_copy_failed
+	_vid=$(cat "$T/create.id" 2>/dev/null) || die capture_copy_failed
+	bind_container "$_vid" "$_vc" || die capture_copy_failed
 	_ob=$(timeout 30 docker inspect --format '{{.Name}} {{.HostConfig.LogConfig.Type}} {{.Config.User}} {{.HostConfig.Memory}} {{index .Config.Labels "boxset.dev-run"}}' "$_vc" 2>/dev/null)
 	case $_ob in "/$_vc none "*) ;; *) die log_driver_invalid ;; esac
 	[ "$_ob" = "/$_vc none 1000:1000 67108864 $RUNID" ] || die capture_copy_failed
@@ -1152,7 +1549,7 @@ cap_one() {
 	_vs=$(cat "$T/vs" 2>/dev/null)
 	case $_vs in '' | *[!0-9]*) die capture_copy_failed ;; esac
 	[ "$(timeout 30 docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$_vc" 2>/dev/null)" = "exited $_vs" ] || die capture_copy_failed
-	timeout 60 docker rm -f "$_vc" >/dev/null 2>&1 || die cleanup_failed
+	remove_container "$_vid" "$_vc" || { CLEANFAIL=1; die cleanup_failed; }
 	case $_vs in
 	0) ;;
 	10) die capture_missing ;;
@@ -1179,7 +1576,21 @@ if [ "$HAVE_CAPTURE" = 1 ] && [ "$CHILD" = 0 ]; then
 	done
 	[ "$VOBS" = 4 ] || die log_driver_invalid
 fi
-timeout 60 docker rm -f "$CTR" >/dev/null 2>&1 || die cleanup_failed
+remove_container "$CID" "$CTR" || { CLEANFAIL=1; [ "$CHILD" != 0 ] && die cleanup_failed "$CHILD"; die cleanup_failed; }
+if [ "${HAVE_BENCHDATA:-0}" = 1 ]; then
+	# The recorded cleanup runs only now, after the measured container's checked removal, and only while
+	# both identities still match; nothing is published unless it completed. A failure only marks it and
+	# stops: the exit path prints the one reason word and the residual, so nothing is printed twice.
+	bench_data_cleanup || { DATACLEANFAIL=1; exit 125; }
+	DATACLEANED=1
+	if [ ! -f "$T/p/samples.jsonl" ]; then
+		# Nothing will be published: the run directory this invocation created goes with the data directory
+		# it held.
+		{ [ "$(timeout 30 stat -c '%d:%i' -- "$BENCHRUN" 2>/dev/null)" = "$RUN_DEVID" ] && rmdir -- "$BENCHRUN"; } ||
+			{ DATACLEANFAIL=1; exit 125; }
+		DATADONE=1
+	fi
+fi
 if [ "$HAVE_CAPTURE" = 1 ] && [ "$CHILD" = 0 ]; then
 	printf 'boxset-capture 1\nchallenge %s\n' "$CHAL" >"$T/cap/capture.manifest" || die capture_copy_failed
 	CAPBYTES=0
@@ -1193,10 +1604,18 @@ if [ "$HAVE_CAPTURE" = 1 ] && [ "$CHILD" = 0 ]; then
 	CAPOK=1
 fi
 if [ "$HAVE_BENCH" = 1 ] && [ -f "$T/p/samples.jsonl" ]; then
-	# The fresh run directory is created now and never reused: an existing one stops the publication.
-	write_chain_ok || die write_root_invalid
-	mkdir -p -- "${BENCHRUN%/*}" || die publish_failed
-	mkdir -- "$BENCHRUN" 2>/dev/null || die 'bench_invalid side=samples'
+	if [ "$HAVE_BENCHDATA" = 1 ]; then
+		# The run directory was created before the child started and holds nothing but the files published
+		# now: it is never reused, replaced or created a second time.
+		{ [ "$(timeout 30 stat -c '%d:%i' -- "$BENCHRUN" 2>/dev/null)" = "$RUN_DEVID" ] && [ ! -L "$BENCHRUN" ]; } || die 'bench_invalid side=samples'
+		_dir=$(timeout 30 find "$BENCHRUN" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) || die 'bench_invalid side=samples'
+		[ -z "$_dir" ] || die 'bench_invalid side=samples'
+	else
+		# The fresh run directory is created now and never reused: an existing one stops the publication.
+		write_chain_ok || die write_root_invalid
+		mkdir -p -- "${BENCHRUN%/*}" || die publish_failed
+		mkdir -- "$BENCHRUN" 2>/dev/null || die 'bench_invalid side=samples'
+	fi
 fi
 if [ "$HAVE_WRITE" = 1 ]; then
 	for _n in $DRAFTS; do
@@ -1227,6 +1646,7 @@ if [ "$HAVE_BENCH" = 1 ] && [ -f "$T/p/samples.jsonl" ]; then
 		fi
 	done
 	printf 'DEV-RUN-BENCH-PUBLISHED run=%s files=4\n' "${BENCHRUN##*/}"
+	[ "$HAVE_BENCHDATA" = 0 ] || DATADONE=1
 fi
 if [ "$CAPOK" = 1 ]; then
 	chain_ok "${CAPTURE%/*}" || die capture_root_changed
@@ -1242,4 +1662,5 @@ if [ "$CAPOK" = 1 ]; then
 	CAPDONE=1
 	printf 'DEV-RUN-CAPTURE-PASS files=4 bytes=%s dir=%s challenge=%s\n' "$CAPBYTES" "$CAPTURE" "$CHAL"
 fi
+COMPLETE=1
 exit "$CHILD"

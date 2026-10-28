@@ -86,7 +86,7 @@ func oracleCollect(ctx context.Context, q oracleQueryer, query string, each func
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		if err := each(rows); err != nil {
 			return err

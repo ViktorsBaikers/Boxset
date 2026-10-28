@@ -245,7 +245,7 @@ func titleSlots(ctx context.Context, tx *sql.Tx, titleID int64) ([]slotMonitor, 
 	for rows.Next() {
 		var s slotMonitor
 		if err := rows.Scan(&s.id, &s.monitored); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, err
 		}
 		slots = append(slots, s)

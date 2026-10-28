@@ -107,7 +107,7 @@ func (l *Library) Holds(ctx context.Context, title TitleID) ([]Hold, error) {
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var h Hold
 			var params string
@@ -217,7 +217,7 @@ func indexerIntersection(ctx context.Context, tx *sql.Tx, s slotRow) (restrictin
 	if err != nil {
 		return "", false, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	lists := map[string]bool{}
 	perIndexer := map[string]int{} // (list, indexer) is unique, so this counts the lists naming the indexer
 	for rows.Next() {

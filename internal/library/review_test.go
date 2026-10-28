@@ -8,9 +8,11 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ViktorsBaikers/Boxset/internal/store"
+	"modernc.org/sqlite"
 )
 
 const (
@@ -263,7 +265,7 @@ func TestIdentityConflictPauses(t *testing.T) {
 }
 
 func TestEmptyRestrictionIntersectionPauses(t *testing.T) {
-	w := applyS2(t)
+	w := applyS2Eligible(t)
 	ctx := t.Context()
 	movies, kids, collector := w.libs["Movies"], w.libs["Kids"], w.libs["Collector"]
 	hd, uhd, dc := w.slotID("tmdb:603", "hd"), w.slotID("tmdb:603", "uhd"), w.slotID("tmdb:603", "dc")
@@ -517,7 +519,7 @@ func TestImportNeverTransfersOwnership(t *testing.T) {
 }
 
 func TestPausedReplayDedupesHold(t *testing.T) {
-	w := applyS2(t)
+	w := applyS2Eligible(t)
 	ctx := t.Context()
 	un, dc := w.slotID("tmdb:604", "hd"), w.slotID("tmdb:603", "dc")
 	files := w.recordFiles(un, dc, w.slotID("tmdb:603", "uhd"))
@@ -557,7 +559,7 @@ func TestPausedReplayDedupesHold(t *testing.T) {
 }
 
 func TestMixedEligibilityAttachesOnlyEligibleSlots(t *testing.T) {
-	w := applyS2(t)
+	w := applyS2Eligible(t)
 	ctx := t.Context()
 	eligible := w.slotID("tmdb:603", "hd")
 	unresolved := w.slotID("tmdb:604", "hd")
@@ -769,4 +771,642 @@ func TestOneSourceTwoTargetsKeepsOneHoldEach(t *testing.T) {
 		t.Fatalf("imports changed owners: %v -> %v", owners, got)
 	}
 	requireFileRows(t, w.db, files)
+}
+
+// enrollCall is one enrollment request on a world: AddMembership or ApplyPersona.
+type enrollCall func(w *s2World) (MembershipResult, error)
+
+func enrollByMembership(library, metadataID, kind, name string) enrollCall {
+	return func(w *s2World) (MembershipResult, error) {
+		return w.lib.AddMembership(w.t.Context(), MembershipRequest{LibraryID: w.libs[library], MetadataID: metadataID, Kind: kind, Name: name})
+	}
+}
+
+func enrollByPersona(library, persona, metadataID, kind, name string) enrollCall {
+	return func(w *s2World) (MembershipResult, error) {
+		return w.lib.ApplyPersona(w.t.Context(), PersonaRequest{LibraryID: w.libs[library], Persona: persona, MetadataID: metadataID, Kind: kind, Name: name})
+	}
+}
+
+// requireEnrollConflict runs call and requires ErrIdentityConflict with an empty result.
+func requireEnrollConflict(t *testing.T, w *s2World, call enrollCall) {
+	t.Helper()
+	res, err := call(w)
+	if !errors.Is(err, ErrIdentityConflict) || !reflect.DeepEqual(res, MembershipResult{}) {
+		t.Fatalf("enrollment = %+v, %v; want ErrIdentityConflict and an empty result", res, err)
+	}
+}
+
+// enrollScope is the scope_key of the one hold an enrollment kind clash stores for a title.
+func enrollScope(title TitleID) string { return fmt.Sprintf("enroll@title:%d", title) }
+
+// enrollHoldRow is the holdRows line of that hold: title-wide, so its slot_id is NULL.
+func enrollHoldRow(t *testing.T, title TitleID, params map[string]string) string {
+	t.Helper()
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := json.Marshal([]any{string(ReasonIdentityConflict), enrollScope(title), int64(title), nil, string(body)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(line)
+}
+
+// An enrollment that requests an existing metadata id as the other kind is an
+// identity conflict like an import's: it commits one title-wide hold, so every
+// slot of the title pauses, and it still returns ErrIdentityConflict.
+func TestIdentityConflictPausesEnrollmentKindClash(t *testing.T) {
+	movieMembership := enrollByMembership("Movies", "tmdb:603", "series", "Synthetic Movie A")
+	moviePersona := enrollByPersona("Movies", "4k", "tmdb:603", "series", "Synthetic Movie A")
+	seriesMembership := enrollByMembership("Series", "tvdb:9001", "movie", "Synthetic Series")
+	seriesPersona := enrollByPersona("Kids", "4k", "tvdb:9001", "movie", "Synthetic Series")
+	cases := []struct {
+		name                     string
+		metadataID, kind, mapped string // the held title, the kind requested and the kind stored
+		otherID                  string // a title the clash does not touch
+		call, cross              enrollCall
+	}{
+		{"AddMembership movie as series", "tmdb:603", "series", "movie", "tvdb:9001", movieMembership, moviePersona},
+		{"ApplyPersona movie as series", "tmdb:603", "series", "movie", "tvdb:9001", moviePersona, movieMembership},
+		{"AddMembership series as movie", "tvdb:9001", "movie", "series", "tmdb:603", seriesMembership, seriesPersona},
+		{"ApplyPersona series as movie", "tvdb:9001", "movie", "series", "tmdb:603", seriesPersona, seriesMembership},
+	}
+	for _, c := range cases {
+		params := map[string]string{"cause": "title_kind_mismatch", "metadata_id": c.metadataID, "kind": c.kind, "mapped_kind": c.mapped}
+		t.Run(c.name, func(t *testing.T) {
+			t.Run("stores one title hold and pauses every slot", func(t *testing.T) {
+				w := validS2(t)
+				ctx := t.Context()
+				title := w.titles[c.metadataID]
+				var slots []SlotID
+				for _, s := range w.slots(c.metadataID) {
+					slots = append(slots, s.ID)
+				}
+				if len(slots) < 2 {
+					t.Fatalf("held title slots = %v, want a sibling slot the call does not name", slots)
+				}
+				files := w.recordFiles(slots...)
+				other := w.slotID(c.otherID, "hd")
+				before, owners := snapshot(t, w.db), w.owners()
+				if got := holdRows(t, w.db); len(got) != 0 {
+					t.Fatalf("holds before the call = %v", got)
+				}
+
+				requireEnrollConflict(t, w, c.call)
+				scope := enrollScope(title)
+				holds, err := w.lib.Holds(ctx, title)
+				if err != nil || len(holds) != 1 || holds[0].Reason != ReasonIdentityConflict || holds[0].ScopeKey != scope ||
+					holds[0].TitleID != title || holds[0].SlotID != 0 || !maps.Equal(holds[0].Params, params) {
+					t.Fatalf("Holds = %+v, %v; want one title-wide %s hold %s with params %v", holds, err, ReasonIdentityConflict, scope, params)
+				}
+				wantHold := []string{enrollHoldRow(t, title, params)}
+				if got := holdRows(t, w.db); !slices.Equal(got, wantHold) {
+					t.Fatalf("hold rows = %v, want %v", got, wantHold)
+				}
+				if after := snapshot(t, w.db); !sameSnapshot(before, after) {
+					t.Fatalf("the conflict changed title, slot or sync_map rows:\nbefore %v\nafter  %v", before, after)
+				}
+				if got := w.owners(); !slices.Equal(got, owners) {
+					t.Fatalf("the conflict changed owners: %v -> %v", owners, got)
+				}
+				requireFileRows(t, w.db, files)
+
+				// Every slot of the title pauses, the ones the call did not name too; nothing attaches.
+				out := w.request(releaseHold, slots...)
+				if len(out.Paused) != len(slots) {
+					t.Fatalf("paused = %+v, want every slot of the title (%v)", out.Paused, slots)
+				}
+				for i, p := range out.Paused {
+					wantPause(t, p, slots[i], ReasonIdentityConflict, map[string]string{"hold_scope": scope})
+				}
+				requireNoAcquisition(t, w, out)
+
+				// A slot of the other title in the same request still attaches, and only it.
+				out = w.request(releaseHold, append(slices.Clone(slots), other)...)
+				if !out.Created || !slices.Equal(out.Attached, []SlotID{other}) || len(out.Paused) != len(slots) {
+					t.Fatalf("mixed outcome %+v, want only slot %d attached and %d pauses", out, other, len(slots))
+				}
+				for i, p := range out.Paused {
+					wantPause(t, p, slots[i], ReasonIdentityConflict, map[string]string{"hold_scope": scope})
+				}
+				if got := dump(t, w.db, `SELECT slot_id FROM download_slot`); !slices.Equal(got, []string{fmt.Sprintf("[%d]", other)}) {
+					t.Fatalf("download_slot = %v, want only slot %d", got, other)
+				}
+				if got := holdRows(t, w.db); !slices.Equal(got, wantHold) {
+					t.Fatalf("paused requests changed holds: %v -> %v", wantHold, got)
+				}
+				if after := snapshot(t, w.db); !sameSnapshot(before, after) {
+					t.Fatalf("paused requests changed title, slot or sync_map rows:\nbefore %v\nafter  %v", before, after)
+				}
+				if got := w.owners(); !slices.Equal(got, owners) {
+					t.Fatalf("paused requests changed owners: %v -> %v", owners, got)
+				}
+				requireFileRows(t, w.db, files)
+			})
+
+			t.Run("replay and the other caller add no hold", func(t *testing.T) {
+				w := validS2(t)
+				requireEnrollConflict(t, w, c.call)
+				held := holdRows(t, w.db)
+				if len(held) != 1 {
+					t.Fatalf("hold rows = %v, want one", held)
+				}
+				for _, again := range []struct {
+					name string
+					call enrollCall
+				}{{"replay", c.call}, {"the other caller", c.cross}} {
+					requireEnrollConflict(t, w, again.call)
+					if got := holdRows(t, w.db); !slices.Equal(got, held) {
+						t.Fatalf("%s changed holds: %v -> %v", again.name, held, got)
+					}
+				}
+			})
+
+			t.Run("a failed hold write rolls back", func(t *testing.T) {
+				w := validS2(t)
+				ctx := t.Context()
+				err := w.db.Write(ctx, func(tx *sql.Tx) error {
+					_, err := tx.ExecContext(ctx, `CREATE TRIGGER hold_fault BEFORE INSERT ON review_hold BEGIN SELECT RAISE(ABORT, 'hold fault'); END`)
+					return err
+				})
+				if err != nil {
+					t.Fatalf("hold fault trigger: %v", err)
+				}
+				before := snapshot(t, w.db)
+				res, err := c.call(w)
+				if err == nil || errors.Is(err, ErrIdentityConflict) || !strings.Contains(err.Error(), "hold fault") || !reflect.DeepEqual(res, MembershipResult{}) {
+					t.Fatalf("enrollment = %+v, %v; want the hold write failure, not ErrIdentityConflict, and an empty result", res, err)
+				}
+				if got := holdRows(t, w.db); len(got) != 0 {
+					t.Fatalf("hold rows after the failed write = %v, want none", got)
+				}
+				if after := snapshot(t, w.db); !sameSnapshot(before, after) {
+					t.Fatalf("the failed write changed rows:\nbefore %v\nafter  %v", before, after)
+				}
+			})
+
+			// The hold INSERT succeeds and enrollment saves its conflict; only the deferred foreign key fails, at COMMIT.
+			t.Run("a failed commit returns its database error", func(t *testing.T) {
+				w := validS2(t)
+				ctx := t.Context()
+				title := w.titles[c.metadataID]
+				var slots []SlotID
+				for _, s := range w.slots(c.metadataID) {
+					slots = append(slots, s.ID)
+				}
+				err := w.db.Write(ctx, func(tx *sql.Tx) error {
+					for _, q := range []string{
+						`CREATE TABLE commit_fault_parent (id INTEGER PRIMARY KEY)`,
+						`CREATE TABLE commit_fault (parent INTEGER REFERENCES commit_fault_parent (id) DEFERRABLE INITIALLY DEFERRED)`,
+						`CREATE TRIGGER commit_fault_hold AFTER INSERT ON review_hold BEGIN INSERT INTO commit_fault (parent) VALUES (1); END`,
+					} {
+						if _, err := tx.ExecContext(ctx, q); err != nil {
+							return err
+						}
+					}
+					return nil
+				})
+				if err != nil {
+					t.Fatalf("commit fault setup: %v", err)
+				}
+				// Discriminator: the hold INSERT and its trigger run without a statement error and leave
+				// the probe row inside the transaction, so the failure below can only come from COMMIT.
+				var probes int
+				err = w.db.Write(ctx, func(tx *sql.Tx) error {
+					if _, err := tx.ExecContext(ctx, `INSERT INTO review_hold (reason_code, scope_key, title_id, params) VALUES ('identity_conflict', 'commit_fault', ?, '{}')`, int64(title)); err != nil {
+						return fmt.Errorf("hold insert statement: %w", err)
+					}
+					return tx.QueryRowContext(ctx, `SELECT count(*) FROM commit_fault`).Scan(&probes)
+				})
+				var se *sqlite.Error
+				if probes != 1 || !errors.As(err, &se) || se.Code()&0xff != 19 || !strings.Contains(err.Error(), "FOREIGN KEY") || strings.Contains(err.Error(), "hold insert statement") {
+					t.Fatalf("deferred fault: probe rows %d, err = %v; want the hold INSERT to succeed and COMMIT to fail with a FOREIGN KEY *sqlite.Error", probes, err)
+				}
+				if got := holdRows(t, w.db); len(got) != 0 {
+					t.Fatalf("hold rows after the failed probe commit = %v, want none", got)
+				}
+
+				files := w.recordFiles(slots...)
+				before, owners := snapshot(t, w.db), w.owners()
+				res, err := c.call(w)
+				se = nil
+				if !errors.As(err, &se) || se.Code()&0xff != 19 || !strings.Contains(err.Error(), "FOREIGN KEY") || errors.Is(err, ErrIdentityConflict) || !reflect.DeepEqual(res, MembershipResult{}) {
+					t.Fatalf("enrollment = %+v, %v; want the COMMIT FOREIGN KEY *sqlite.Error, not ErrIdentityConflict, and an empty result", res, err)
+				}
+				if got := holdRows(t, w.db); len(got) != 0 {
+					t.Fatalf("hold rows after the failed commit = %v, want none", got)
+				}
+				if got := dump(t, w.db, `SELECT parent FROM commit_fault`); len(got) != 0 {
+					t.Fatalf("probe rows after the failed commit = %v, want none", got)
+				}
+				if after := snapshot(t, w.db); !sameSnapshot(before, after) {
+					t.Fatalf("the failed commit changed title, slot or sync_map rows:\nbefore %v\nafter  %v", before, after)
+				}
+				if got := w.owners(); !slices.Equal(got, owners) {
+					t.Fatalf("the failed commit changed owners: %v -> %v", owners, got)
+				}
+				requireFileRows(t, w.db, files)
+			})
+		})
+	}
+
+	// A persona the store does not know fails as ErrNotFound before any hold, whatever kind is requested.
+	t.Run("unknown persona writes no hold", func(t *testing.T) {
+		w := validS2(t)
+		before := snapshot(t, w.db)
+		for _, c := range []struct{ metadataID, kind string }{{"tmdb:603", "series"}, {"tvdb:9001", "movie"}} {
+			_, err := enrollByPersona("Movies", "nope", c.metadataID, c.kind, "Synthetic Title")(w)
+			if !errors.Is(err, ErrNotFound) || errors.Is(err, ErrIdentityConflict) {
+				t.Fatalf("unknown persona for %s as %s: err = %v, want ErrNotFound", c.metadataID, c.kind, err)
+			}
+		}
+		if got := holdRows(t, w.db); len(got) != 0 {
+			t.Fatalf("hold rows after an unknown persona = %v, want none", got)
+		}
+		if after := snapshot(t, w.db); !sameSnapshot(before, after) {
+			t.Fatalf("an unknown persona changed rows:\nbefore %v\nafter  %v", before, after)
+		}
+	})
+}
+
+// A known source re-imported to a metadata id that already exists as the other
+// kind conflicts twice: the slot it maps is not the one it names, and the
+// destination title is the wrong kind. One Write commits the mapped-slot hold and
+// the destination-title hold, the source_remapped Pause and error are unchanged,
+// and nothing canonical changes. A same-kind or absent destination gets no
+// destination hold.
+func TestIdentityConflictPausesRemapKindClash(t *testing.T) {
+	type remapCase struct {
+		name     string
+		library  string
+		origID   string
+		destID   string
+		destKind string
+		absentID string
+		rec      SourceRecord
+	}
+	// remap is one fresh world, files on every slot a case names, and what the import must leave.
+	type remap struct {
+		w                    *s2World
+		rec                  SourceRecord
+		mapped, free         SlotID
+		origTitle, destTitle TitleID
+		destSlots            []SlotID
+		slotScope, destScope string
+		slotParams           map[string]string
+		destParams           map[string]string
+		files, owners        []string
+		before               map[string][]string
+	}
+	cases := []remapCase{
+		{name: "movie source remapped onto a series", library: "UHD", origID: "tmdb:603", destID: "tvdb:9001", destKind: "series", absentID: "tmdb:999001",
+			rec: SourceRecord{InstanceID: "movie-uhd", SourceID: "42", Kind: "movie", Name: "Synthetic Series", SlotKey: "uhd"}},
+		{name: "series source remapped onto a movie", library: "Series", origID: "tvdb:9001", destID: "tmdb:603", destKind: "movie", absentID: "tvdb:999001",
+			rec: SourceRecord{InstanceID: "series-uhd", SourceID: "7", Kind: "series", Name: "Synthetic Movie A", SlotKey: "uhd"}},
+	}
+
+	// build is a fresh validS2 world whose source maps origID and is re-imported to destID; destID
+	// is an existing title of destKind, or absent. Its premises are checked before the import.
+	build := func(t *testing.T, c remapCase, destID string) *remap {
+		t.Helper()
+		w := validS2(t)
+		r := &remap{w: w, rec: c.rec}
+		r.rec.LibraryID, r.rec.MetadataID = w.libs[c.library], destID
+		r.origTitle, r.destTitle = w.titles[c.origID], w.titles[destID]
+		r.mapped, r.free = w.slotID(c.origID, c.rec.SlotKey), w.slotID(c.origID, "hd")
+		if got, want := dump(t, w.db, `SELECT title_id, slot_id FROM sync_map WHERE instance_id = ? AND source_kind = ? AND source_id = ?`,
+			c.rec.InstanceID, c.rec.Kind, c.rec.SourceID), []string{fmt.Sprintf("[%d,%d]", r.origTitle, r.mapped)}; !slices.Equal(got, want) {
+			t.Fatalf("sync_map of the source = %v, want %v", got, want)
+		}
+		var wantDest []string
+		if r.destTitle != 0 {
+			wantDest = []string{fmt.Sprintf("[%d,%q]", r.destTitle, c.destKind)}
+			for _, s := range w.slots(destID) {
+				r.destSlots = append(r.destSlots, s.ID)
+			}
+			if len(r.destSlots) < 2 {
+				t.Fatalf("destination %s slots = %v, want several to hold", destID, r.destSlots)
+			}
+		}
+		if got := dump(t, w.db, `SELECT id, kind FROM title WHERE metadata_id = ?`, destID); !slices.Equal(got, wantDest) {
+			t.Fatalf("title %s = %v, want %v", destID, got, wantDest)
+		}
+		r.files = w.recordFiles(append([]SlotID{r.mapped, r.free}, r.destSlots...)...)
+		r.before, r.owners = snapshot(t, w.db), w.owners()
+		if got := holdRows(t, w.db); len(got) != 0 {
+			t.Fatalf("holds before the import = %v", got)
+		}
+		rec := r.rec
+		r.slotScope = fmt.Sprintf("import:%s/%s/%s@slot:%d", rec.InstanceID, rec.Kind, rec.SourceID, r.mapped)
+		r.destScope = fmt.Sprintf("import:%s/%s/%s@title:%d", rec.InstanceID, rec.Kind, rec.SourceID, r.destTitle)
+		r.slotParams = map[string]string{
+			"cause": "source_remapped", "instance": rec.InstanceID, "source_kind": rec.Kind, "source_id": rec.SourceID,
+			"metadata_id": destID, "slot_key": rec.SlotKey, "mapped_metadata_id": c.origID, "mapped_slot_key": rec.SlotKey,
+		}
+		r.destParams = map[string]string{
+			"cause": "title_kind_mismatch", "instance": rec.InstanceID, "source_kind": rec.Kind, "source_id": rec.SourceID,
+			"metadata_id": destID, "slot_key": rec.SlotKey, "mapped_kind": c.destKind,
+		}
+		return r
+	}
+	// requireRemapPause requires the import's original outcome: the source_remapped Pause and the conflict.
+	requireRemapPause := func(t *testing.T, r *remap, res ImportResult, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrIdentityConflict) || res.Pause == nil || res.TitleID != 0 || res.SlotID != 0 {
+			t.Fatalf("import = %+v, %v; want ErrIdentityConflict and a Pause", res, err)
+		}
+		wantPause(t, *res.Pause, 0, ReasonIdentityConflict, r.slotParams)
+		if !maps.Equal(res.Pause.Params, r.slotParams) {
+			t.Fatalf("pause params = %v, want %v", res.Pause.Params, r.slotParams)
+		}
+	}
+	// requireHolds requires exactly the mapped-slot hold, and the destination-title hold when withDest.
+	requireHolds := func(t *testing.T, r *remap, withDest bool) {
+		t.Helper()
+		want := []string{fmt.Sprintf("[%q,%q,%d,%d]", string(ReasonIdentityConflict), r.slotScope, r.origTitle, r.mapped)}
+		if withDest {
+			want = append(want, fmt.Sprintf("[%q,%q,%d,null]", string(ReasonIdentityConflict), r.destScope, r.destTitle))
+		}
+		slices.Sort(want)
+		if got := dump(t, r.w.db, `SELECT reason_code, scope_key, title_id, slot_id FROM review_hold`); !slices.Equal(got, want) {
+			t.Fatalf("holds = %v, want %v", got, want)
+		}
+	}
+	requireUnchanged := func(t *testing.T, r *remap) {
+		t.Helper()
+		if after := snapshot(t, r.w.db); !sameSnapshot(r.before, after) {
+			t.Fatalf("title, slot, membership or sync_map rows changed:\nbefore %v\nafter  %v", r.before, after)
+		}
+		if got := r.w.owners(); !slices.Equal(got, r.owners) {
+			t.Fatalf("owners changed: %v -> %v", r.owners, got)
+		}
+		requireFileRows(t, r.w.db, r.files)
+	}
+	// requirePaused requires one pause per slot, in request order, each carrying the scope of its hold.
+	requirePaused := func(t *testing.T, r *remap, out AcquisitionOutcome, slots []SlotID) {
+		t.Helper()
+		if len(out.Paused) != len(slots) {
+			t.Fatalf("paused = %+v, want slots %v", out.Paused, slots)
+		}
+		for i, p := range out.Paused {
+			scope := r.destScope
+			if slots[i] == r.mapped {
+				scope = r.slotScope
+			}
+			wantPause(t, p, slots[i], ReasonIdentityConflict, map[string]string{"hold_scope": scope})
+		}
+	}
+	fault := func(t *testing.T, w *s2World, stmts ...string) {
+		t.Helper()
+		err := w.db.Write(t.Context(), func(tx *sql.Tx) error {
+			for _, q := range stmts {
+				if _, err := tx.ExecContext(t.Context(), q); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("fault setup: %v", err)
+		}
+	}
+	// requireImportFault requires the import to fail as the probe error: no saved conflict, no result, no hold, no change.
+	requireImportFault := func(t *testing.T, r *remap, probe string) {
+		t.Helper()
+		res, err := r.w.lib.ImportSource(t.Context(), r.rec)
+		if err == nil || errors.Is(err, ErrIdentityConflict) || !strings.Contains(err.Error(), probe) || !reflect.DeepEqual(res, ImportResult{}) {
+			t.Fatalf("import = %+v, %v; want the %q failure, not ErrIdentityConflict, and an empty result", res, err, probe)
+		}
+		if got := holdRows(t, r.w.db); len(got) != 0 {
+			t.Fatalf("hold rows after the failed import = %v, want none", got)
+		}
+		requireUnchanged(t, r)
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Run("stores_mapped_and_destination_holds", func(t *testing.T) {
+				r := build(t, c, c.destID)
+				ctx := t.Context()
+				res, err := r.w.lib.ImportSource(ctx, r.rec)
+				requireRemapPause(t, r, res, err)
+				requireHolds(t, r, true)
+				holds, err := r.w.lib.Holds(ctx, r.origTitle)
+				if err != nil || len(holds) != 1 || holds[0].Reason != ReasonIdentityConflict || holds[0].ScopeKey != r.slotScope ||
+					holds[0].TitleID != r.origTitle || holds[0].SlotID != r.mapped || !maps.Equal(holds[0].Params, r.slotParams) {
+					t.Fatalf("Holds of the original title = %+v, %v; want the one mapped-slot hold %s with params %v", holds, err, r.slotScope, r.slotParams)
+				}
+				holds, err = r.w.lib.Holds(ctx, r.destTitle)
+				if err != nil || len(holds) != 1 || holds[0].Reason != ReasonIdentityConflict || holds[0].ScopeKey != r.destScope ||
+					holds[0].TitleID != r.destTitle || holds[0].SlotID != 0 || !maps.Equal(holds[0].Params, r.destParams) {
+					t.Fatalf("Holds of the destination title = %+v, %v; want the one title-wide title_kind_mismatch hold %s with params %v", holds, err, r.destScope, r.destParams)
+				}
+				requireUnchanged(t, r)
+			})
+
+			t.Run("pauses_every_affected_slot", func(t *testing.T) {
+				r := build(t, c, c.destID)
+				res, err := r.w.lib.ImportSource(t.Context(), r.rec)
+				requireRemapPause(t, r, res, err)
+				affected := append([]SlotID{r.mapped}, r.destSlots...)
+				out := r.w.request(releaseHold, affected...)
+				requirePaused(t, r, out, affected)
+				requireNoAcquisition(t, r.w, out)
+
+				// The original title's unaffected local slot in the same request still attaches, and only it.
+				out = r.w.request(releaseHold, append(slices.Clone(affected), r.free)...)
+				requirePaused(t, r, out, affected)
+				if !out.Created || !slices.Equal(out.Attached, []SlotID{r.free}) {
+					t.Fatalf("mixed outcome %+v, want only slot %d attached", out, r.free)
+				}
+				if got := dump(t, r.w.db, `SELECT slot_id FROM download_slot`); !slices.Equal(got, []string{fmt.Sprintf("[%d]", r.free)}) {
+					t.Fatalf("download_slot = %v, want only slot %d", got, r.free)
+				}
+				requireHolds(t, r, true)
+				requireUnchanged(t, r)
+			})
+
+			t.Run("replay_adds_no_hold", func(t *testing.T) {
+				r := build(t, c, c.destID)
+				first, err := r.w.lib.ImportSource(t.Context(), r.rec)
+				requireRemapPause(t, r, first, err)
+				held := holdRows(t, r.w.db)
+				if len(held) != 2 {
+					t.Fatalf("holds = %v, want the mapped-slot and destination-title holds", held)
+				}
+				res, err := r.w.lib.ImportSource(t.Context(), r.rec)
+				requireRemapPause(t, r, res, err)
+				if !reflect.DeepEqual(res, first) {
+					t.Fatalf("replay result = %+v, want %+v", res, first)
+				}
+				if got := holdRows(t, r.w.db); !slices.Equal(got, held) {
+					t.Fatalf("replay changed holds: %v -> %v", held, got)
+				}
+				requireUnchanged(t, r)
+			})
+
+			// The first hold insert succeeds and the second fails, whichever is second: neither commits.
+			t.Run("second_insert_rollback", func(t *testing.T) {
+				r := build(t, c, c.destID)
+				fault(t, r.w, `CREATE TRIGGER second_hold_fault BEFORE INSERT ON review_hold WHEN (SELECT count(*) FROM review_hold) > 0 BEGIN SELECT RAISE(ABORT, 'second hold fault'); END`)
+				requireImportFault(t, r, "second hold fault")
+			})
+
+			// Only the destination identity fails, so the outcome cannot depend on which hold is inserted first.
+			t.Run("destination_hold_failure", func(t *testing.T) {
+				r := build(t, c, c.destID)
+				fault(t, r.w, fmt.Sprintf(`CREATE TRIGGER destination_hold_fault BEFORE INSERT ON review_hold
+					WHEN NEW.title_id = %d AND NEW.slot_id IS NULL BEGIN SELECT RAISE(ABORT, 'destination hold fault'); END`, r.destTitle))
+				requireImportFault(t, r, "destination hold fault")
+			})
+
+			// An absent destination has no kind to clash with: only the mapped-slot hold, and no error from its lookup.
+			t.Run("absent_destination", func(t *testing.T) {
+				r := build(t, c, c.absentID)
+				res, err := r.w.lib.ImportSource(t.Context(), r.rec)
+				requireRemapPause(t, r, res, err)
+				requireHolds(t, r, false)
+				held := holdRows(t, r.w.db)
+				res, err = r.w.lib.ImportSource(t.Context(), r.rec)
+				requireRemapPause(t, r, res, err)
+				if got := holdRows(t, r.w.db); !slices.Equal(got, held) {
+					t.Fatalf("replay changed holds: %v -> %v", held, got)
+				}
+				out := r.w.request(releaseHold, r.mapped)
+				requirePaused(t, r, out, []SlotID{r.mapped})
+				requireNoAcquisition(t, r.w, out)
+				out = r.w.request(releaseHold, r.mapped, r.free)
+				requirePaused(t, r, out, []SlotID{r.mapped})
+				if !out.Created || !slices.Equal(out.Attached, []SlotID{r.free}) {
+					t.Fatalf("mixed outcome %+v, want only slot %d attached", out, r.free)
+				}
+				requireHolds(t, r, false)
+				requireUnchanged(t, r)
+			})
+
+			// Both hold INSERTs succeed and the import saves its conflict; only the deferred foreign key fails, at COMMIT.
+			t.Run("commit_error_precedes_conflict", func(t *testing.T) {
+				r := build(t, c, c.destID)
+				ctx := t.Context()
+				fault(t, r.w,
+					`CREATE TABLE commit_fault_parent (id INTEGER PRIMARY KEY)`,
+					`CREATE TABLE commit_fault (parent INTEGER REFERENCES commit_fault_parent (id) DEFERRABLE INITIALLY DEFERRED)`,
+					fmt.Sprintf(`CREATE TRIGGER commit_fault_hold AFTER INSERT ON review_hold
+						WHEN NEW.title_id = %d AND NEW.slot_id IS NULL BEGIN INSERT INTO commit_fault (parent) VALUES (1); END`, r.destTitle))
+				// Discriminator: both hold INSERTs run without a statement error and only the destination
+				// hold fires its trigger, leaving one probe row; a sentinel then rolls the transaction back,
+				// so no COMMIT is involved.
+				sentinel := errors.New("rollback sentinel")
+				var probes int
+				err := r.w.db.Write(ctx, func(tx *sql.Tx) error {
+					for _, q := range []string{
+						fmt.Sprintf(`INSERT INTO review_hold (reason_code, scope_key, title_id, slot_id, params) VALUES ('identity_conflict', 'commit_fault_slot', %d, %d, '{}')`, r.origTitle, r.mapped),
+						fmt.Sprintf(`INSERT INTO review_hold (reason_code, scope_key, title_id, slot_id, params) VALUES ('identity_conflict', 'commit_fault_title', %d, NULL, '{}')`, r.destTitle),
+					} {
+						if _, err := tx.ExecContext(ctx, q); err != nil {
+							return fmt.Errorf("hold insert statement: %w", err)
+						}
+					}
+					if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM commit_fault`).Scan(&probes); err != nil {
+						return err
+					}
+					return sentinel
+				})
+				if probes != 1 || !errors.Is(err, sentinel) || strings.Contains(err.Error(), "hold insert statement") {
+					t.Fatalf("deferred fault: probe rows %d, err = %v; want both hold INSERTs to succeed, one destination probe, and the sentinel to roll back", probes, err)
+				}
+				if got := holdRows(t, r.w.db); len(got) != 0 {
+					t.Fatalf("hold rows after the sentinel rollback = %v, want none", got)
+				}
+				if got := dump(t, r.w.db, `SELECT parent FROM commit_fault`); len(got) != 0 {
+					t.Fatalf("probe rows after the sentinel rollback = %v, want none", got)
+				}
+
+				res, err := r.w.lib.ImportSource(ctx, r.rec)
+				var se *sqlite.Error
+				if !errors.As(err, &se) || se.Code()&0xff != 19 || !strings.Contains(err.Error(), "FOREIGN KEY") || errors.Is(err, ErrIdentityConflict) || !reflect.DeepEqual(res, ImportResult{}) {
+					t.Fatalf("import = %+v, %v; want the COMMIT FOREIGN KEY *sqlite.Error, not ErrIdentityConflict, and an empty result", res, err)
+				}
+				if got := holdRows(t, r.w.db); len(got) != 0 {
+					t.Fatalf("hold rows after the failed commit = %v, want none", got)
+				}
+				if got := dump(t, r.w.db, `SELECT parent FROM commit_fault`); len(got) != 0 {
+					t.Fatalf("probe rows after the failed commit = %v, want none", got)
+				}
+				requireUnchanged(t, r)
+			})
+
+			// The destination lookup is a read, so it fails through a writer-only TEMP VIEW that shadows title
+			// and errors for the destination row alone (abs of the minimum int64 overflows). The source lookup
+			// reads the original title through the same view and must stay readable. Readers still see main.title.
+			t.Run("destination_lookup_failure", func(t *testing.T) {
+				r := build(t, c, c.destID)
+				ctx := t.Context()
+				fault(t, r.w, fmt.Sprintf(`CREATE TEMP VIEW title AS SELECT id, metadata_id, name,
+					CASE WHEN id = %d THEN CAST(abs(-9223372036854775808) AS TEXT) ELSE kind END AS kind FROM main.title`, r.destTitle))
+				// Premises: on the writer the source lookup succeeds and only the destination read fails natively.
+				sentinel := errors.New("rollback sentinel")
+				var mappedTitle int64
+				var mappedKind string
+				var destID int64
+				var destKind string
+				var sourceErr, destErr error
+				err := r.w.db.Write(ctx, func(tx *sql.Tx) error {
+					sourceErr = tx.QueryRowContext(ctx, `SELECT m.title_id, t.kind FROM sync_map m JOIN title t ON t.id = m.title_id
+						WHERE m.instance_id = ? AND m.source_kind = ? AND m.source_id = ?`,
+						r.rec.InstanceID, r.rec.Kind, r.rec.SourceID).Scan(&mappedTitle, &mappedKind)
+					destErr = tx.QueryRowContext(ctx, `SELECT id, kind FROM title WHERE metadata_id = ?`, r.rec.MetadataID).Scan(&destID, &destKind)
+					return sentinel
+				})
+				if !errors.Is(err, sentinel) || sourceErr != nil || mappedTitle != int64(r.origTitle) || mappedKind != c.rec.Kind {
+					t.Fatalf("fault premise: source lookup = title %d kind %q, %v (transaction %v); want the original title %d readable as %q", mappedTitle, mappedKind, sourceErr, err, r.origTitle, c.rec.Kind)
+				}
+				if destErr == nil || errors.Is(destErr, sql.ErrNoRows) || !strings.Contains(destErr.Error(), "integer overflow") {
+					t.Fatalf("fault premise: destination lookup = %d %q, %v; want a native integer overflow error", destID, destKind, destErr)
+				}
+				if got := holdRows(t, r.w.db); len(got) != 0 {
+					t.Fatalf("hold rows after the premise probe = %v, want none", got)
+				}
+
+				res, err := r.w.lib.ImportSource(ctx, r.rec)
+				if err == nil || errors.Is(err, ErrIdentityConflict) || !strings.Contains(err.Error(), "integer overflow") || !reflect.DeepEqual(res, ImportResult{}) {
+					t.Fatalf("import = %+v, %v; want the native destination lookup failure, not ErrIdentityConflict, and an empty result", res, err)
+				}
+				if got := holdRows(t, r.w.db); len(got) != 0 {
+					t.Fatalf("hold rows after the failed import = %v, want none", got)
+				}
+				requireUnchanged(t, r)
+			})
+		})
+	}
+
+	// A destination of the same kind is no kind clash: the mapped-slot hold alone, and every
+	// destination slot stays eligible.
+	t.Run("same_kind_destination_stays_eligible", func(t *testing.T) {
+		c := remapCase{name: "series source remapped onto another series", library: "Series", origID: "tvdb:9001", destID: "tvdb:9002", destKind: "series",
+			rec: SourceRecord{InstanceID: "series-uhd", SourceID: "7", Kind: "series", Name: "Synthetic Series B", SlotKey: "uhd"}}
+		r := build(t, c, c.destID)
+		res, err := r.w.lib.ImportSource(t.Context(), r.rec)
+		requireRemapPause(t, r, res, err)
+		requireHolds(t, r, false)
+		held := holdRows(t, r.w.db)
+		res, err = r.w.lib.ImportSource(t.Context(), r.rec)
+		requireRemapPause(t, r, res, err)
+		if got := holdRows(t, r.w.db); !slices.Equal(got, held) {
+			t.Fatalf("replay changed holds: %v -> %v", held, got)
+		}
+		out := r.w.request(releaseHold, r.mapped)
+		requirePaused(t, r, out, []SlotID{r.mapped})
+		requireNoAcquisition(t, r.w, out)
+		want := append(slices.Clone(r.destSlots), r.free)
+		out = r.w.request(releaseHold, append([]SlotID{r.mapped}, want...)...)
+		requirePaused(t, r, out, []SlotID{r.mapped})
+		if !out.Created || !slices.Equal(out.Attached, want) {
+			t.Fatalf("mixed outcome %+v, want slots %v attached", out, want)
+		}
+		requireHolds(t, r, false)
+		requireUnchanged(t, r)
+	})
 }

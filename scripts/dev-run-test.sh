@@ -5,7 +5,8 @@
 # the current allowlisted inputs and asserts what the shell lifecycle executes: exact argv
 # and statuses, the host deadline (status 124, the identity line and no reason word), the
 # stock child identity, the issue-draft publication (the child creates its own names; a name
-# it never created stays absent), the refused write roots, binary-safe redaction, the capture
+# it never created stays absent), the refused write roots, the benchmark deadline and
+# data-directory refusals, binary-safe redaction, the capture
 # handoff (real pinned chrome-headless-shell provider, validator and lifetime controls), the
 # validator and redactor unit tests through the same runner, and the toolchain admission
 # mutation, support-block and lock-export controls. Every rejecting mutant runs the same
@@ -65,7 +66,8 @@ MUT=$TMP/mut
 BAR=$TMP/bar
 PASSES=0
 FAILS=0
-OWNED=
+DRIVER_CLEANFAIL=0
+DRIVER_REMOVING=
 OBS=
 SETUP=0
 REACHED=0
@@ -80,10 +82,103 @@ mkdir -p "$MUT" "$BAR" "$TMP/hl"
 # The proof-wide contamination records are pre-created: a record is one appended byte, so it needs no new inode and a
 # full inode table cannot turn an unknown observation into a clean one.
 { true >"$TMP/unknown" && true >"$TMP/infra" && true >"$TMP/rerr"; } || exit 125
-# Only containers named in a runner's own `container=` stderr line are ever
-# removed here; there is no global label diff and no foreign deletion.
-# shellcheck disable=SC2154 # c is the trap body's own loop variable
-trap 'for c in $OWNED $(cat "$TMP/owned.list" 2>/dev/null); do docker rm -f "$c" >/dev/null 2>&1; done; rm -rf "$TMP"' EXIT
+# Bind the runner's exact name, run label and reported image before tracking a residual.
+driver_owned() {
+	_do_base=${1%-v-*}
+	case $_do_base in boxset-dev-run-????????????????) ;; *) return 1 ;; esac
+	case $1 in "$_do_base" | "$_do_base-v-dev-desktop" | "$_do_base-v-dev-mobile" | "$_do_base-v-preview-desktop" | "$_do_base-v-preview-mobile" | "$_do_base-v-bench-data") ;; *) return 1 ;; esac
+	_do_run=${_do_base#boxset-dev-run-}
+	case $_do_run in *[!0-9a-f]*) return 1 ;; esac
+	_do_img=$(sed -n 's/^dev-run: image=\(sha256:[0-9a-f]*\) inputs=.*/\1/p' "$TMP/rerr")
+	[ "${#_do_img}" = 71 ] || return 1
+	_do_obs=$(timeout 30 docker inspect --format '{{.Id}} {{.Name}} {{index .Config.Labels "boxset.dev-run"}} {{.Image}}' "$1" 2>/dev/null) || {
+		_do_abs=$(timeout 30 docker ps -a --no-trunc --filter "name=^$1\$" --format '{{.ID}}' 2>/dev/null && printf x) || return 1
+		[ "$_do_abs" = x ]
+		return
+	}
+	_do_id=${_do_obs%% *}
+	[ "${#_do_id}" = 64 ] || return 1
+	case $_do_id in *[!0-9a-f]*) return 1 ;; esac
+	[ "$_do_obs" = "$_do_id /$1 $_do_run $_do_img" ] || return 1
+	printf '%s\n' "$_do_obs" >>"$TMP/owned.list"
+}
+driver_run_owned() {
+	# A capture cannot choose the first of several identities, or borrow a name
+	# from a partial line. Pre-create refusals never call this registration seam.
+	if [ "$(grep -c '^dev-run: image' "$TMP/rerr")" != 1 ] ||
+		[ "$(grep -Ec "$RUNNER_STARTED_RE" "$TMP/rerr")" != 1 ] ||
+		[ "$(sed -n 's/^dev-run: image=.* container=\([^ ]*\) log=none$/\1/p' "$TMP/rerr")" != "$1" ]; then
+		DRIVER_CLEANFAIL=1
+		return 1
+	fi
+	for _dro_name in "$1" "$1-v-dev-desktop" "$1-v-dev-mobile" "$1-v-preview-desktop" "$1-v-preview-mobile"; do
+		driver_owned "$_dro_name" || { DRIVER_CLEANFAIL=1; return 1; }
+	done
+}
+driver_remove() {
+	[ "${#1}" = 64 ] || return 1
+	case $1 in *[!0-9a-f]*) return 1 ;; esac
+	_dr_present=$(timeout 30 docker ps -a --no-trunc --filter "id=$1" --format '{{.ID}}' 2>/dev/null && printf x) || return 1
+	[ "$_dr_present" != x ] || return 0
+	[ "$_dr_present" = "$1
+x" ] || return 1
+	_dr_obs=$(timeout 30 docker inspect --format '{{.Id}} {{.Name}} {{index .Config.Labels "boxset.dev-run"}} {{.Image}}' "$1" 2>/dev/null) || return 1
+	[ "$_dr_obs" = "$1 $2 $3 $4" ] || return 1
+	_dr_state=$(timeout 30 docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$1" 2>/dev/null) || return 1
+	case $_dr_state in
+	running\ *)
+		timeout 30 docker kill "$1" >/dev/null 2>&1 || return 1
+		_dr_wait=$(timeout 60 docker wait "$1" 2>/dev/null) || return 1
+		case $_dr_wait in '' | *[!0-9]*) return 1 ;; esac
+		_dr_state=$(timeout 30 docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$1" 2>/dev/null) || return 1
+		[ "$_dr_state" = "exited $_dr_wait" ] || return 1
+		;;
+	esac
+	case $_dr_state in
+	created\ * | exited\ *)
+		_dr_exit=${_dr_state#* }
+		case $_dr_exit in '' | *[!0-9]*) return 1 ;; esac
+		;;
+	*) return 1 ;;
+	esac
+	_dr_obs=$(timeout 30 docker inspect --format '{{.Id}} {{.Name}} {{index .Config.Labels "boxset.dev-run"}} {{.Image}}' "$1" 2>/dev/null) || return 1
+	[ "$_dr_obs" = "$1 $2 $3 $4" ] || return 1
+	[ "$DRIVER_CLEANFAIL" = 0 ] || return 1
+	DRIVER_REMOVING=$1
+	timeout 60 docker rm "$1" >/dev/null 2>&1 || return 1
+	_dr_abs=$(timeout 30 docker ps -a --no-trunc --filter "id=$1" --format '{{.ID}}' 2>/dev/null && printf x) || return 1
+	[ "$_dr_abs" = x ] || return 1
+	DRIVER_REMOVING=
+}
+driver_cleanup_owned() {
+	[ -z "$DRIVER_REMOVING" ] || DRIVER_CLEANFAIL=1
+	[ "$DRIVER_CLEANFAIL" = 0 ] || return 1
+	_dco_status=0
+	[ ! -e "$TMP/owned.list" ] || while read -r _dco_id _dco_name _dco_run _dco_img; do
+		driver_remove "$_dco_id" "$_dco_name" "$_dco_run" "$_dco_img" || _dco_status=1
+	done <"$TMP/owned.list"
+	if [ "$_dco_status" = 0 ] && [ -e "$TMP/owned.list" ]; then
+		: >"$TMP/owned.list" || _dco_status=1
+	fi
+	[ "$_dco_status" = 0 ] || DRIVER_CLEANFAIL=1
+	return "$_dco_status"
+}
+driver_cleanup() {
+	_dc_status=$?
+	trap - EXIT
+	trap 'DRIVER_CLEANFAIL=1' HUP INT TERM
+	if ! driver_cleanup_owned; then
+		printf 'dev-run-test: cleanup_failed\n' >&2
+		[ "$_dc_status" != 0 ] || _dc_status=125
+	fi
+	if [ "$_dc_status" = 0 ] && [ "$FAILS" = 0 ]; then
+		rm -rf "$TMP"
+	else
+		printf 'dev-run-test: diagnostics_retained=%s\n' "$TMP" >&2
+	fi
+	exit "$_dc_status"
+}
+trap driver_cleanup EXIT
 trap 'exit 125' HUP INT TERM
 
 # pass NAME: every credit in this driver goes through the shared classifier: a plain control is credited only as a
@@ -122,7 +217,7 @@ rrx() { # rrx DIR RUNNER ARGS...: sets RS; stdout $TMP/rout, stderr $TMP/rerr
 	RS=$?
 	rerr_seen
 	_xc=$(cname)
-	[ -z "$_xc" ] || case " $OWNED " in *" $_xc "*) ;; *) OWNED="$OWNED $_xc" ;; esac
+	[ -z "$_xc" ] || driver_run_owned "$_xc" || SETUP=1
 }
 # plain_target [WORD]: the target observation of a plain control's own runner run (its stderr is $TMP/rerr). The runner speaking is never evidence by
 # itself (an earlier refusal speaks too): a control that expects the child to run is reached only when the runner's identity line, printed immediately
@@ -300,9 +395,10 @@ gvariant() {
 # fiso NAME: an isolated checkout copy for Dockerfile/source fault copies; sets FISO.
 fiso() {
 	FISO=$TMP/f-$1
-	rm -rf "$FISO"
-	cp -a "$ISO" "$FISO"
-	mkdir -p "$FISO/testdata" "$FISO/docs/spikes/issue-drafts"
+	if ! { rm -rf "$FISO" && cp -a "$ISO" "$FISO" && mkdir -p "$FISO/testdata" "$FISO/docs/spikes/issue-drafts"; }; then
+		printf 'dev-run-test: isolated fixture setup failed\n' >&2
+		exit 125
+	fi
 }
 # --- the shared classifier ----------------------------------------------------------------------------------
 # Every RED and GREEN credit goes through rg_verdict: redgreen (runner, validator, redactor and S5 mutants),
@@ -323,6 +419,7 @@ unknown_obs() { { printf u >>"$TMP/unknown"; } 2>/dev/null; }
 # rerr_seen: called after every runner stderr capture; an infrastructure failure of any of several runners stays recorded
 rerr_seen() {
 	if grep -Eq "$INFRA_RE" "$TMP/rerr" 2>/dev/null || grep -Eq "$CTRL_FATAL_RE" "$TMP/rerr" 2>/dev/null; then { printf i >>"$TMP/infra"; } 2>/dev/null || SETUP=1; fi
+	if grep -Fq 'dev-run: cleanup_failed' "$TMP/rerr" 2>/dev/null && ! grep -Eq "$RUNNER_STARTED_RE" "$TMP/rerr" 2>/dev/null; then DRIVER_CLEANFAIL=1; fi
 }
 # intended_refusal WORD FILE: FILE is the stderr of a run whose intended outcome is the fixed refusal WORD (an infrastructure word). Only that exact
 # line is exempt from infrastructure attribution: the rest of the stream is judged by rerr_seen, so an earlier redactor, host-tool or setup failure stays
@@ -1485,6 +1582,802 @@ transport_self_check() {
 	expect "classifier self-check transport: the status-1-as-absence copy reads the same failure as a clean absence, which counts as caught" "$(sc_caught "$(sc_cxo "$TMP/cxo-st1.sh")" "1:0:0")" caught
 	expect "classifier self-check transport: the payload-unchecked copy still reads Docker status 1 as unknown" "$(sc_cxo "$TMP/cxo-payload.sh")" "2:1:1"
 }
+cleanup_extract() {
+	_ce_out=$1
+	_ce_src=$2
+	shift 2
+	: >"$_ce_out" || return 1
+	for _ce_name in "$@"; do
+		[ "$(grep -c "^$_ce_name() {" "$_ce_src")" = 1 ] || return 1
+		sed -n "/^$_ce_name() {/,/^}\$/p" "$_ce_src" >>"$_ce_out" || return 1
+	done
+}
+cleanup_mutate() {
+	_cm_text=$(cat "$1") || return 1
+	case $_cm_text in *"$2"*) ;; *) fail "cleanup mutant setup" "source seam missing"; return 1 ;; esac
+	_cm_tail=${_cm_text#*"$2"}
+	case $_cm_tail in *"$2"*) fail "cleanup mutant setup" "source seam is not unique"; return 1 ;; esac
+	mutate_file "$@"
+}
+# Every Docker call, including implementation mutants, resolves to this function.
+cleanup_fake_docker() {
+	printf '%s\n' "$*" >>"$CF/ops"
+	case $1 in
+	inspect)
+		[ "$CF_ROW" != unavailable ] || return 1
+		case $4 in "$CF_ID" | "$CF_NAME") ;; *) return 1 ;; esac
+		case $3 in
+		'{{.Id}}') printf '%s\n' "$CF_ID" ;;
+		'{{.State.Status}} {{.State.ExitCode}}')
+			if [ -f "$CF/killed" ]; then
+				case $CF_ROW in
+				post-wait-failed) printf 'exited 137\n'; return 1 ;;
+				terminal-disagreement) printf 'exited 0\n' ;;
+				*) printf 'exited 137\n' ;;
+				esac
+			else cat "$CF/state"; fi
+			;;
+		*)
+			_cf_identity="$CF_ID /$CF_NAME $RUNID $IMG"
+			case $CF_ROW in
+			changed-name) _cf_identity="$CF_ID /replacement $RUNID $IMG" ;;
+			changed-label) _cf_identity="$CF_ID /$CF_NAME foreign $IMG" ;;
+			changed-image) _cf_identity="$CF_ID /$CF_NAME $RUNID sha256:foreign" ;;
+			changed-id) _cf_identity="short /$CF_NAME $RUNID $IMG" ;;
+			esac
+			printf '%s\n' "$_cf_identity"
+			;;
+		esac
+		;;
+	kill)
+		[ "$CF_ROW" != cancel-failed ] || return 1
+		[ "$#" = 2 ] && [ "$2" = "$CF_ID" ] || return 1
+		: >"$CF/killed"
+		;;
+	wait)
+		case $CF_ROW in
+		wait-failed) printf '137\n'; return 1 ;;
+		wait-empty) : ;;
+		wait-malformed) printf 'unknown\n' ;;
+		*) printf '137\n' ;;
+		esac
+		;;
+	rm)
+		# The force mutant may attempt argv, but there is no real Docker path here.
+		[ "$#" = 2 ] && [ "$2" = "$CF_ID" ] || { : >"$CF/force"; return 1; }
+		grep -Fq 'inspect --format {{.State.Status}} {{.State.ExitCode}}' "$CF/ops" &&
+			[ -s "$CF/scratch/st" ] || { : >"$CF/missing-evidence"; return 1; }
+		if [ "$CF_ROW" = running ]; then
+			[ -f "$CF/killed" ] && grep -q '^wait ' "$CF/ops" || { : >"$CF/missing-evidence"; return 1; }
+		fi
+		case $CF_ROW in rm-failed) return 1 ;; interrupted) return 130 ;; abrupt-rm) exit 125 ;; survive) return 0 ;; esac
+		: >"$CF/removed"
+		;;
+	ps)
+		case $CF_ROW in absence-failed) return 1 ;; malformed) printf 'foreign\n'; return ;; blank) printf '\n'; return ;; esac
+		case $5 in name=*) [ "$5" = "name=^$CF_NAME\$" ] || return 0 ;; esac
+		[ -f "$CF/removed" ] || printf '%s\n' "$CF_ID"
+		;;
+	*) return 1 ;;
+	esac
+}
+cleanup_fixture() {
+	CF=$TMP/cleanup-fixture
+	rm -rf "$CF"
+	mkdir -m 0700 "$CF" "$CF/scratch" || return 1
+	: >"$CF/ops"
+	printf '0' >"$CF/scratch/st"
+	printf 'exited 0\n' >"$CF/state"
+	case $2 in running | cancel-failed | wait-* | post-wait-failed | terminal-disagreement) printf 'running 0\n' >"$CF/state" ;; paused) printf 'paused 0\n' >"$CF/state" ;; restarting) printf 'restarting 0\n' >"$CF/state" ;; created) printf 'created 0\n' >"$CF/state" ;; child7) printf 'exited 7\n' >"$CF/state" ;; child124) printf 'exited 124\n' >"$CF/state" ;; child125 | child125-export-failed) printf 'exited 125\n' >"$CF/state" ;; esac
+	(
+		CF_ROW=$2
+		CF_ID=$(printf '%064d' 1)
+		CID=$CF_ID
+		RUNID=0123456789abcdef
+		IMG=sha256:$(printf '%064d' 2)
+		CTR=boxset-dev-run-$RUNID
+		CF_NAME=$CTR
+		[ "$CF_ROW" != validator ] || CF_NAME=$CTR-v-dev-desktop
+		SAMPLER= OWN=1 CAPMADE=0 CAPDONE=0 CAPTURE= CLEANFAIL=0 PENDING= REMOVED= REMOVING= COMPLETE=1
+		BOUND="$CF_ID $CF_NAME
+"
+		T=$CF/scratch
+		DRIVER_CLEANFAIL=0 DRIVER_REMOVING= FAILS=0
+		timeout() { shift; "$@"; }
+		docker() { cleanup_fake_docker "$@"; }
+		. "$3"
+		_cf_primary=0
+		case $CF_ROW in child7 | primary7-rm-failed) _cf_primary=7 ;; child124) _cf_primary=124 ;; child125 | child125-export-failed | interruption125) _cf_primary=125 ;; esac
+		CHILD=$_cf_primary
+		[ "$CF_ROW" != interruption125 ] || CHILD=
+		if [ "$CF_ROW" = child124 ]; then
+			printf 'dev-run: image=%s inputs=%s timeout=10s container=%s log=none\n' "$IMG" "$(printf '%064d' 3)" "$CTR" >&2
+		fi
+		case $CF_ROW in
+		pre-create) BOUND= ;;
+		ambiguous) BOUND=; PENDING=$CF_NAME ;;
+		ambiguous-unavailable) BOUND=; PENDING=$CF_NAME; CF_ROW=unavailable ;;
+		primary7-rm-failed) CF_ROW=rm-failed ;;
+		esac
+		if [ "$1" = runner ]; then
+			trap cleanup EXIT
+		else
+			TMP=$T
+			printf '%s /%s %s %s\n' "$CF_ID" "$CF_NAME" "$RUNID" "$IMG" >"$TMP/owned.list"
+			trap driver_cleanup EXIT
+		fi
+		if [ "${5:-}" = bind ]; then
+			if [ "$1" = runner ]; then
+				BOUND=
+				_cf_receipt=$CF_ID
+				case $CF_ROW in receipt-short) _cf_receipt=short ;; receipt-option) _cf_receipt=--all ;; receipt-upper) _cf_receipt=$(printf '%064d' 0 | tr 0 A) ;; esac
+				bind_container "$_cf_receipt" "$CF_NAME" || { CLEANFAIL=1; exit 125; }
+			else
+				printf 'dev-run: image=%s inputs=%s timeout=600s container=%s log=none\n' "$IMG" "$(printf '%064d' 3)" "$CTR" >"$TMP/rerr"
+				: >"$TMP/owned.list"
+				driver_run_owned "$CTR" || exit 125
+			fi
+		fi
+		if [ "${5:-}" = lifecycle ]; then
+			COMPLETE=0
+			HAVE_WRITE=0 HAVE_CAPTURE=0 HAVE_BENCH=0
+			WRITE=docs/spikes/issue-drafts DRAFTS=s5-admission.md STREAMCAP=262144 WCAP=65536 R= EXPORT_CMD=:
+			[ "$CF_ROW" != child125-export-failed ] || HAVE_WRITE=1
+			cp_out() {
+				printf 'bounded redacted export diagnostic\n' >"$T/cperr"
+				printf 1 >"$T/sp"
+				for _cf_status_file in ds hs cs; do printf 0 >"$T/$_cf_status_file"; done
+				return 1
+			}
+			list_one() { cat >/dev/null; }
+		fi
+		[ -z "${4:-}" ] || . "$4"
+		exit "$_cf_primary"
+	) >"$CF/out" 2>"$CF/err"
+	_cf_status=$?
+	_cf_scratch=absent
+	[ ! -d "$CF/scratch" ] || _cf_scratch=retained
+	_cf_rm=$(grep -c '^rm ' "$CF/ops")
+	_cf_kill=$(grep -c '^kill ' "$CF/ops")
+	_cf_wait=$(grep -c '^wait ' "$CF/ops")
+	_cf_bad=0
+	[ ! -f "$CF/force" ] && [ ! -f "$CF/missing-evidence" ] || _cf_bad=1
+	printf '%s:%s:rm%s:kill%s:wait%s:bad%s' "$_cf_status" "$_cf_scratch" "$_cf_rm" "$_cf_kill" "$_cf_wait" "$_cf_bad"
+	[ "$2" != child124 ] || printf ':lines%s' "$(grep -c . "$CF/err")"
+	if [ "$2" = child125-export-failed ]; then
+		_cf_diagnostic=0
+		grep -Fxq 'bounded redacted export diagnostic' "$CF/scratch/cperr" 2>/dev/null && _cf_diagnostic=1
+		printf ':diagnostics%s:reference%s' "$_cf_diagnostic" "$(grep -Fxc "dev-run: diagnostics_retained=$CF/scratch" "$CF/err")"
+	fi
+}
+cleanup_self_check() {
+	if ! cleanup_extract "$TMP/cleanup-runner.sh" "$SRC/scripts/dev-run.sh" die full_id bind_container container_absent remove_container cleanup export_one ||
+		! cleanup_extract "$TMP/cleanup-driver.sh" "$SELF" driver_owned driver_run_owned driver_remove driver_cleanup_owned driver_cleanup; then
+		fail "cleanup fixture setup" "source extraction must match each function uniquely"
+		return
+	fi
+	for _cf_owner in runner driver; do
+		_cf_source=$TMP/cleanup-$_cf_owner.sh
+		for _cf_row in success created child7 validator running cancel-failed paused restarting changed-name changed-label changed-id changed-image unavailable rm-failed survive absence-failed malformed blank interrupted primary7-rm-failed interruption125; do
+			case $_cf_row in
+			success | created | validator) _cf_want=0:absent:rm1:kill0:wait0:bad0 ;;
+			child7) if [ "$_cf_owner" = runner ]; then _cf_want=7:absent:rm1:kill0:wait0:bad0; else _cf_want=7:retained:rm1:kill0:wait0:bad0; fi ;;
+			running) _cf_want=0:absent:rm1:kill1:wait1:bad0 ;;
+			cancel-failed) _cf_want=125:retained:rm0:kill1:wait0:bad0 ;;
+			paused | restarting | changed-* | unavailable) _cf_want=125:retained:rm0:kill0:wait0:bad0 ;;
+			interruption125) _cf_want=125:retained:rm1:kill0:wait0:bad0 ;;
+			primary7-rm-failed) _cf_want=7:retained:rm1:kill0:wait0:bad0 ;;
+			*) _cf_want=125:retained:rm1:kill0:wait0:bad0 ;;
+			esac
+			# Driver observation precedes identity inspection and refuses malformed presence immediately.
+			if [ "$_cf_owner" = driver ]; then
+				case $_cf_row in malformed | blank | absence-failed) _cf_want=125:retained:rm0:kill0:wait0:bad0 ;; esac
+			fi
+			expect "classifier self-check cleanup $_cf_owner: $_cf_row" "$(cleanup_fixture "$_cf_owner" "$_cf_row" "$_cf_source")" "$_cf_want"
+		done
+		cp "$_cf_source" "$TMP/cleanup-force.sh" || return
+		[ "$(grep -Fc 'timeout 60 docker rm "$1" >/dev/null 2>&1 || return 1' "$TMP/cleanup-force.sh")" = 1 ] || { fail "cleanup mutant setup" "removal seam is not unique"; return; }
+		mutate_file "$TMP/cleanup-force.sh" 'timeout 60 docker rm "$1" >/dev/null 2>&1 || return 1' 'timeout 60 docker rm -f "$1" >/dev/null 2>&1 || return 1' || return
+		expect "classifier self-check cleanup $_cf_owner: force-argv implementation mutant is caught only behind fake Docker" "$(cleanup_fixture "$_cf_owner" success "$TMP/cleanup-force.sh")" 125:retained:rm1:kill0:wait0:bad1
+		expect "classifier self-check cleanup $_cf_owner: restored source returns GREEN" "$(cleanup_fixture "$_cf_owner" success "$_cf_source")" 0:absent:rm1:kill0:wait0:bad0
+	done
+	for _cf_row in pre-create ambiguous ambiguous-unavailable; do
+		case $_cf_row in pre-create) _cf_want=0:absent:rm0:kill0:wait0:bad0 ;; ambiguous) _cf_want=0:absent:rm1:kill0:wait0:bad0 ;; *) _cf_want=125:retained:rm0:kill0:wait0:bad0 ;; esac
+		expect "classifier self-check cleanup runner: $_cf_row receipt reconciliation" "$(cleanup_fixture runner "$_cf_row" "$TMP/cleanup-runner.sh")" "$_cf_want"
+	done
+	_cf_normal='remove_container "$CID" "$CTR" || { CLEANFAIL=1; [ "$CHILD" != 0 ] && die cleanup_failed "$CHILD"; die cleanup_failed; }'
+	[ "$(grep -Fxc "$_cf_normal" "$SRC/scripts/dev-run.sh")" = 1 ] || { fail "cleanup fixture setup" "normal removal seam is not unique"; return; }
+	grep -Fx "$_cf_normal" "$SRC/scripts/dev-run.sh" >"$TMP/cleanup-normal.sh" || return
+	cp "$TMP/cleanup-normal.sh" "$TMP/cleanup-fault.sh" || return
+	cp "$TMP/cleanup-normal.sh" "$TMP/cleanup-ignored.sh" || return
+	mutate_file "$TMP/cleanup-fault.sh" "$_cf_normal" 'false || { CLEANFAIL=1; die cleanup_failed; }' || return
+	mutate_file "$TMP/cleanup-ignored.sh" "$_cf_normal" 'false || :' || return
+	expect "classifier self-check cleanup runner: normal child success" "$(cleanup_fixture runner success "$TMP/cleanup-runner.sh" "$TMP/cleanup-normal.sh")" 0:absent:rm1:kill0:wait0:bad0
+	expect "classifier self-check cleanup runner: normal nonzero child retains its status without an unresolved diagnostic" "$(cleanup_fixture runner child7 "$TMP/cleanup-runner.sh" "$TMP/cleanup-normal.sh")" 7:absent:rm1:kill0:wait0:bad0
+	expect "classifier self-check cleanup runner: normal removal failure blocks success" "$(cleanup_fixture runner rm-failed "$TMP/cleanup-runner.sh" "$TMP/cleanup-normal.sh")" 125:retained:rm1:kill0:wait0:bad0
+	expect "classifier self-check cleanup runner: cleanup failure preserves a primary nonzero child" "$(cleanup_fixture runner primary7-rm-failed "$TMP/cleanup-runner.sh" "$TMP/cleanup-normal.sh")" 7:retained:rm1:kill0:wait0:bad0
+	expect "classifier self-check cleanup runner: fault-rm corrected seam returns the intended late failure" "$(cleanup_fixture runner success "$TMP/cleanup-runner.sh" "$TMP/cleanup-fault.sh")" 125:retained:rm0:kill0:wait0:bad0
+	expect "classifier self-check cleanup runner: ignored-cleanup implementation mutant discriminates RED from the fault" "$(cleanup_fixture runner success "$TMP/cleanup-runner.sh" "$TMP/cleanup-ignored.sh")" 0:absent:rm1:kill0:wait0:bad0
+	expect "classifier self-check cleanup runner: restored normal cleanup returns GREEN" "$(cleanup_fixture runner success "$TMP/cleanup-runner.sh" "$TMP/cleanup-normal.sh")" 0:absent:rm1:kill0:wait0:bad0
+	expect "classifier self-check cleanup runner: known child124 keeps the original one-line stderr contract" "$(cleanup_fixture runner child124 "$TMP/cleanup-runner.sh" "$TMP/cleanup-normal.sh")" 124:absent:rm1:kill0:wait0:bad0:lines1
+	cp "$TMP/cleanup-runner.sh" "$TMP/cleanup-noisy.sh" || return
+	[ "$(grep -Fxc '	exit "$_incoming"' "$TMP/cleanup-noisy.sh")" = 1 ] || { fail "cleanup mutant setup" "EXIT seam is not unique"; return; }
+	mutate_file "$TMP/cleanup-noisy.sh" '	exit "$_incoming"' 'printf "dev-run: terminal\n" >&2; exit "$_incoming"' || return
+	expect "classifier self-check cleanup runner: unconditional diagnostic mutant breaks the original child124 output" "$(cleanup_fixture runner child124 "$TMP/cleanup-noisy.sh" "$TMP/cleanup-normal.sh")" 124:absent:rm1:kill0:wait0:bad0:lines2
+	expect "classifier self-check cleanup runner: nonlocal interruption during normal removal never retries on EXIT" "$(cleanup_fixture runner abrupt-rm "$TMP/cleanup-runner.sh" "$TMP/cleanup-normal.sh")" 125:retained:rm1:kill0:wait0:bad0
+	printf '%s\n' 'driver_remove "$CF_ID" "/$CF_NAME" "$RUNID" "$IMG" || exit 125' >"$TMP/cleanup-driver-normal.sh"
+	expect "classifier self-check cleanup driver: nonlocal interruption during normal removal never retries on EXIT" "$(cleanup_fixture driver abrupt-rm "$TMP/cleanup-driver.sh" "$TMP/cleanup-driver-normal.sh")" 125:retained:rm1:kill0:wait0:bad0
+	for _cf_owner in runner driver; do
+		cp "$TMP/cleanup-$_cf_owner.sh" "$TMP/cleanup-retry.sh" || return
+		if [ "$_cf_owner" = runner ]; then
+			_cf_guard='	[ -z "$REMOVING" ] || CLEANFAIL=1'
+			_cf_call=$TMP/cleanup-normal.sh
+		else
+			_cf_guard='	[ -z "$DRIVER_REMOVING" ] || DRIVER_CLEANFAIL=1'
+			_cf_call=$TMP/cleanup-driver-normal.sh
+		fi
+		[ "$(grep -Fxc "$_cf_guard" "$TMP/cleanup-retry.sh")" = 1 ] || { fail "cleanup mutant setup" "in-flight guard is not unique"; return; }
+		mutate_file "$TMP/cleanup-retry.sh" "$_cf_guard" ':' || return
+		expect "classifier self-check cleanup $_cf_owner: removed in-flight guard mutant exposes the repeated removal" "$(cleanup_fixture "$_cf_owner" abrupt-rm "$TMP/cleanup-retry.sh" "$_cf_call")" 125:retained:rm2:kill0:wait0:bad0
+	done
+	for _cf_owner in runner driver; do
+		for _cf_row in success validator changed-name changed-label changed-id changed-image unavailable; do
+			case $_cf_row in success | validator) _cf_want=0:absent:rm1:kill0:wait0:bad0 ;; *) _cf_want=125:retained:rm0:kill0:wait0:bad0 ;; esac
+			expect "classifier self-check cleanup $_cf_owner: bind $_cf_row creation facts before removal" "$(cleanup_fixture "$_cf_owner" "$_cf_row" "$TMP/cleanup-$_cf_owner.sh" '' bind)" "$_cf_want"
+		done
+	done
+	for _cf_row in receipt-short receipt-option receipt-upper; do
+		expect "classifier self-check cleanup runner: reject $_cf_row before a Docker operand" "$(cleanup_fixture runner "$_cf_row" "$TMP/cleanup-runner.sh" '' bind)" 125:retained:rm0:kill0:wait0:bad0
+	done
+	for _cf_owner in runner driver; do
+		for _cf_row in wait-failed wait-empty wait-malformed post-wait-failed terminal-disagreement; do
+			expect "classifier self-check cleanup $_cf_owner: $_cf_row refuses removal and retains diagnostics" "$(cleanup_fixture "$_cf_owner" "$_cf_row" "$TMP/cleanup-$_cf_owner.sh")" 125:retained:rm0:kill1:wait1:bad0
+			cp "$TMP/cleanup-$_cf_owner.sh" "$TMP/cleanup-terminal-mutant.sh" || return
+			if [ "$_cf_owner" = runner ]; then _cf_wait_var=_rw; _cf_state_var=_rs; else _cf_wait_var=_dr_wait; _cf_state_var=_dr_state; fi
+			_cf_wait_line=$(printf '\t\t%s=$(timeout 60 docker wait "$1" 2>/dev/null) || return 1' "$_cf_wait_var")
+			_cf_agreement=$(printf '\t\t[ "$%s" = "exited $%s" ] || return 1' "$_cf_state_var" "$_cf_wait_var")
+			_cf_post_line=$(printf '\t\t%s=$(timeout 30 docker inspect --format '\''{{.State.Status}} {{.State.ExitCode}}'\'' "$1" 2>/dev/null) || return 1' "$_cf_state_var")
+			case $_cf_row in
+			wait-failed)
+				cleanup_mutate "$TMP/cleanup-terminal-mutant.sh" "$_cf_wait_line" "${_cf_wait_line% || return 1}" || return
+				;;
+			wait-empty | wait-malformed)
+				_cf_numeric=$(grep -F "case \$$_cf_wait_var in" "$TMP/cleanup-terminal-mutant.sh")
+				cleanup_mutate "$TMP/cleanup-terminal-mutant.sh" "$_cf_numeric" ':' || return
+				cleanup_mutate "$TMP/cleanup-terminal-mutant.sh" "$_cf_agreement" ':' || return
+				;;
+			post-wait-failed)
+				cleanup_mutate "$TMP/cleanup-terminal-mutant.sh" "$_cf_post_line
+$_cf_agreement" "${_cf_post_line% || return 1}
+$_cf_agreement" || return
+				;;
+			terminal-disagreement)
+				cleanup_mutate "$TMP/cleanup-terminal-mutant.sh" "$_cf_agreement" ':' || return
+				;;
+			esac
+			expect "classifier self-check cleanup $_cf_owner: $_cf_row guard mutant permits unconfirmed removal and is RED" "$(cleanup_fixture "$_cf_owner" "$_cf_row" "$TMP/cleanup-terminal-mutant.sh")" 0:absent:rm1:kill1:wait1:bad0
+			expect "classifier self-check cleanup $_cf_owner: $_cf_row restored guard returns GREEN" "$(cleanup_fixture "$_cf_owner" "$_cf_row" "$TMP/cleanup-$_cf_owner.sh")" 125:retained:rm0:kill1:wait1:bad0
+		done
+	done
+	_cf_export='if [ "$HAVE_WRITE" = 1 ] && { [ "$WRITE" = docs/spikes/issue-drafts ] || [ "$CHILD" = 0 ]; }; then'
+	[ "$(grep -Fxc "$_cf_export" "$SRC/scripts/dev-run.sh")" = 1 ] || { fail "cleanup fixture setup" "export phase is not unique"; return; }
+	awk -v anchor="$_cf_export" '$0 == anchor { phase=1 } phase' "$SRC/scripts/dev-run.sh" >"$TMP/cleanup-lifecycle.sh" || return
+	expect "classifier self-check cleanup lifecycle: child125 plus actual export failure retains diagnostics" "$(cleanup_fixture runner child125-export-failed "$TMP/cleanup-runner.sh" "$TMP/cleanup-lifecycle.sh" lifecycle)" 125:retained:rm1:kill0:wait0:bad0:diagnostics1:reference1
+	expect "classifier self-check cleanup lifecycle: successful child125 completes without a diagnostic residual" "$(cleanup_fixture runner child125 "$TMP/cleanup-runner.sh" "$TMP/cleanup-lifecycle.sh" lifecycle)" 125:absent:rm1:kill0:wait0:bad0
+	expect "classifier self-check cleanup lifecycle: successful child124 completes with identity-only stderr" "$(cleanup_fixture runner child124 "$TMP/cleanup-runner.sh" "$TMP/cleanup-lifecycle.sh" lifecycle)" 124:absent:rm1:kill0:wait0:bad0:lines1
+	cp "$TMP/cleanup-lifecycle.sh" "$TMP/cleanup-early-completion.sh" || return
+	cleanup_mutate "$TMP/cleanup-early-completion.sh" "$_cf_export" "COMPLETE=1
+$_cf_export" || return
+	expect "classifier self-check cleanup lifecycle: early completion mutant erases child125 export diagnostics and is RED" "$(cleanup_fixture runner child125-export-failed "$TMP/cleanup-runner.sh" "$TMP/cleanup-early-completion.sh" lifecycle)" 125:absent:rm1:kill0:wait0:bad0:diagnostics0:reference0
+	expect "classifier self-check cleanup lifecycle: restored completion placement retains failed-export diagnostics" "$(cleanup_fixture runner child125-export-failed "$TMP/cleanup-runner.sh" "$TMP/cleanup-lifecycle.sh" lifecycle)" 125:retained:rm1:kill0:wait0:bad0:diagnostics1:reference1
+}
+cleanup_setup_self_check() {
+	_css_call=$(printf '\t%s' cleanup_setup_self_check)
+	[ "$(grep -Fxc "$_css_call" "$SELF")" = 1 ] || { fail "cleanup setup regression" "self-check call is not unique"; return; }
+	cp "$SELF" "$TMP/setup-driver.sh" || { fail "cleanup setup regression" "driver copy failed"; return; }
+	mutate_file "$TMP/setup-driver.sh" "$_css_call" ':' || return
+	_css_late_call=$(printf '\t%s' cleanup_late_self_check)
+	[ "$(grep -Fxc "$_css_late_call" "$SELF")" = 1 ] || { fail "cleanup setup regression" "late-check call is not unique"; return; }
+	mutate_file "$TMP/setup-driver.sh" "$_css_late_call" ':' || return
+	mkdir "$TMP/setup-bin" || { fail "cleanup setup regression" "shim directory failed"; return; }
+	_css_cp=$(command -v cp)
+	cat >"$TMP/setup-bin/cp" <<EOF
+#!/bin/sh
+case \${2:-} in */cleanup-force.sh) printf 'cleanup-copy-fault\n' >&2; exit 73 ;; esac
+exec "$_css_cp" "\$@"
+EOF
+	chmod +x "$TMP/setup-bin/cp" || { fail "cleanup setup regression" "shim mode failed"; return; }
+	PATH="$TMP/setup-bin:$PATH" TMPDIR="$TMP" sh "$TMP/setup-driver.sh" --classifier-self-check >"$TMP/setup-child.out" 2>"$TMP/setup-child.err"
+	_css_status=$?
+	expect "classifier self-check cleanup setup: an injected copy failure exits nonzero and prints no PASS marker" "$([ "$_css_status" != 0 ] && printf nonzero):$(grep -c '^DEV-RUN-TEST-SELFCHECK-PASS ' "$TMP/setup-child.out"):$(grep -Fxc cleanup-copy-fault "$TMP/setup-child.err"):$(grep -Fxc 'not ok - cleanup fixture setup: cleanup controls did not complete' "$TMP/setup-child.out")" nonzero:0:1:1
+}
+cleanup_late_self_check() {
+	cleanup_extract "$TMP/late-wrapper.sh" "$SELF" plain_late_failure_control || { fail "late cleanup regression" "wrapper extraction failed"; return; }
+	_clp_tail='if [ "$FAILS" -eq 0 ]; then'
+	[ "$(grep -Fxc "$_clp_tail" "$SELF")" = 1 ] || { fail "late cleanup regression" "terminal accounting is not unique"; return; }
+	awk -v anchor="$_clp_tail" '$0 == anchor { terminal=1 } terminal' "$SELF" >"$TMP/late-terminal.sh" || { fail "late cleanup regression" "terminal extraction failed"; return; }
+	for _clp_fault in ownership cleanup; do
+		(
+			_clp_wrapper=$TMP/late-wrapper.sh
+			_clp_terminal=$TMP/late-terminal.sh
+			TMP=$TMP/late-$_clp_fault
+			mkdir -p "$TMP/mut" || exit 125
+			ISO=$TMP MUT=$TMP/mut FAILS=0 PASSES=0 DRIVER_CLEANFAIL=0
+			cat >"$MUT/fault-rm.sh" <<'EOF'
+#!/bin/sh
+printf 'x[REDACTED]y'
+printf 'dev-run: image=sha256:%064d inputs=%064d timeout=600s container=boxset-dev-run-0123456789abcdef log=none\ndev-run: cleanup_failed\n' 1 2 >&2
+exit 125
+EOF
+			chmod +x "$MUT/fault-rm.sh" || exit 125
+			driver_run_owned() { [ "$_clp_fault" != ownership ]; }
+			driver_cleanup_owned() { [ "$_clp_fault" != cleanup ]; }
+			. "$_clp_wrapper"
+			plain_late_failure_control || :
+			printf 'parent-cleanup=%s\n' "$DRIVER_CLEANFAIL"
+			printf 'wrapper-premise=%s\n' "$(printf '%s\n' "$_plo" | grep -Fxc PREMISE)"
+			. "$_clp_terminal"
+		) >"$TMP/late-$_clp_fault.out" 2>"$TMP/late-$_clp_fault.err"
+		_clp_status=$?
+		expect "classifier self-check late wrapper: $_clp_fault failure reaches parent accounting and refuses credit" "$_clp_status:$(grep -c '^DEV-RUN-TEST-PASS ' "$TMP/late-$_clp_fault.out"):$(grep -c '^ok - plain late-failure control:' "$TMP/late-$_clp_fault.out"):$(grep -c '^parent-cleanup=1$' "$TMP/late-$_clp_fault.out"):$(grep -c '^wrapper-premise=1$' "$TMP/late-$_clp_fault.out")" 1:0:0:1:1
+	done
+}
+observer_extract() {
+	_oe_out=$1
+	shift
+	: >"$_oe_out" || return 1
+	for _oe_name in "$@"; do
+		[ "$(grep -c "^$_oe_name() {" "$SRC/scripts/dev-run-smoke.sh")" = 1 ] || return 1
+		awk -v name="$_oe_name" '$0 ~ "^" name "\\(\\) \\{" { body=1; print; if ($0 ~ /}.*$/) exit; next } body { print; if ($0 == "}") exit }' "$SRC/scripts/dev-run-smoke.sh" >>"$_oe_out" || return 1
+	done
+}
+observer_fixture() {
+	(
+		OF=$(mktemp -d "$TMP/observer-case.XXXXXX") || exit 125
+		OF_CASE=$1
+		printf '%s\n' "$OF_CASE" >"$OF/case"
+		cp "$2" "$OF/functions.sh" || exit 125
+		S=$OF/s
+		mkdir -p "$S" "$OF/bin" || exit 125
+		cat >"$OF/bin/docker" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$OF/docker.calls"
+case $1 in
+inspect)
+	[ "$OF_CASE" != state-inspect-failed ] || exit 19
+	_st=exited
+	case $OF_CASE in state-created*) _st=created ;; esac
+	printf '/boxset-dev-run-0123456789abcdef-v-dev-desktop %s 0001-01-01T00:00:00Z 0 0123456789abcdef\n' "$_st"
+	;;
+rm)
+	[ "$#" = 2 ] && [ "$2" = ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff ] || exit 97
+	printf 'docker-stdout\n'
+	printf 'docker-stderr\n' >&2
+	[ "$OF_CASE" != docker-failed ] || exit 23
+	;;
+*) exit 97 ;;
+esac
+EOF
+		cat >"$OF/bin/cat" <<'EOF'
+#!/bin/sh
+case ${OF_CASE:-}:$1 in state-read-failed:*/vs) exit 17 ;; esac
+exec /bin/cat "$@"
+EOF
+		cat >"$OF/producer" <<'EOF'
+#!/bin/sh
+_d=$TMPDIR/boxset-dev-run.current
+mkdir -p "$_d" || exit 96
+[ "$OF_CASE" = missing-lit ] || [ "$OF_CASE" = state-missing-root ] || printf 'GOTELEMETRY=off\n' >"$_d/lit"
+case $OF_CASE in
+missing-diag) ;;
+empty-diag) : >"$_d/cperr" ;;
+raw-diag) printf 'Could not find the file /capture/dev-desktop.png\n' >"$_d/cperr" ;;
+sequential | delayed-token)
+	if [ "$BOXSET_SECRET_TEST" = file ]; then printf 'Could not find [REDACTED] token\n' >"$_d/cperr"; else printf 'Could not find file [REDACTED]\n' >"$_d/cperr"; fi
+	;;
+*) printf 'Could not find the [REDACTED] /capture/dev-desktop.png\n' >"$_d/cperr" ;;
+esac
+case $OF_CASE in
+content-leak) printf 'observer-canary\n' >"$_d/payload" ;;
+name-leak) : >"$_d/observer-canary" ;;
+state-*)
+	mkdir "$_d/cap"
+	printf 0 >"$_d/vs"
+	printf 7 >"$_d/ks"
+	printf abcdefghijk >"$_d/cap/dev-desktop.png"
+	case $OF_CASE in
+	state-created) rm "$_d/vs" "$_d/ks" "$_d/cap/dev-desktop.png" ;;
+	state-missing-status) rm "$_d/vs" ;;
+	state-malformed-status) printf invalid >"$_d/vs" ;;
+	state-separated-status) printf '0:9' >"$_d/vs" ;;
+	state-invalid-lit) printf 'not runner evidence\n' >"$_d/lit" ;;
+	state-ambiguous-root) mkdir "$TMPDIR/boxset-dev-run.second"; printf 'GOTELEMETRY=off\n' >"$TMPDIR/boxset-dev-run.second/lit" ;;
+	esac
+	;;
+esac
+docker rm ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+_rc=$?
+printf '%s\n' "$_rc" >"$OF/wrapper.exit"
+exit "$_rc"
+EOF
+		chmod +x "$OF/bin/docker" "$OF/bin/cat" "$OF/producer" || exit 125
+		PATH=$OF/bin:$PATH
+		export PATH OF OF_CASE
+		. "$2"
+		SENTINEL=observer-canary RRENV=BOXSET_SECRET_TEST=file RC= OWN=1 LIVE= OBS_FAIL=0
+		obs_setup || exit 125
+		mkdir -p "$S/tmp5/older/cap" || exit 125
+		printf 'GOTELEMETRY=off\n' >"$S/tmp5/older/lit"
+		printf 'previous [REDACTED]\n' >"$S/tmp5/older/cperr"
+		printf 9 >"$S/tmp5/older/vs"
+		printf 8 >"$S/tmp5/older/ks"
+		printf old >"$S/tmp5/older/cap/dev-desktop.png"
+		printf 'observed\ndiag\n' >"$S/shared.tokens"
+		case $OF_CASE in
+		older-diagnostic)
+			printf 'Could not find the file /capture/dev-desktop.png\n' >"$S/tmp5/older/cperr"
+			;;
+		older-leaks) printf 'observer-canary\n' >"$S/tmp5/older/payload"; : >"$S/tmp5/older/observer-canary" ;;
+		state-*) RRENV="$RRENV DR_OBS_STATE=1" ;;
+		esac
+		rr() { printf x >>"$OF/rr.calls"; env $RRENV "$OF/producer" >"$S/out" 2>&1; RC=$?; }
+		_of_env=$RRENV
+		obs_rr -- true >"$OF/obs_rr.stdout" 2>"$OF/obs_rr.stderr"
+		_of_call=$?
+		_of_run=$RC
+		obs_ok
+		_of_ok=$?
+		obs_diag
+		_of_diag=$?
+		printf '%s\n' "$_of_call" >"$OF/obs_rr.exit"
+		printf '%s\n' "$_of_run" >"$OF/runner.exit"
+		printf '%s\n' "$_of_ok" >"$OF/obs_ok.exit"
+		printf '%s\n' "$_of_diag" >"$OF/obs_diag.exit"
+		[ "$RRENV" = "$_of_env" ] || exit 95
+		if [ -n "${OBS_TOK:-}" ]; then cp "$OBS_TOK" "$OF/tokens" || exit 125; fi
+		printf '%s:%s:%s' "$_of_run" "$_of_ok" "$_of_diag"
+		case $OF_CASE in
+		state-*)
+			_of_state=$(sed -n 's/^state .* vs=/vs=/p' "$OF/tokens")
+			_of_bad=$(grep -c '^state_unproven$' "$OF/tokens")
+			printf ':%s:unproven%s' "$_of_state" "$_of_bad"
+			[ "$(head -n 1 "$OF/docker.calls" | cut -d' ' -f1)" = inspect ] || [ "$_of_bad" != 0 ] || exit 94
+			;;
+		docker-failed)
+			printf ':wrapper%s:streams%s' "$(cat "$OF/wrapper.exit")" "$(grep -Ec '^docker-(stdout|stderr)$' "$S/out")"
+			;;
+		sequential | delayed-token | allocation-failed | token-failed | alias-failed | link-failed | configuration-failed)
+			_of_old_dir=$OBS_DIR
+			_of_old_tok=$OBS_TOK
+			_of_old_hash=$(find "$_of_old_dir" -type f -exec sha256sum {} + | sort | sha256sum)
+			RRENV=BOXSET_SECRET_TEST=token
+			case $OF_CASE in
+			allocation-failed) mktemp() { return 73; } ;;
+			token-failed) mktemp() { _of_new=$(command mktemp "$@") || return; mkdir "$_of_new/tokens" || return; printf '%s\n' "$_of_new"; } ;;
+			alias-failed) mktemp() { printf '%s\n' "$_of_old_dir"; } ;;
+			link-failed) ln -s "$_of_old_dir" "$S/obs-run.link"; mktemp() { printf '%s\n' "$S/obs-run.link"; } ;;
+			configuration-failed) chmod() { return 17; } ;;
+			esac
+			if [ "$OF_CASE" = configuration-failed ]; then obs_setup; else obs_rr -- true; fi >"$OF/second.stdout" 2>"$OF/second.stderr"
+			_of_second=$?
+			_of_unchanged=0
+			[ "$(find "$_of_old_dir" -type f -exec sha256sum {} + | sort | sha256sum)" != "$_of_old_hash" ] || _of_unchanged=1
+			_of_env_ok=0
+			[ "$RRENV" != BOXSET_SECRET_TEST=token ] || _of_env_ok=1
+			[ "$OF_CASE" != delayed-token ] || printf 'diagleak\n' >>"$_of_old_tok"
+			obs_ok; _of_second_ok=$?
+			obs_diag; _of_second_diag=$?
+			printf '%s\n' "$_of_second" >"$OF/second-call.exit"
+			printf '%s\n' "$_of_second_ok" >"$OF/second-obs_ok.exit"
+			printf '%s\n' "$_of_second_diag" >"$OF/second-obs_diag.exit"
+			[ -z "$OBS_TOK" ] || cp "$OBS_TOK" "$OF/second.tokens" || exit 125
+			_of_empty=0
+			[ -n "$RC$OBS_TOK" ] || _of_empty=1
+			printf ':second%s:ready%s:empty%s:env%s:calls%s:preserved%s:ok%s:diag%s' "$_of_second" "$OBS_READY" "$_of_empty" "$_of_env_ok" "$(wc -c <"$OF/rr.calls" | tr -d ' ')" "$_of_unchanged" "$_of_second_ok" "$_of_second_diag"
+			;;
+		esac
+	)
+}
+observer_exit_fixture() {
+	_of_exit=$(mktemp -d "$TMP/observer-exit.XXXXXX") || return 1
+	{
+		printf 'S=%s/s\n' "$_of_exit"
+		printf '%s\n' 'mkdir "$S" || exit 125' 'OWN=1 LIVE= OBS_FAIL=0 OBS_RC=125 OBS_OK=1 OBS_DIAG=0 OBS_STATE=unproven OBS_DEST=unproven OBS_RESOURCE=unproven'
+		printf '%s\n' 'mkdir -p "$S/current/scratch"' 'printf private-synthetic-needle >"$S/current/scratch/cperr"' 'printf "observed\ndiag\n" >"$S/current/tokens"'
+		cat "$TMP/observer-functions.sh"
+		printf '%s\n' 'trap smoke_cleanup EXIT' 'trap smoke_interrupt HUP INT TERM'
+		case $1 in
+		primary) printf 'exit 7\n' ;;
+		signal) printf 'kill -TERM "$$"\n' ;;
+		setup) printf 'OBS_FAIL=1\nexit 0\n' ;;
+		cleanup) printf 'rm() { return 17; }\nexit 0\n' ;;
+		ownership) printf 'mv "$S" "$S.saved"\nln -s "$S.saved" "$S"\nexit 0\n' ;;
+		live-cleanup) printf 'LIVE=synthetic\nlive_clean() { return 17; }\nexit 7\n' ;;
+		success) printf 'exit 0\n' ;;
+		esac
+	} >"$_of_exit/run.sh" || return 1
+	sh "$_of_exit/run.sh" >"$_of_exit/out" 2>"$_of_exit/err"
+	_of_exit_status=$?
+	printf '%s\n' "$_of_exit_status" >"$_of_exit/status"
+	_of_retained=0
+	[ ! -d "$_of_exit/s" ] || _of_retained=1
+	_of_evidence=0
+	if [ "$_of_retained" = 1 ] && [ "$(cat "$_of_exit/s/current/scratch/cperr")" = private-synthetic-needle ] && [ "$(grep -c . "$_of_exit/s/current/tokens")" = 2 ]; then _of_evidence=1; fi
+	_of_safe=0
+	[ "$(wc -c <"$_of_exit/err")" -le 1024 ] && ! grep -q private-synthetic-needle "$_of_exit/err" && _of_safe=1
+	printf '%s:retained%s:reference%s:evidence%s:safe%s' "$_of_exit_status" "$_of_retained" "$(grep -c '^dev-run-smoke: diagnostics_retained=' "$_of_exit/err")" "$_of_evidence" "$_of_safe"
+}
+observer_predicate_fixture() {
+	(
+		_op_dir=$(mktemp -d "$TMP/observer-predicate.XXXXXX") || exit 125
+		S=$_op_dir/s
+		mkdir -p "$S/repo" || exit 125
+		printf '%s\n' "$1" >"$_op_dir/case"
+		. "$TMP/observer-functions.sh"
+		printf 'dev-run: image=synthetic container=boxset-dev-run-0123456789abcdef log=none\n' >"$S/out"
+		_op_case=$1
+		timeout() { shift; "$@"; }
+		docker() {
+			case $_op_case in
+			*-failed) return 17 ;;
+			*-malformed) printf 'foreign\n' ;;
+			ctr-present) printf 'boxset-dev-run-0123456789abcdef\n' ;;
+			owned-present) printf '%064d\n' 1 ;;
+			*-absent) : ;;
+			*) return 97 ;;
+			esac
+		}
+		case $_op_case in
+		ctr-*) ctr_gone; _op_status=$?; _op_value=$OBS_RESOURCE ;;
+		owned-*) owned_gone; _op_status=$?; _op_value=$OBS_RESOURCE ;;
+		cap-*)
+			_cap=capture
+			case $_op_case in cap-present) : >"$S/repo/$_cap" ;; cap-link) ln -s missing "$S/repo/$_cap" ;; esac
+			no_cap; _op_status=$?; _op_value=$OBS_DEST
+			;;
+		esac
+		printf '%s\n' "$_op_status" >"$_op_dir/predicate.exit"
+		printf '%s\n' "$_op_value" >"$_op_dir/observation"
+		printf '%s:%s' "$_op_status" "$_op_value"
+	)
+}
+observer_self_check() {
+	observer_extract "$TMP/observer-functions.sh" obs_reset obs_failed obs_setup obs_rr obs_ok obs_diag smoke_cleanup smoke_interrupt ctr_gone owned_gone no_cap runid || { fail "observer fixture setup" "source extraction missing or ambiguous"; return 1; }
+	expect "observer current diagnostic is attributable" "$(observer_fixture current "$TMP/observer-functions.sh")" 0:0:0
+	expect "observer retained older diagnostic cannot taint the current invocation" "$(observer_fixture older-diagnostic "$TMP/observer-functions.sh")" 0:0:0
+	for _of_case in older-leaks empty-diag missing-diag missing-lit raw-diag content-leak name-leak; do
+		case $_of_case in
+		older-leaks) _of_want=0:0:0 ;;
+		empty-diag | missing-diag) _of_want=0:0:1 ;;
+		missing-lit | content-leak | name-leak) _of_want=0:1:0 ;;
+		raw-diag) _of_want=0:1:1 ;;
+		esac
+		expect "observer attributes $_of_case only to current scratch" "$(observer_fixture "$_of_case" "$TMP/observer-functions.sh")" "$_of_want"
+	done
+	expect "observer preserves Docker status and both streams independently of predicates" "$(observer_fixture docker-failed "$TMP/observer-functions.sh")" 23:0:0:wrapper23:streams2
+	for _of_case in state-exited state-created state-created-stale state-missing-root state-ambiguous-root state-invalid-lit state-missing-status state-malformed-status state-separated-status state-read-failed state-inspect-failed; do
+		case $_of_case in
+		state-created*) _of_want='0:0:0:vs=- ks=- bytes=-:unproven0' ;;
+		state-exited) _of_want='0:0:0:vs=0 ks=7 bytes=11:unproven0' ;;
+		*) _of_want='0:1:0::unproven1' ;;
+		esac
+		expect "observer state $_of_case never borrows older vs/ks/capture" "$(observer_fixture "$_of_case" "$TMP/observer-functions.sh")" "$_of_want"
+	done
+	expect "observer sequential words preserve first evidence and consume second-only credit" "$(observer_fixture sequential "$TMP/observer-functions.sh")" 0:0:0:second0:ready1:empty0:env1:calls2:preserved1:ok0:diag0
+	expect "observer delayed prior token writer cannot taint current credit" "$(observer_fixture delayed-token "$TMP/observer-functions.sh")" 0:0:0:second0:ready1:empty0:env1:calls2:preserved1:ok0:diag0
+	for _of_case in allocation-failed token-failed alias-failed link-failed configuration-failed; do
+		expect "observer $_of_case after success clears credit and cannot call rr" "$(observer_fixture "$_of_case" "$TMP/observer-functions.sh")" 0:0:0:second1:ready0:empty1:env1:calls1:preserved1:ok1:diag1
+	done
+	for _of_case in primary signal setup cleanup ownership live-cleanup success; do
+		case $_of_case in primary | live-cleanup) _of_want=7:retained1:reference1:evidence1:safe1 ;; success) _of_want=0:retained0:reference0:evidence0:safe1 ;; ownership) _of_want=1:retained1:reference0:evidence1:safe1 ;; *) _of_want=1:retained1:reference1:evidence1:safe1 ;; esac
+		expect "observer smoke EXIT $_of_case preserves status and required evidence" "$(observer_exit_fixture "$_of_case")" "$_of_want"
+	done
+	for _of_case in ctr-absent ctr-present ctr-failed ctr-malformed owned-absent owned-present owned-failed owned-malformed cap-absent cap-present cap-link; do
+		case $_of_case in *-absent) _of_want=0:0 ;; *-failed | *-malformed) _of_want=1:unproven ;; *) _of_want=1:1 ;; esac
+		expect "observer predicate $_of_case distinguishes false from unproven" "$(observer_predicate_fixture "$_of_case")" "$_of_want"
+	done
+	for _of_mut in diagnostic token state; do
+		_of_mut_path=$TMP/observer-$_of_mut-mutant.sh
+		cp "$TMP/observer-functions.sh" "$_of_mut_path" || return 1
+		case $_of_mut in
+		diagnostic)
+			cleanup_mutate "$_of_mut_path" 'find "$DR_OBS_TMP" -name cperr' 'find "${DR_OBS_TMP%/obs-run.*/scratch}" -name cperr' || return 1
+			_of_case=older-diagnostic _of_wrong=0:1:0 _of_want=0:0:0
+			;;
+		token)
+			cleanup_mutate "$_of_mut_path" 'OBS_TOK=$_obs_newdir/tokens' 'OBS_TOK=$S/shared.tokens' || return 1
+			_of_case=missing-lit _of_wrong=0:0:0 _of_want=0:1:0
+			;;
+		state)
+			cleanup_mutate "$_of_mut_path" '_d=${_roots%/lit}' '_d=${DR_OBS_TMP%/obs-run.*/scratch}/tmp5/older' || return 1
+			_of_case=state-exited _of_wrong='0:0:0:vs=9 ks=8 bytes=3:unproven0' _of_want='0:0:0:vs=0 ks=7 bytes=11:unproven0'
+			;;
+		esac
+		expect "observer shared-$_of_mut implementation mutant yields attributable RED" "$(observer_fixture "$_of_case" "$_of_mut_path")" "$_of_wrong"
+		expect "observer restored $_of_mut implementation returns GREEN" "$(observer_fixture "$_of_case" "$TMP/observer-functions.sh")" "$_of_want"
+	done
+}
+completion_fixture() {
+	_co_dir=$(mktemp -d "$TMP/completion-case.XXXXXX") || return 125
+	printf '%s %s\n' "$1" "$2" >"$_co_dir/case"
+	cp "$3" "$_co_dir/functions.sh" || return 125
+	mkdir -p "$_co_dir/bin" "$_co_dir/scratch" "$_co_dir/repo/scripts" "$_co_dir/repo/docs/spikes/issue-drafts" || return 125
+	for _co_tool in sh grep sed head cut timeout cat rm find wc tr mkdir; do
+		_co_path=$(command -v "$_co_tool") && ln -s "$_co_path" "$_co_dir/bin/$_co_tool" || return 125
+	done
+	cat >"$_co_dir/bin/docker" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$CO/ops"
+_op=$1
+shift
+_last=
+for _arg do _last=$_arg; done
+case $_op in
+inspect)
+	[ "$CO_ROW" != query-failed ] || exit 19
+	[ -f "$CO/present" ] || exit 1
+	case $_last in "$CO_ID" | "$CO_NAME") ;; *) [ "$CO_ROW" != partial-validator ] || exit 19; exit 1 ;; esac
+	case $* in
+	*State.Status*) if [ "$CO_SEAM" = draft ]; then printf 'exited 1\n'; else printf 'exited 0\n'; fi ;;
+	*) if [ "$CO_ROW" = substituted ] || [ -f "$CO/replaced" ]; then printf 'foreign\n'; exit 0; fi
+		printf '%s /%s %s %s\n' "$CO_ID" "$CO_NAME" "$CO_RUN" "$CO_IMAGE" ;;
+	esac
+	;;
+ps)
+	[ "$CO_ROW" != query-failed ] || exit 19
+	case $CO_ROW:$* in partial-validator:*name=*'-v-'*) exit 19 ;; esac
+	if [ "$CO_ROW" = absence-failed ] && [ -f "$CO/removed" ]; then exit 19; fi
+	case $* in *"id=$CO_ID"* | *"name=^$CO_NAME$"*) [ ! -f "$CO/present" ] || printf '%s\n' "$CO_ID" ;; esac
+	;;
+rm)
+	[ "$#" = 1 ] && [ "$1" = "$CO_ID" ] || { : >"$CO/foreign-remove"; exit 97; }
+	case $CO_ROW in rm-failed | subshell-rm-failed) exit 23 ;; esac
+	rm "$CO/present" || exit 1
+	: >"$CO/removed"
+	;;
+*) exit 98 ;;
+esac
+EOF
+	cat >"$_co_dir/repo/scripts/dev-run.sh" <<'EOF'
+#!/bin/sh
+printf 'reached\n' >"$CO/producer"
+printf '%s\n' "$*" >"$CO/argv"
+printf '%s\n' "${BOXSET_TEST_SECRET:-}:${BOXSET_SECRET_SENTINEL:-}" >"$CO/environment"
+case $CO_ROW in clean | pre-create) ;; *) : >"$CO/present" ;; esac
+case $CO_ROW in
+missing | pre-create) ;;
+malformed) printf 'dev-run: image=sha256:short container=%s\n' "$CO_NAME" >&2 ;;
+partial) printf 'dev-run: image=%s inputs=partial container=%s\n' "$CO_IMAGE" "$CO_NAME" >&2 ;;
+*)
+	printf 'dev-run: image=%s inputs=%s timeout=600s container=%s log=none\n' "$CO_IMAGE" "$CO_ID" "$CO_NAME" >&2
+	[ "$CO_ROW" != ambiguous ] || printf 'dev-run: image=%s inputs=%s timeout=600s container=%s log=none\n' "$CO_IMAGE" "$CO_ID" "$CO_NAME" >&2
+	;;
+esac
+case $CO_ROW in clean | pre-create) ;; *) printf 'dev-run: cleanup_failed\n' >&2 ;; esac
+case $CO_SEAM in
+secret | registered) printf 'dev-run: output_overflow\n' >&2; exit 125 ;;
+precreate) printf 'dev-run: write_path_invalid\n' >&2; exit 125 ;;
+stdout) printf 'dev-run: output_failed\n' >&2; exit 125 ;;
+redaction) printf '[REDACTED]'; exit 0 ;;
+draft)
+	printf 'S5-ADMISSION-FAIL blocked=1 unlisted=0\nADMISSION-BLOCKED ADM-003: Dockerfile GO_SHA256 differs from\n'
+	printf 'S5-ADMISSION-FAIL blocked=1 unlisted=0\nADMISSION-BLOCKED ADM-003: Dockerfile GO_SHA256 differs from\n' >"$CO/repo/docs/spikes/issue-drafts/s5-admission.md"
+	exit 1 ;;
+esac
+EOF
+	chmod +x "$_co_dir/bin/docker" "$_co_dir/repo/scripts/dev-run.sh" || return 125
+	cat >"$_co_dir/cell.sh" <<'EOF'
+#!/bin/sh
+set -uf
+TMP=$CO/scratch ISO=$CO/repo FISO=$CO/repo RUNNER=$CO/repo/scripts/dev-run.sh
+MUT=$CO/repo/scripts S=synthetic FINAL_FIXTURE=1
+PASSES=0 FAILS=0 DRIVER_CLEANFAIL=0 DRIVER_REMOVING= META=0
+OBS= SETUP=0 REACHED=0 CASE_FAILED=0 PLAIN_RAN=0 PLAIN_WANT=
+: >"$TMP/unknown"; : >"$TMP/infra"; : >"$TMP/rerr"
+. "$CO/constants.sh"
+. "$CO/functions.sh"
+for _required in driver_cleanup driver_cleanup_owned driver_run_owned rg_reset plain_seen expect reason; do
+	command -v "$_required" >/dev/null 2>&1 || exit 126
+done
+trap driver_cleanup EXIT
+trap 'exit 125' HUP INT TERM
+s5_install() { return 0; }
+rg_reset
+case $CO_ROW in append-failed) mkdir "$TMP/owned.list" ;; esac
+case $CO_SEAM in
+secret) secret_run -w output_overflow synthetic -- sh -c 'synthetic'; _call=$?; plain_target output_overflow ;;
+stdout) . "$CO/stdout.sh"; _call=0 ;;
+redaction) a_redaction "$RUNNER"; _call=$? ;;
+draft) a_final_failure_draft synthetic; _call=$? ;;
+registered) rrp -w output_overflow "$ISO" "$RUNNER" -- true; _call=$? ;;
+precreate) rrp -w write_path_invalid "$ISO" "$RUNNER" -- true; _call=$? ;;
+esac
+printf '%s:%s:%s:%s\n' "$RS" "$_call" "$SETUP" "$REACHED" >"$CO/primary"
+cp_status=0
+cat "$TMP/rerr" >"$CO/runner.err" || cp_status=1
+if [ -f "$TMP/owned.list" ]; then cat "$TMP/owned.list" >"$CO/registered"; else : >"$CO/registered"; fi
+[ "$cp_status" = 0 ] || exit 126
+case $CO_ROW in
+signal) sh -c 'kill -TERM "$PPID"' ;;
+exit-failed) exit 7 ;;
+replacement) : >"$CO/replaced" ;;
+esac
+# A callback's failure from a command substitution must reach its parent latch,
+# as in the existing late-failure wrapper; RS remains the producer's status.
+case $CO_ROW in subshell | subshell-rm-failed)
+	_nested=$(driver_cleanup_owned); _nested_status=$?
+	if [ "$_nested_status" != 0 ]; then DRIVER_CLEANFAIL=1; FAILS=1; fi
+	;;
+esac
+if [ "$SETUP" != 0 ] || [ "$_call" != 0 ]; then FAILS=1; fi
+. "$CO/terminal.sh"
+EOF
+	# The constants and terminal block are literal source, not a second verdict.
+	grep -E '^(RUNNER_STARTED_RE|INFRA_RE|CTRL_FATAL_RE)=' "$SELF" >"$_co_dir/constants.sh" || return 125
+	_co_anchor='if ! driver_cleanup_owned; then'
+	[ "$(grep -Fxc "$_co_anchor" "$SELF")" = 1 ] || return 125
+	awk -v anchor="$_co_anchor" '$0 == anchor { body=1 } body' "$SELF" >"$_co_dir/terminal.sh" || return 125
+	cp "${4:-$TMP/completion-stdout.sh}" "$_co_dir/stdout.sh" || return 125
+	env -i LC_ALL=C CO=$_co_dir CO_ROW=$2 CO_SEAM=$1 CO_ID=$(printf '%064d' 1) CO_RUN=0123456789abcdef CO_NAME=boxset-dev-run-0123456789abcdef CO_IMAGE=sha256:$(printf '%064d' 2) PATH=$_co_dir/bin sh "$_co_dir/cell.sh" >"$_co_dir/out" 2>"$_co_dir/err"
+	_co_status=$?
+	printf '%s\n' "$_co_status" >"$_co_dir/exit"
+	_co_present=0 _co_registered=0 _co_evidence=0 _co_bad=0
+	[ ! -f "$_co_dir/present" ] || _co_present=1
+	[ ! -s "$_co_dir/registered" ] || _co_registered=1
+	if [ -d "$_co_dir/scratch" ] && [ -s "$_co_dir/scratch/rerr" ] && grep -Fxq "dev-run-test: diagnostics_retained=$_co_dir/scratch" "$_co_dir/err"; then _co_evidence=1; fi
+	[ ! -e "$_co_dir/foreign-remove" ] || _co_bad=1
+	if [ -d "$_co_dir/scratch" ] && [ "$_co_evidence" != 1 ]; then _co_bad=1; fi
+	printf '%s:pass%s:present%s:registered%s:evidence%s:bad%s:primary%s:oracle%s:reached%s' "$_co_status" "$(grep -c '^DEV-RUN-TEST-PASS ' "$_co_dir/out")" "$_co_present" "$_co_registered" "$_co_evidence" "$_co_bad" "$(cut -d: -f1 "$_co_dir/primary")" "$(cut -d: -f2 "$_co_dir/primary")" "$(grep -Fxc reached "$_co_dir/producer")"
+}
+completion_self_check() {
+	# Multi-line bodies use the existing unique extractor; one-line helpers are
+	# copied separately so extraction cannot consume their following function.
+	cleanup_extract "$TMP/completion-functions.sh" "$SELF" driver_owned driver_run_owned driver_remove driver_cleanup_owned driver_cleanup rrx rrp rr plain_target plain_declare plain_seen rerr_seen rg_reset rg_verdict pass fail expect reason secret_run a_redaction a_final_failure_draft || return 1
+	for _co_fn in cname reached infra_failure; do
+		[ "$(grep -c "^$_co_fn() {.*}" "$SELF")" = 1 ] || return 1
+		grep "^$_co_fn() {.*}" "$SELF" >>"$TMP/completion-functions.sh" || return 1
+	done
+	_co_start='(cd "$ISO" && "$RUNNER" -- sh -c '\''printf out; sleep 1; printf more'\'') >/dev/full 2>"$TMP/rerr"'
+	[ "$(grep -Fxc "$_co_start" "$SELF")" = 1 ] || return 1
+	awk -v start="$_co_start" '$0 == start { body=1 } body { if ($0 ~ /^a_redaction\(\)/) exit; print }' "$SELF" >"$TMP/completion-stdout.sh" || return 1
+	for _co_seam in secret stdout redaction draft; do
+		case $_co_seam in secret | stdout) _co_primary=125 ;; redaction) _co_primary=0 ;; draft) _co_primary=1 ;; esac
+		for _co_row in retained clean; do
+			case $_co_row in retained) _co_reg=1 ;; clean) _co_reg=0 ;; esac
+			expect "completion $_co_seam $_co_row binds ownership before aggregate success" "$(completion_fixture "$_co_seam" "$_co_row" "$TMP/completion-functions.sh")" "0:pass1:present0:registered$_co_reg:evidence0:bad0:primary$_co_primary:oracle0:reached1"
+		done
+		for _co_row in missing malformed partial ambiguous query-failed append-failed partial-validator substituted replacement rm-failed absence-failed subshell subshell-rm-failed signal exit-failed; do
+			_co_exit=1 _co_pass=0 _co_present=1 _co_reg=0 _co_evidence=1 _co_oracle=1
+			[ "$_co_seam" != stdout ] || _co_oracle=0
+			case $_co_row in
+			partial-validator) _co_reg=1 ;;
+			replacement | rm-failed | subshell-rm-failed) _co_reg=1 _co_oracle=0 ;;
+			absence-failed) _co_reg=1 _co_present=0 _co_oracle=0 ;;
+			subshell) _co_exit=0 _co_pass=1 _co_reg=1 _co_present=0 _co_evidence=0 _co_oracle=0 ;;
+			signal) _co_exit=125 _co_reg=1 _co_present=0 _co_oracle=0 ;;
+			exit-failed) _co_exit=7 _co_reg=1 _co_present=0 _co_oracle=0 ;;
+			esac
+			expect "completion $_co_seam $_co_row preserves uncertainty and terminal accounting" "$(completion_fixture "$_co_seam" "$_co_row" "$TMP/completion-functions.sh")" "$_co_exit:pass$_co_pass:present$_co_present:registered$_co_reg:evidence$_co_evidence:bad0:primary$_co_primary:oracle$_co_oracle:reached1"
+		done
+		_co_mut=$TMP/completion-$_co_seam-functions-mutant.sh
+		_co_stdout=$TMP/completion-stdout.sh
+		cp "$TMP/completion-functions.sh" "$_co_mut" || return 1
+		if [ "$_co_seam" = stdout ]; then
+			cp "$_co_stdout" "$TMP/completion-stdout-mutant.sh" || return 1
+			cleanup_mutate "$TMP/completion-stdout-mutant.sh" 'driver_run_owned "$(cname)" || SETUP=1' ':' || return 1
+			_co_stdout=$TMP/completion-stdout-mutant.sh
+		else
+			case $_co_seam in secret) _co_function=secret_run ;; redaction) _co_function=a_redaction ;; draft) _co_function=a_final_failure_draft ;; esac
+			cleanup_extract "$TMP/completion-site.sh" "$SELF" "$_co_function" || return 1
+			cleanup_mutate "$TMP/completion-site.sh" '	driver_run_owned "$(cname)" || { SETUP=1; return 1; }' ':' || return 1
+			cat "$TMP/completion-site.sh" >>"$_co_mut" || return 1
+		fi
+		expect "completion $_co_seam omitted-registration mutant yields attributable residual and false PASS" "$(completion_fixture "$_co_seam" retained "$_co_mut" "$_co_stdout")" "0:pass1:present1:registered0:evidence0:bad0:primary$_co_primary:oracle0:reached1"
+		expect "completion $_co_seam restored registration returns GREEN" "$(completion_fixture "$_co_seam" retained "$TMP/completion-functions.sh")" "0:pass1:present0:registered1:evidence0:bad0:primary$_co_primary:oracle0:reached1"
+	done
+	expect "completion existing registered capture keeps its accounting" "$(completion_fixture registered retained "$TMP/completion-functions.sh")" '0:pass1:present0:registered1:evidence0:bad0:primary125:oracle0:reached1'
+	expect "completion positive pre-create refusal needs no invented child identity" "$(completion_fixture precreate pre-create "$TMP/completion-functions.sh")" '0:pass1:present0:registered0:evidence0:bad0:primary125:oracle0:reached1'
+}
 classifier_self_check() {
 	META=1
 	: >"$TMP/sc-mut"
@@ -1536,6 +2429,11 @@ classifier_self_check() {
 	caught_self_check
 	transport_self_check
 	oracle_self_check
+	cleanup_self_check || fail "cleanup fixture setup" "cleanup controls did not complete"
+	cleanup_setup_self_check
+	cleanup_late_self_check
+	observer_self_check || fail "observer fixture setup" "observer controls did not complete"
+	completion_self_check || fail "completion fixture setup" "completion controls did not complete"
 }
 
 tree_hash() { # hash of the isolated checkout outside the write roots
@@ -1589,7 +2487,8 @@ bg_ctr() {
 	while [ "$_i" -lt 900 ]; do
 		_c=$(grep -o 'container=boxset-dev-run-[0-9a-f]\{16\}' "$TMP/$1.err" 2>/dev/null | head -n 1 | cut -d= -f2)
 		if [ -n "$_c" ]; then
-			printf '%s\n' "$_c" >>"$TMP/owned.list"
+			cp "$TMP/$1.err" "$TMP/rerr" || { SETUP=1; return 1; }
+			driver_run_owned "$_c" || { SETUP=1; return 1; }
 			printf '%s' "$_c"
 			return 0
 		fi
@@ -1644,6 +2543,8 @@ bg_end() { # bg_end NAME: wait for the background runner, sets RS and copies its
 	cp "$TMP/$1.out" "$TMP/rout"
 	cp "$TMP/$1.err" "$TMP/rerr"
 	rerr_seen
+	_be_name=$(cname)
+	[ -z "$_be_name" ] || driver_run_owned "$_be_name" || SETUP=1
 }
 # The in-container barrier: announce, then wait for the host's release.
 CBAR='touch /tmp/ready; n=0; while [ ! -e /tmp/go ] && [ "$n" -lt 900 ]; do sleep 1; n=$((n + 1)); done'
@@ -1660,18 +2561,23 @@ fi
 
 # --- isolated checkout of the current allowlisted inputs ----------------------------------
 list=
-for p in deploy scripts .dockerignore go.mod go.sum .golangci.yml internal bench testdata web docs/spikes docs/adr; do
+for p in deploy scripts .dockerignore go.mod go.sum .golangci.yml cmd internal bench testdata web docs/spikes docs/adr; do
 	[ -e "$p" ] && list="$list $p"
 done
-mkdir -p "$ISO" "$CANARY"
+mkdir -p "$ISO" "$CANARY" || exit 125
 # shellcheck disable=SC2086
-tar -cf - --exclude=web/node_modules --exclude=web/.svelte-kit --exclude=web/build \
-	--exclude=docs/spikes/data --exclude=docs/spikes/issue-drafts --exclude=testdata/parser $list | tar -xf - -C "$ISO"
-mkdir -p "$ISO/prototypes" "$ISO/design" "$ISO/.devrites/work/boxset-test"
-printf 'OWNER_SECRET_CANARY=do-not-leak\n' >"$ISO/.env"
-printf 'canary\n' >"$ISO/prototypes/canary.txt"
-printf 'canary\n' >"$ISO/design/canary.txt"
-printf 'outside canary\n' >"$CANARY/canary.txt"
+if ! tar -cf "$TMP/inputs.tar" --exclude=web/node_modules --exclude=web/.svelte-kit --exclude=web/build \
+	--exclude=docs/spikes/data --exclude=docs/spikes/issue-drafts --exclude=testdata/parser $list ||
+	! tar -xf "$TMP/inputs.tar" -C "$ISO"; then
+	printf 'dev-run-test: isolated input copy failed\n' >&2
+	exit 125
+fi
+rm "$TMP/inputs.tar" || exit 125
+mkdir -p "$ISO/prototypes" "$ISO/design" "$ISO/.devrites/work/boxset-test" || exit 125
+printf 'OWNER_SECRET_CANARY=do-not-leak\n' >"$ISO/.env" || exit 125
+printf 'canary\n' >"$ISO/prototypes/canary.txt" || exit 125
+printf 'canary\n' >"$ISO/design/canary.txt" || exit 125
+printf 'outside canary\n' >"$CANARY/canary.txt" || exit 125
 ctl_begin
 expect "runner copy is SHA-256 identical" "$(fhash "$SRC/scripts/dev-run.sh")" "$(fhash "$ISO/scripts/dev-run.sh")"
 REV=$(grep '^ARG PLAYWRIGHT_CHROMIUM_REVISION=' "$ISO/deploy/dev/Dockerfile")
@@ -1700,6 +2606,8 @@ expect "dev-run prints image, inputs, timeout and container identity" "$(grep -E
 # reason word, so neither a child's own 124 nor the deadline carries a word: both are the identity line alone.
 rr -s 124 --timeout 1 -- sh -c 'exit 124'
 expect "child exit 124 before the deadline propagates" "$RS" 124
+# the deadline is observed, not just accepted: this run's own identity line reports the deadline it was issued with
+expect "--timeout 1 is the deadline the issued identity line reports" "$(grep -Ec '^dev-run: image=sha256:[0-9a-f]{64} inputs=[0-9a-f]{64} timeout=1s container=boxset-dev-run-[0-9a-f]{16} log=none$' "$TMP/rerr")" 1
 noreason "child exit 124 is not reported as a timeout" timeout
 # The image's /bin/sh is dash and the child is PID 1 of its namespace, which no member of that namespace can signal: a PID 1 `kill -KILL $$` exits 0.
 # The killed process is therefore a nested shell.
@@ -1841,8 +2749,8 @@ expect "canary directory untouched by refusals" "$(find "$CANARY" | LC_ALL=C sor
 rm -rf "$DRAFTDIR"
 
 # owned removal: a checked removal that fails ends the run cleanup_failed after the child ran; the mutant ignores that failure
-variant fault-rm 'timeout 60 docker rm -f "$CTR" >/dev/null 2>&1 || die cleanup_failed' 'false || die cleanup_failed'
-variant mut-cleanup-ignored 'timeout 60 docker rm -f "$CTR" >/dev/null 2>&1 || die cleanup_failed' 'false || :'
+variant fault-rm 'remove_container "$CID" "$CTR" || { CLEANFAIL=1; [ "$CHILD" != 0 ] && die cleanup_failed "$CHILD"; die cleanup_failed; }' 'false || { CLEANFAIL=1; die cleanup_failed; }'
+variant mut-cleanup-ignored 'remove_container "$CID" "$CTR" || { CLEANFAIL=1; [ "$CHILD" != 0 ] && die cleanup_failed "$CHILD"; die cleanup_failed; }' 'false || :'
 a_rm_fault() { # holds when a failed checked removal ends the run cleanup_failed
 	rrx "$ISO" "$1" -- true
 	_cn=$(cname)
@@ -1876,6 +2784,7 @@ secret_run() { # secret_run [-w WORD] [-s STATUS] VALUE ARGS...: parent secret v
 	rg_reset
 	(cd "$ISO" && BOXSET_TEST_SECRET=$_v "$RUNNER" "$@") >"$TMP/rout" 2>"$TMP/rerr"
 	RS=$?
+	driver_run_owned "$(cname)" || { SETUP=1; return 1; }
 	plain_seen "$_srw" "$_srs"
 }
 secret_run "$S" -- sh -c 'printf %s "$1"' x "$S"
@@ -1909,8 +2818,15 @@ plain_late_failure_control() {
 		_plc=$(cat "$TMP/rout")
 		{ [ "$_plc" = 'x[REDACTED]y' ] && [ "$RS" = 125 ] && grep -Fq 'dev-run: cleanup_failed' "$TMP/rerr"; } && printf 'PREMISE\n'
 		pass "a two-byte secret is masked (late cleanup failure)"
-		docker rm -f "$(cname)" >/dev/null 2>&1
+		driver_run_owned "$(cname)" && driver_cleanup_owned || { printf 'dev-run-test: cleanup_failed\n' >&2; exit 125; }
 	)
+	_pl_status=$?
+	if [ "$_pl_status" != 0 ]; then
+		DRIVER_CLEANFAIL=1
+		fail "plain late-failure cleanup" "ownership or cleanup failed with status $_pl_status"
+		META=0
+		return 1
+	fi
 	META=1
 	expect "plain late-failure control: the premise holds (correct redacted bytes, final status 125 cleanup_failed, from the real provider)" "$(printf '%s\n' "$_plo" | grep -Fxc PREMISE)" 1
 	expect "plain late-failure control: the credit of those correct bytes is refused because the final status is not the intended 0" "$(printf '%s\n' "$_plo" | grep -Fxc 'ok - a two-byte secret is masked (late cleanup failure)')" 0
@@ -1942,12 +2858,14 @@ gone "$(cname)" "flooding child's container is gone"
 rg_reset
 (cd "$ISO" && "$RUNNER" -- sh -c 'printf out; sleep 1; printf more') >/dev/full 2>"$TMP/rerr"
 RS=$?
+driver_run_owned "$(cname)" || SETUP=1
 plain_seen output_failed
 expect "stdout to /dev/full is output_failed" "$RS" 125
 reason "write failure reason" output_failed
 a_redaction() { # holds when the child's secret never reaches the output
 	(cd "$ISO" && BOXSET_TEST_SECRET=$S "$1" -- sh -c 'printf %s "$1"' x "$S") >"$TMP/rout" 2>"$TMP/rerr"
 	RS=$?
+	driver_run_owned "$(cname)" || { SETUP=1; return 1; }
 	rerr_seen
 	OBS="output '$(head -c 80 "$TMP/rout")'"
 	[ "$RS" = 0 ] && [ -s "$TMP/rout" ] && reached
@@ -1985,13 +2903,15 @@ for v in PATH HOME TMPDIR LANG LC_ALL GOFLAGS GOPROXY GOTOOLCHAIN PLAYWRIGHT_BRO
 done
 
 # nested secret-shaped files never enter the image
-mkdir -p "$ISO/web/src" "$ISO/internal/x" "$ISO/bench" "$ISO/testdata"
+fiso nested-secret
+mkdir -p "$FISO/web/src" "$FISO/internal/x" "$FISO/bench" "$FISO/testdata" || exit 125
 for f in web/.env web/.env.local web/src/.env.production internal/x/.env bench/k.pem testdata/.npmrc; do
-	printf 'NESTED_SENTINEL_%s=zz\n' "$(printf '%s' "$f" | tr '/.' '__')" >"$ISO/$f"
+	[ ! -e "$FISO/$f" ] && [ ! -L "$FISO/$f" ] || exit 125
+	printf 'NESTED_SENTINEL_%s=zz\n' "$(printf '%s' "$f" | tr '/.' '__')" >"$FISO/$f" || exit 125
 done
-rr -- sh -c 'test -z "$(find /src \( -name ".env" -o -name ".env.*" -o -name "*.pem" -o -name "*.key" -o -name ".npmrc" -o -name ".netrc" \) -not -path "*/node_modules/*" -print)" && ! grep -rqs --exclude-dir=node_modules NESTED_SENTINEL /src'
+rrp "$FISO" "$FISO/scripts/dev-run.sh" -- sh -c 'test -z "$(find /src \( -name ".env" -o -name ".env.*" -o -name "*.pem" -o -name "*.key" -o -name ".npmrc" -o -name ".netrc" \) -not -path "*/node_modules/*" -print)" && ! grep -rqs --exclude-dir=node_modules NESTED_SENTINEL /src'
 expect "nested web/.env, web/.env.local, web/src/.env.production, internal/x/.env, bench/k.pem and testdata/.npmrc never enter the image" "$RS" 0
-rm -rf "$ISO/web/src" "$ISO/internal/x" "$ISO/bench/k.pem" "$ISO/web/.env" "$ISO/web/.env.local" "$ISO/testdata"
+rm -rf "$FISO" || exit 125
 rr -- sh -c 'test ! -e /var/run/docker.sock && ! command -v node >/dev/null && ! command -v docker >/dev/null && test ! -e /src/.env && test ! -e /src/reference && test ! -e /src/prototypes && test ! -e /src/design && test ! -e /src/.devrites && test ! -e /src/scripts/dev-run.sh && test ! -e /src/scripts/dev-run-test.sh && ! grep -rqs --exclude-dir=node_modules OWNER_SECRET_CANARY /src'
 expect "no Node, Docker socket, .env, reference, prototypes, workspaces or runner/driver in the image" "$RS" 0
 rr -- sh -c 'test -x /usr/local/libexec/boxset/capture-check && test ! -e /usr/local/bin/redact && test ! -e /usr/local/libexec/boxset/redact && test ! -e /src/redact'
@@ -2002,7 +2922,25 @@ expect "image holds only chromium_headless_shell and no full Chrome directory" "
 # failing builds and start diagnostics are redacted tails
 fiso fault-build
 # the injected failing step prints its flood first and a credential-bearing URL line last, so the bounded tail still holds the line the redactor must mask
-printf '\nRUN head -c 100000 /dev/zero | tr "\\0" x >&2; printf "\\nhttps://user:pw@h.example/x?token=tt\\n" >&2; exit 1\n' >>"$FISO/deploy/dev/Dockerfile"
+printf '\nRUN head -c 100000 /dev/zero | tr "\\0" x >&2; printf "\\nhttps://user:pw@h.example/x?token=tt\\n" >&2; exit 1\n' >"$TMP/fault-build.run" || exit 125
+if ! awk -v fault="$TMP/fault-build.run" '
+	/^FROM / {
+		if (work) {
+			while ((read_status = getline line < fault) > 0) print line
+			if (read_status < 0) exit 1
+			close(fault)
+			inserted++
+		}
+		work = ($0 == "FROM dev AS work")
+		if (work) stages++
+	}
+	{ print }
+	END { if (stages != 1 || inserted != 1) exit 1 }
+' "$FISO/deploy/dev/Dockerfile" >"$TMP/fault-build.Dockerfile"; then
+	printf 'dev-run-test: work stage fixture setup failed\n' >&2
+	exit 125
+fi
+mv "$TMP/fault-build.Dockerfile" "$FISO/deploy/dev/Dockerfile" || exit 125
 rg_reset
 (cd "$FISO" && BOXSET_TEST_SECRET=zz-build-secret "$FISO/scripts/dev-run.sh" -- true) >"$TMP/rout" 2>"$TMP/xerr"
 RS=$?
@@ -2040,6 +2978,137 @@ rr -w capture_flag_invalid --capture ".devrites/work/boxset-test/screenshots-202
 if [ "$RS" = 125 ] && grep -Fq 'dev-run: capture_flag_invalid' "$TMP/rerr"; then pass "duplicate --capture refused"; else fail "duplicate capture" "status $RS"; fi
 rr -w bench_invalid --bench 0-3 -- true
 if [ "$RS" = 125 ] && grep -Fq 'dev-run: bench_invalid side=write' "$TMP/rerr"; then pass "--bench without --write is refused before Docker"; else fail "bench" "status $RS"; fi
+# bench_run [-w WORD] ARGS...: rrp against the isolated checkout with the benchmark configuration stage pinned empty, so a lost benchmark
+# refusal stops there instead of at the image build and a RED stays one cheap refusal.
+bench_run() {
+	_bkw=
+	while :; do
+		case ${1:-} in
+		-w | -s)
+			_bkw="$_bkw $1 $2"
+			shift 2
+			;;
+		*) break ;;
+		esac
+	done
+	# shellcheck disable=SC2086
+	rrp $_bkw "$ISO" env BOXSET_BENCH_CONFIG= "$RUNNER" "$@"
+}
+# bench_data_refusal NAME: this case's own run stopped before Docker as bench_invalid side=data and never side=write.
+bench_data_refusal() {
+	if [ "$RS" = 125 ] && grep -Fq 'dev-run: bench_invalid side=data' "$TMP/rerr" && ! grep -Fq 'bench_invalid side=write' "$TMP/rerr" && ! grep -Eq "$RUNNER_STARTED_RE" "$TMP/rerr"; then
+		pass "$1"
+	else
+		fail "$1" "status $RS, $(head -c 200 "$TMP/rerr")"
+	fi
+}
+# --timeout is whole seconds: up to 600 s on every run, above that only with --bench and never above 3600. The deadline rule is decided
+# before the benchmark block whatever else the invocation asks for, so a malformed form is refused even inside a well-formed benchmark
+# invocation. An accepted deadline is proved by the next stage's own word, never by a pass.
+rr -w write_path_invalid --write testdata/parser --timeout 600 -- true
+if [ "$RS" = 125 ] && grep -Fq 'dev-run: write_path_invalid' "$TMP/rerr" && ! grep -Fq 'dev-run: timeout_invalid' "$TMP/rerr"; then
+	pass "--timeout 600 is accepted without --bench (the later write path is the refusal)"
+else
+	fail "--timeout 600 without --bench" "status $RS, $(head -c 200 "$TMP/rerr")"
+fi
+bench_run -w bench_unavailable --bench 0 --write docs/spikes/data/bench-20260101T000000Z/samples --timeout 3600 -- true
+if [ "$RS" = 125 ] && grep -Fq 'dev-run: bench_unavailable side=config' "$TMP/rerr" && ! grep -Fq 'dev-run: timeout_invalid' "$TMP/rerr"; then
+	pass "--timeout 3600 is accepted with --bench (the next stage is the benchmark configuration)"
+else
+	fail "--timeout 3600 with --bench" "status $RS, $(head -c 200 "$TMP/rerr")"
+fi
+rr -w timeout_invalid --write testdata/parser --timeout 601 -- true
+if [ "$RS" = 125 ] && grep -Fq 'dev-run: timeout_invalid' "$TMP/rerr" && ! grep -Eq "$RUNNER_STARTED_RE" "$TMP/rerr"; then
+	pass "--timeout 601 is refused without --bench"
+else
+	fail "--timeout 601 without --bench" "status $RS, $(head -c 200 "$TMP/rerr")"
+fi
+for t in '' 0 007 0600 60a 3601; do
+	bench_run -w timeout_invalid --bench 0 --write docs/spikes/data/bench-20260101T000000Z/samples --timeout "$t" -- true
+	if [ "$RS" = 125 ] && grep -Fq 'dev-run: timeout_invalid' "$TMP/rerr" && ! grep -Eq "$RUNNER_STARTED_RE" "$TMP/rerr"; then
+		pass "--timeout '$t' is refused as timeout_invalid before Docker"
+	else
+		fail "--timeout '$t'" "status $RS, $(head -c 200 "$TMP/rerr")"
+	fi
+done
+# --bench-data is exactly the work child of this invocation's own --write run: refused before Docker as bench_invalid side=data — never
+# side=write — and refused without --bench whatever else the invocation gets wrong. The link form points at the canary, so the canary's
+# own listing is compared with the checkout's: the refusals change nothing on either.
+bdata=docs/spikes/data
+bbefore=$(tree_hash)
+cbefore=$(find "$CANARY" | LC_ALL=C sort | tr '\n' ' ')
+bench_run -w bench_invalid --bench-data "$bdata/bench-20260101T000001Z/work" --write "$bdata/bench-20260101T000001Z/samples" -- true
+bench_data_refusal "--bench-data without --bench is refused as side=data, not side=write"
+bench_run -w bench_invalid --bench 0 --write "$bdata/bench-20260101T000002Z/samples" --bench-data /tmp/bench-work -- true
+bench_data_refusal "--bench-data with an absolute path is refused as side=data"
+bench_run -w bench_invalid --bench 0 --write "$bdata/bench-20260101T000003Z/samples" --bench-data "$bdata/bench-20260101T000003Z/../bench-20260101T000003Z/work" -- true
+bench_data_refusal "--bench-data holding .. is refused as side=data"
+bench_run -w bench_invalid --bench 0 --write "$bdata/bench-20260101T000004Z/samples" --bench-data "$bdata/bench-20260101T000004Z/work" --bench-data "$bdata/bench-20260101T000004Z/work" -- true
+bench_data_refusal "a repeated --bench-data is refused as side=data"
+# the work child of another stamp than this invocation's own --write run: the one case only the same-stamp rule refuses
+bench_run -w bench_invalid --bench 0 --write "$bdata/bench-20260101T000010Z/samples" --bench-data "$bdata/bench-20260101T000011Z/work" -- true
+bench_data_refusal "--bench-data of another stamp than --write is refused as side=data"
+mkdir -p "$ISO/$bdata" || exit 125
+mkdir "$ISO/$bdata/bench-20260101T000020Z" || exit 125
+ln -s "$CANARY" "$ISO/$bdata/bench-20260101T000020Z/work" || exit 125
+bench_run -w bench_invalid --bench 0 --write "$bdata/bench-20260101T000020Z/samples" --bench-data "$bdata/bench-20260101T000020Z/work" -- true
+bench_data_refusal "--bench-data that is a link is refused as side=data"
+rm -f "$ISO/$bdata/bench-20260101T000020Z/work" || exit 125
+rmdir "$ISO/$bdata/bench-20260101T000020Z" || exit 125
+mkdir "$ISO/$bdata/bench-20260101T000021Z" || exit 125
+bench_run -w bench_invalid --bench 0 --write "$bdata/bench-20260101T000021Z/samples" --bench-data "$bdata/bench-20260101T000021Z/work" -- true
+bench_data_refusal "--bench-data under an already-existing run directory is refused as side=data"
+rmdir "$ISO/$bdata/bench-20260101T000021Z" || exit 125
+rmdir "$ISO/$bdata" || exit 125
+# the same-stamp rule is discriminating: a copy with only that refusal removed runs on into the benchmark configuration
+a_benchdata_stamp() { # holds when the work child of another stamp is refused as bench_invalid side=data
+	rrx "$ISO" env BOXSET_BENCH_CONFIG= "$1" --bench 0 --write "$bdata/bench-20260101T000010Z/samples" --bench-data "$bdata/bench-20260101T000011Z/work" -- true
+	OBS="status $RS, $(head -c 120 "$TMP/rerr" | tr '\n' ' ')"
+	{ [ "$RS" = 125 ] && ! grep -Eq "$RUNNER_STARTED_RE" "$TMP/rerr" && grep -Eq 'dev-run: bench_(invalid|unavailable)' "$TMP/rerr"; } && reached
+	[ "$RS" = 125 ] && grep -Fq 'dev-run: bench_invalid side=data' "$TMP/rerr"
+}
+variant mut-benchdata-stamp '[ "${BENCHDATA%/work}" = "$BENCHRUN" ]' true
+redgreen "bench-data of another stamp" a_benchdata_stamp "$MUT/mut-benchdata-stamp.sh" "$RUNNER"
+# a link at an ancestor of --bench-data, never at the leaf: the run's own path is walked component by component, so a linked
+# docs/spikes/data is refused as side=data here, before Docker. The leaf-link row above cannot discriminate that walk: its run
+# directory already exists, so the fresh-run rule speaks first, and the walk could be inert without changing that row's outcome.
+a_benchdata_ancestor() { # holds when a linked docs/spikes/data stops the run as bench_invalid side=data before Docker
+	ln -s "$CANARY" "$ISO/$bdata" || {
+		OBS="the ancestor link was not created"
+		return 1
+	}
+	rrx "$ISO" env BOXSET_BENCH_CONFIG= "$1" --bench 0 --write "$bdata/bench-20260101T000030Z/samples" --bench-data "$bdata/bench-20260101T000030Z/work" -- true
+	rm -f "$ISO/$bdata"
+	OBS="status $RS, $(head -c 120 "$TMP/rerr" | tr '\n' ' ')"
+	{ [ "$RS" = 125 ] && ! grep -Eq "$RUNNER_STARTED_RE" "$TMP/rerr" && grep -Eq 'dev-run: bench_(invalid|unavailable)' "$TMP/rerr"; } && reached
+	[ "$RS" = 125 ] && grep -Fq 'dev-run: bench_invalid side=data' "$TMP/rerr" && ! grep -Fq 'dev-run: bench_invalid side=write' "$TMP/rerr"
+}
+ln -s "$CANARY" "$ISO/$bdata" || exit 125
+bench_run -w bench_invalid --bench 0 --write "$bdata/bench-20260101T000030Z/samples" --bench-data "$bdata/bench-20260101T000030Z/work" -- true
+bench_data_refusal "a link at an ancestor of --bench-data (never at the leaf) is refused as side=data"
+rm -f "$ISO/$bdata" || exit 125
+# the walk is what refuses it: a copy whose walk is inert (the shape this round repaired) runs on into the benchmark configuration
+variant mut-benchdata-ancestor 'for _c in docs docs/spikes docs/spikes/data "$BENCHRUN" "$BENCHDATA"; do' 'for _c in docs docs/docs/spikes docs/docs/spikes/data; do'
+redgreen "bench-data under a linked ancestor" a_benchdata_ancestor "$MUT/mut-benchdata-ancestor.sh" "$RUNNER"
+# the path shape of --bench-data is the pattern's refusal, not the same-stamp equality's: with the same-stamp refusal neutralised
+# (mut-benchdata-stamp) both shape rows still stop as side=data, while a copy whose pattern is permissive as well lets them run on
+# into the benchmark configuration. A mutant of the pattern line alone is invisible — the same word then comes from the same-stamp
+# rule, which refuses every row the pattern refuses.
+a_benchdata_shape() { # holds when an absolute --bench-data and one holding .. are both refused as bench_invalid side=data
+	_sf=0
+	for _sb in /tmp/bench-work "$bdata/bench-20260101T000041Z/../bench-20260101T000041Z/work"; do
+		rrx "$ISO" env BOXSET_BENCH_CONFIG= "$1" --bench 0 --write "$bdata/bench-20260101T000041Z/samples" --bench-data "$_sb" -- true
+		OBS="${OBS}[$_sb: status $RS, $(head -c 80 "$TMP/rerr" | tr '\n' ' ')]"
+		{ [ "$RS" = 125 ] && ! grep -Eq "$RUNNER_STARTED_RE" "$TMP/rerr" && grep -Eq 'dev-run: bench_(invalid|unavailable)' "$TMP/rerr"; } || { _sf=1; continue; }
+		reached
+		{ grep -Fq 'dev-run: bench_invalid side=data' "$TMP/rerr" && ! grep -Fq 'dev-run: bench_invalid side=write' "$TMP/rerr"; } || _sf=1
+	done
+	[ "$_sf" = 0 ]
+}
+variant mut-benchdata-shape 'docs/spikes/data/bench-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z/work) ;;' '*) ;;' '[ "${BENCHDATA%/work}" = "$BENCHRUN" ]' true
+redgreen "bench-data path shape (the pattern, not the same-stamp rule)" a_benchdata_shape "$MUT/mut-benchdata-shape.sh" "$RUNNER"
+holds "bench-data path shape is refused by the pattern alone" a_benchdata_shape "$MUT/mut-benchdata-stamp.sh"
+expect "--bench-data and --timeout refusals changed nothing on the host" "$(tree_hash)|$(find "$CANARY" | LC_ALL=C sort | tr '\n' ' ')" "$bbefore|$cbefore"
 mkdir -p "$TMP/shim"
 for t in sh docker id mkdir rmdir ln rm mv head tail wc cat sha256sum timeout date grep find tr od dirname; do
 	p=$(command -v "$t") && ln -sf "$p" "$TMP/shim/$t"
@@ -2058,6 +3127,67 @@ if [ "$RS" = 125 ] && grep -Fq 'dev-run: host_tool_missing' "$TMP/xerr"; then pa
 [ -d "$ISO/.devrites/work/boxset-test" ] || SETUP=1
 expect "refusals created no capture directory" "$(find "$ISO/.devrites" -mindepth 3 | wc -l | tr -d ' ')" 0
 expect "refusals changed nothing else" "$(tree_hash)" "$before"
+
+# The observation's whole-machine bound is re-read, not assumed: the kernel's task total is read after the scan, so a busy
+# machine's thread churn can leave one reading short of the bound with no task masked. The real bench_obs — and the real
+# bench_must that publishes through it — is extracted and driven with a fake date, a fake awk and a fake scan whose thread
+# count is short for the first OBS_SHORT readings, so the readings a shortfall buys are observed, not guessed.
+obs_fns() { # obs_fns: the real bench_obs, bench_must and die in $TMP/obs-fns.sh, status 1 when one could not be extracted
+	cleanup_extract "$TMP/obs-fns.sh" "$SRC/scripts/dev-run.sh" bench_obs die || return 1
+	sed -n '/^	bench_must() {$/,/^	}$/p' "$SRC/scripts/dev-run.sh" >>"$TMP/obs-fns.sh" || return 1
+	grep -q 'die bench_evidence_failed' "$TMP/obs-fns.sh"
+}
+obs_fixture() { # obs_fixture DIR SHORT: `status:lines:proc-proofs:word:line` after the real bench_must bench_obs over a scan that reads short for its first SHORT readings
+	_ob=$1
+	rm -rf "$_ob"
+	mkdir -p "$_ob/bin" "$_ob/f" || return 1
+	cat >"$_ob/bin/date" <<'DATE'
+#!/bin/sh
+printf '%s\n' 1700000000
+DATE
+	cat >"$_ob/bin/awk" <<'AWK'
+#!/bin/sh
+case $* in
+*'split($4'*) printf '%s\n' "$OBS_TOTAL" ;;
+*/proc/loadavg*) printf '%s\n' 1200 ;;
+*/proc/meminfo*) printf '%s\n' 8192 ;;
+*/proc/vmstat*) printf '%s\n' '0 0' ;;
+*) exit 1 ;;
+esac
+AWK
+	cat >"$_ob/scan" <<'SCAN'
+#!/bin/sh
+_n=$(($(cat "$OBS_DIR/scans" 2>/dev/null || printf 0) + 1))
+printf '%s\n' "$_n" >"$OBS_DIR/scans" || exit 1
+if [ "$_n" -le "$OBS_SHORT" ]; then printf '%s\n' '0-3 0 100 0'; else printf '%s\n' '0-3 0 1000 0'; fi
+SCAN
+	chmod +x "$_ob/bin/date" "$_ob/bin/awk" "$_ob/scan" || return 1
+	(
+		PATH=$_ob/bin:$PATH
+		export PATH
+		OBS_DIR=$_ob OBS_SHORT=$2 OBS_TOTAL=1020
+		export OBS_DIR OBS_SHORT OBS_TOTAL
+		. "$TMP/obs-fns.sh" || exit 200
+		bench_proc_ok() { printf 'o\n' >>"$OBS_DIR/proc"; }
+		bench_overlap() { "$_ob/scan"; }
+		bench_config() { CFG_FS=ext4; CFG_NVME=1; CFG_EMPTY=1; }
+		HAVE_BENCHDATA=0
+		(bench_must bench_obs "$_ob/f/out.obs") 2>"$_ob/err"
+		_st=$?
+		_nl=0
+		[ ! -f "$_ob/f/out.obs" ] || _nl=$(wc -l <"$_ob/f/out.obs" | tr -d ' ')
+		printf '%s:%s:%s:%s:%s\n' "$_st" "$_nl" "$(wc -l <"$_ob/proc" | tr -d ' ')" \
+			"$(head -n 1 "$_ob/err")" "$(cat "$_ob/f/out.obs" 2>/dev/null)"
+	)
+}
+ctl_begin
+if ! obs_fns; then
+	fail "observation view" "the real bench_obs, bench_must and die could not be extracted from scripts/dev-run.sh"
+else
+	expect "observation view shortfall is re-read, never assumed: a scan read short once publishes the re-read" "$(obs_fixture "$TMP/obs1" 1)" '0:1:4::1700000000 0-3 0 1200 8192 0 0 ext4 1 1 0'
+	expect "observation view shortfall is re-read, never assumed: a second re-read is the last reading, and it publishes" "$(obs_fixture "$TMP/obs2" 2)" '0:1:6::1700000000 0-3 0 1200 8192 0 0 ext4 1 1 0'
+	expect "observation view shortfall is re-read, never assumed: a shortfall at every reading still fails closed as bench_evidence_failed" "$(obs_fixture "$TMP/obs3" 3)" '125:0:6:dev-run: bench_evidence_failed:'
+fi
 
 # ===== 9. capture provider: real pinned chrome-headless-shell, no Bun, no Playwright ==============================
 HEAD_JS="B=/ms-playwright/chromium_headless_shell-$REV/chrome-headless-shell-linux64/chrome-headless-shell
@@ -2450,7 +3580,7 @@ a_compose_consumers() {
 	RS=$?
 	rerr_seen
 	_cc=$(cname)
-	[ -z "$_cc" ] || case " $OWNED " in *" $_cc "*) ;; *) OWNED="$OWNED $_cc" ;; esac
+	[ -z "$_cc" ] || driver_run_owned "$_cc" || SETUP=1
 	_co=$(cat "$TMP/rout")
 	_cdr=$(cat "$_cd/docs/spikes/issue-drafts/s5-admission.md" 2>/dev/null)
 	rm -f "$_cd/docs/spikes/issue-drafts/s5-admission.md"
@@ -2880,6 +4010,7 @@ a_final_failure_draft() { # a_final_failure_draft SCRIPT [SECRET]: exact blocked
 	find "$FISO/docs/spikes/issue-drafts" -mindepth 1 -delete
 	(cd "$FISO" && BOXSET_SECRET_SENTINEL=${2:-synthetic-not-a-credential} scripts/dev-run.sh --write docs/spikes/issue-drafts -- scripts/s5-toolchain.sh --admission) >"$TMP/rout" 2>"$TMP/rerr"
 	RS=$?
+	driver_run_owned "$(cname)" || { SETUP=1; return 1; }
 	rerr_seen
 	_d=$FISO/docs/spikes/issue-drafts/s5-admission.md
 	OBS="status $RS, draft $([ -s "$_d" ] && echo "published $(wc -c <"$_d") bytes" || echo absent)"
@@ -3180,6 +4311,9 @@ printf 'package refreshprobe\n\nconst Version = 1\n' >"$TMP/stale-context/intern
 redgreen "refresh-skipped mutant (stale build context)" a_refresh "$MUT/mut-refresh-skipped.sh" "$RUNNER"
 rm -rf "$TMP/stale-context" "$ISO/testdata" "$ISO/internal/refreshprobe"
 
+if ! driver_cleanup_owned; then
+	fail "owned resource cleanup" "cleanup_failed; diagnostics retained"
+fi
 if [ "$FAILS" -eq 0 ]; then
 	printf 'DEV-RUN-TEST-PASS controls=%s\n' "$PASSES"
 	exit 0

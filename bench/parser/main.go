@@ -28,9 +28,9 @@ import (
 	"runtime/debug"
 	"slices"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/ViktorsBaikers/Boxset/bench/internal/benchprofile"
 	"github.com/ViktorsBaikers/Boxset/internal/parse"
 	"github.com/ViktorsBaikers/Boxset/internal/parse/corpus"
 )
@@ -243,7 +243,7 @@ func measure(root, inputs, run string, rounds int, seed int64, build func() (par
 		Names: namesHash(items), Go: runtime.Version(), GOOS: runtime.GOOS, GOARCH: runtime.GOARCH,
 		CGO: orDefault(buildSetting("CGO_ENABLED"), "unknown"), Race: orDefault(buildSetting("-race"), "false"),
 		Cases: cases, Items: len(items), Rounds: rounds, Seed: seed, CompileNS: compileNS,
-		StartDate: start.Format(factsDateLayout),
+		StartDate: start.Format(benchprofile.DateLayout),
 	}
 	_, h.UTCOffset = start.Zone()
 
@@ -280,7 +280,7 @@ func measure(root, inputs, run string, rounds int, seed int64, build func() (par
 		}
 		set.Rounds = append(set.Rounds, round{R: r, Order: order, NS: ns})
 	}
-	set.Header.EndDate = now().Format(factsDateLayout)
+	set.Header.EndDate = now().Format(benchprofile.DateLayout)
 	return set, nil
 }
 
@@ -482,22 +482,22 @@ func readLine(br *bufio.Reader) ([]byte, error) {
 	case errors.Is(err, io.EOF) && len(line) == 0:
 		return nil, io.EOF
 	case errors.Is(err, io.EOF), errors.Is(err, bufio.ErrBufferFull):
-		return nil, invalid("samples_malformed")
+		return nil, benchprofile.Invalid("samples_malformed")
 	}
-	return nil, invalid("samples_unreadable")
+	return nil, benchprofile.Invalid("samples_unreadable")
 }
 
 func decodeLine(line []byte, into any) error {
-	if err := requireKeys(line, jsonKeys(reflect.TypeOf(into).Elem()), "samples"); err != nil {
+	if err := benchprofile.RequireKeys(line, benchprofile.JSONKeys(reflect.TypeOf(into).Elem()), "samples"); err != nil {
 		return err
 	}
 	dec := json.NewDecoder(bytes.NewReader(line))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(into); err != nil {
-		return invalid("samples_malformed")
+		return benchprofile.Invalid("samples_malformed")
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return invalid("samples_malformed")
+		return benchprofile.Invalid("samples_malformed")
 	}
 	return nil
 }
@@ -510,12 +510,12 @@ func noNullElements(line []byte) error {
 		NS    []json.RawMessage `json:"ns"`
 	}
 	if err := json.Unmarshal(line, &arrs); err != nil {
-		return invalid("samples_malformed")
+		return benchprofile.Invalid("samples_malformed")
 	}
 	for _, list := range [2][]json.RawMessage{arrs.Order, arrs.NS} {
 		for _, v := range list {
 			if bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
-				return invalid("samples_malformed")
+				return benchprofile.Invalid("samples_malformed")
 			}
 		}
 	}
@@ -527,9 +527,9 @@ func (h header) validShape() bool {
 		h.Items >= 1 && h.Items <= maxItems && h.Rounds >= 1 && h.Rounds <= maxRounds &&
 		h.Cases >= 1 && h.Cases <= h.Items &&
 		h.OK >= 0 && h.Unrecognized >= 0 && h.Rejected >= 0 && h.OK+h.Unrecognized+h.Rejected == h.Items &&
-		isLowerHex(h.InputsSHA, hexSHA256Len) && isLowerHex(h.CorpusSeries, hexSHA256Len) &&
-		isLowerHex(h.CorpusMovie, hexSHA256Len) && isLowerHex(h.Lock, hexSHA256Len) &&
-		isLowerHex(h.Source, hexSHA256Len) && isLowerHex(h.Names, hexSHA256Len) &&
+		benchprofile.IsLowerHex(h.InputsSHA, benchprofile.HexSHA256Len) && benchprofile.IsLowerHex(h.CorpusSeries, benchprofile.HexSHA256Len) &&
+		benchprofile.IsLowerHex(h.CorpusMovie, benchprofile.HexSHA256Len) && benchprofile.IsLowerHex(h.Lock, benchprofile.HexSHA256Len) &&
+		benchprofile.IsLowerHex(h.Source, benchprofile.HexSHA256Len) && benchprofile.IsLowerHex(h.Names, benchprofile.HexSHA256Len) &&
 		h.Run != "" && len(h.Run) <= 64 && h.Go != "" && len(h.Go) <= 64 && h.CompileNS >= 1
 }
 
@@ -540,7 +540,7 @@ func (it item) validShape() bool {
 
 // readSamples reads and structurally validates the samples.jsonl file at path.
 func readSamples(path string) (*sampleSet, error) {
-	data, _, err := readRegular(path, maxSamplesBytes, "samples")
+	data, _, err := benchprofile.ReadRegular(path, maxSamplesBytes, "samples")
 	if err != nil {
 		return nil, err
 	}
@@ -563,7 +563,7 @@ func parseSamples(data []byte) (*sampleSet, error) {
 	}
 	h := set.Header
 	if !h.validShape() {
-		return nil, invalid("samples_malformed")
+		return nil, benchprofile.Invalid("samples_malformed")
 	}
 	set.Items = make([]item, 0, h.Items)
 	for range h.Items {
@@ -576,7 +576,7 @@ func parseSamples(data []byte) (*sampleSet, error) {
 			return nil, err
 		}
 		if !it.validShape() {
-			return nil, invalid("samples_malformed")
+			return nil, benchprofile.Invalid("samples_malformed")
 		}
 		set.Items = append(set.Items, it)
 	}
@@ -594,19 +594,19 @@ func parseSamples(data []byte) (*sampleSet, error) {
 			return nil, err
 		}
 		if rd.R != r || len(rd.Order) != h.Items || len(rd.NS) != h.Items {
-			return nil, invalid("samples_malformed")
+			return nil, benchprofile.Invalid("samples_malformed")
 		}
 		clear(seen)
 		for k, idx := range rd.Order {
 			if idx < 0 || idx >= h.Items || seen[idx] || rd.NS[k] < 1 || rd.NS[k] > maxSampleNS {
-				return nil, invalid("samples_malformed")
+				return nil, benchprofile.Invalid("samples_malformed")
 			}
 			seen[idx] = true
 		}
 		set.Rounds = append(set.Rounds, rd)
 	}
 	if _, err := readLine(br); !errors.Is(err, io.EOF) {
-		return nil, invalid("samples_malformed")
+		return nil, benchprofile.Invalid("samples_malformed")
 	}
 	return set, nil
 }
@@ -614,7 +614,7 @@ func parseSamples(data []byte) (*sampleSet, error) {
 // malformedOr maps an early end of the file to a malformed verdict.
 func malformedOr(err error) error {
 	if errors.Is(err, io.EOF) {
-		return invalid("samples_malformed")
+		return benchprofile.Invalid("samples_malformed")
 	}
 	return err
 }
@@ -664,58 +664,54 @@ func verdictOf(head stats, base *stats) (code int, reason string) {
 // false) is held to the same provenance and build identity, except that it may
 // have been measured from other lock and parser sources, and from other corpora
 // (which then make it incomparable rather than invalid).
-func checkSamples(s *sampleSet, recs [3]Facts, run string, ref *reference, head bool) error {
+func checkSamples(s *sampleSet, recs [3]benchprofile.Facts, run string, ref *reference, head bool) error {
 	h := s.Header
-	date := factsUTCDate(recs[0].StartUnix)
+	date := benchprofile.FactsUTCDate(recs[0].StartUnix)
 	switch {
 	case h.Run != run:
-		return invalid("run_mismatch")
+		return benchprofile.Invalid("run_mismatch")
 	case h.InputsSHA != recs[0].Inputs:
-		return invalid("inputs_mismatch")
+		return benchprofile.Invalid("inputs_mismatch")
 	case h.Rounds != defaultRounds:
-		return invalid("rounds")
+		return benchprofile.Invalid("rounds")
 	case h.GOOS != "linux" || h.GOARCH != "amd64":
-		return invalid("platform")
+		return benchprofile.Invalid("platform")
 	case h.CGO != "0" || h.Race != "false":
-		return invalid("build")
-	case h.UTCOffset != 0 || h.StartDate != h.EndDate || h.StartDate != date || date != factsUTCDate(recs[2].EndUnix):
-		return invalid("date_rollover")
+		return benchprofile.Invalid("build")
+	case h.UTCOffset != 0 || h.StartDate != h.EndDate || h.StartDate != date || date != benchprofile.FactsUTCDate(recs[2].EndUnix):
+		return benchprofile.Invalid("date_rollover")
 	case head && (h.CorpusSeries != ref.seriesSHA || h.CorpusMovie != ref.movieSHA):
-		return invalid("corpus_changed")
+		return benchprofile.Invalid("corpus_changed")
 	case head && h.Lock != ref.lockSHA:
-		return invalid("lock_changed")
+		return benchprofile.Invalid("lock_changed")
 	case head && h.Source != ref.sourceSHA:
-		return invalid("source_changed")
+		return benchprofile.Invalid("source_changed")
 	}
-	day, err := time.Parse(factsDateLayout, h.StartDate)
+	day, err := time.Parse(benchprofile.DateLayout, h.StartDate)
 	if err != nil {
-		return invalid("date_rollover")
+		return benchprofile.Invalid("date_rollover")
 	}
 	items, cases, err := ref.items(corpus.TimeContext{Now: day.Add(12 * time.Hour), Location: time.UTC})
 	if err != nil || namesHash(items) != h.Names || h.Cases != cases || len(items) != len(s.Items) {
-		return invalid("names_changed")
+		return benchprofile.Invalid("names_changed")
 	}
 	for i, it := range items {
 		if s.Items[i].App != it.App || s.Items[i].ID != it.ID || s.Items[i].N != it.N {
-			return invalid("names_changed")
+			return benchprofile.Invalid("names_changed")
 		}
 	}
 	return nil
 }
 
 // judgeEnv is where the judge finds what it judges. The run directories are the
-// immutable image's own: imageRoot is the image's /src, whose manifest lists every
-// file it holds with its SHA-256, and uid the owner those files must have (root).
-// root locates the corpora, lock files and sources the samples must come from.
+// immutable image's own, read through the image reader it shares with the access
+// judge; root locates the corpora, the lock files and the sources the samples must
+// come from, and ref is the reference they must match.
 type judgeEnv struct {
-	root      string
-	imageRoot string
-	manifest  []byte
-	uid       uint32
-	ref       *reference
+	root string
+	img  *benchprofile.Image
+	ref  *reference
 }
-
-const imageSrc = "/src"
 
 func (e *judgeEnv) reference() (*reference, error) {
 	if e.ref == nil {
@@ -728,126 +724,29 @@ func (e *judgeEnv) reference() (*reference, error) {
 	return e.ref, nil
 }
 
-func (e *judgeEnv) runPath(run string) string {
-	return filepath.Join(e.imageRoot, "docs", "spikes", "data", run)
-}
-
-// locate maps a run directory argument to its run name: it must be exactly
-// docs/spikes/data/bench-<UTC> of the image, nothing else.
-func (e *judgeEnv) locate(runDir string) (string, error) {
-	abs, err := filepath.Abs(runDir)
-	if err != nil {
-		return "", invalid("run_location")
-	}
-	run := filepath.Base(abs)
-	if !validRunName(run) || abs != e.runPath(run) {
-		return "", invalid("run_location")
-	}
-	return run, nil
-}
-
-// immutable reports whether fi is owned by uid and cannot be written by anyone
-// else: no write bit at all, except that a directory that is not itself a record
-// parent (strict false) may be sticky, which keeps another user from replacing or
-// unlinking an entry it does not own.
-func immutable(fi os.FileInfo, uid uint32, strict bool) bool {
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok || st.Uid != uid {
-		return false
-	}
-	if fi.Mode().Perm()&0o222 == 0 {
-		return true
-	}
-	return fi.IsDir() && !strict && fi.Mode()&os.ModeSticky != 0
-}
-
-// checkParents requires every directory that could be used to replace the run's
-// files (the run directory, its samples directory and every ancestor up to the
-// image root) to be a real, root-owned, unwritable or sticky directory.
-func (e *judgeEnv) checkParents(run string) error {
-	rp := e.runPath(run)
-	data := filepath.Dir(rp)
-	spikes := filepath.Dir(data)
-	docs := filepath.Dir(spikes)
-	for _, d := range []struct {
-		path             string
-		strict, optional bool
-	}{{rp, true, false}, {filepath.Join(rp, "samples"), true, true}, {data, false, false}, {spikes, false, false}, {docs, false, false}, {e.imageRoot, false, false}} {
-		fi, err := os.Lstat(d.path)
-		switch {
-		case errors.Is(err, os.ErrNotExist) && d.optional:
-			continue
-		case errors.Is(err, os.ErrNotExist):
-			return invalid("record_missing")
-		case err != nil:
-			return invalid("record_unreadable")
-		case !fi.IsDir():
-			return invalid("run_location")
-		case !immutable(fi, e.uid, d.strict):
-			return invalid("record_mutable")
-		}
-	}
-	return nil
-}
-
-// manifestHas reports whether the image manifest lists path exactly once, with the
-// SHA-256 of data (sha256sum format: 64 hex digits, two spaces, the path).
-func manifestHas(manifest []byte, path string, data []byte) bool {
-	want := sha256Hex(data)
-	n := 0
-	for line := range bytes.Lines(manifest) {
-		line = bytes.TrimSuffix(line, []byte("\n"))
-		if len(line) > 66 && line[64] == ' ' && line[65] == ' ' && string(line[66:]) == path {
-			if string(line[:64]) != want {
-				return false
-			}
-			n++
-		}
-	}
-	return n == 1
-}
-
-// readImported reads one record of the image: a regular file that cannot be
-// written by anyone else and whose bytes are the ones the image's manifest lists
-// for its place in /src. A look-alike made outside the image is not.
-func (e *judgeEnv) readImported(path string, max int64, what string) ([]byte, error) {
-	data, fi, err := readRegular(path, max, what)
-	if err != nil {
-		return nil, err
-	}
-	if !immutable(fi, e.uid, true) {
-		return nil, invalid("record_mutable")
-	}
-	rel, err := filepath.Rel(e.imageRoot, path)
-	if err != nil || !manifestHas(e.manifest, imageSrc+"/"+filepath.ToSlash(rel), data) {
-		return nil, invalid("image_mismatch")
-	}
-	return data, nil
-}
-
 // loadRun reads one run of the image (its three records and its samples), applies
 // the eligibility rules and the structural samples checks.
-func (e *judgeEnv) loadRun(run string) (*sampleSet, [3]Facts, error) {
-	if err := e.checkParents(run); err != nil {
-		return nil, [3]Facts{}, err
+func (e *judgeEnv) loadRun(run string) (*sampleSet, [3]benchprofile.Facts, error) {
+	if err := e.img.CheckParents(run); err != nil {
+		return nil, [3]benchprofile.Facts{}, err
 	}
-	dir := e.runPath(run)
+	dir := e.img.RunPath(run)
 	var datas [3][]byte
-	for i, stage := range factStages {
-		data, err := e.readImported(filepath.Join(dir, stage+factsFileNameSuffix), maxFactBytes, "record")
+	for i, stage := range benchprofile.FactStages {
+		data, err := e.img.ReadImported(filepath.Join(dir, stage+benchprofile.FactFileNameSuffix), benchprofile.MaxFactBytes, "record")
 		if err != nil {
-			return nil, [3]Facts{}, err
+			return nil, [3]benchprofile.Facts{}, err
 		}
 		datas[i] = data
 	}
-	recs, err := decodeFactSet(datas)
+	recs, err := benchprofile.DecodeFactSet(datas)
 	if err != nil {
 		return nil, recs, err
 	}
-	if err := checkEligibility(run, recs); err != nil {
+	if err := benchprofile.CheckEligibility(run, recs); err != nil {
 		return nil, recs, err
 	}
-	data, err := e.readImported(filepath.Join(dir, "samples", samplesName), maxSamplesBytes, "samples")
+	data, err := e.img.ReadImported(filepath.Join(dir, "samples", samplesName), maxSamplesBytes, "samples")
 	if err != nil {
 		return nil, recs, err
 	}
@@ -875,17 +774,19 @@ func comparable(head, base *sampleSet) bool {
 func judge(root, runDir, baseDir, inputs string, w io.Writer) int {
 	manifest, err := readBounded(inputs, maxInputsBytes)
 	if err != nil {
-		return printInvalid(w, invalid("image_manifest"))
+		return printInvalid(w, benchprofile.Invalid("image_manifest"))
 	}
 	abs, err := filepath.Abs(root)
 	if err != nil {
-		return printInvalid(w, invalid("run_location"))
+		return printInvalid(w, benchprofile.Invalid("run_location"))
 	}
-	return judgeWith(&judgeEnv{root: root, imageRoot: abs, manifest: manifest}, runDir, baseDir, w)
+	// The child runs as uid 1000: the image's files are root's only because the image
+	// build wrote them, so a record the benchmarked process could write is not one.
+	return judgeWith(&judgeEnv{root: root, img: benchprofile.NewImage(abs, 0, manifest)}, runDir, baseDir, w)
 }
 
 func judgeWith(env *judgeEnv, runDir, baseDir string, w io.Writer) int {
-	run, err := env.locate(runDir)
+	run, err := env.img.Locate(runDir)
 	if err != nil {
 		return printInvalid(w, err)
 	}
@@ -895,7 +796,7 @@ func judgeWith(env *judgeEnv, runDir, baseDir string, w io.Writer) int {
 	}
 	ref, err := env.reference()
 	if err != nil {
-		return printInvalid(w, invalid("reference_invalid"))
+		return printInvalid(w, benchprofile.Invalid("reference_invalid"))
 	}
 	if err := checkSamples(head, recs, run, ref, true); err != nil {
 		return printInvalid(w, err)
@@ -925,7 +826,7 @@ func judgeWith(env *judgeEnv, runDir, baseDir string, w io.Writer) int {
 // the image with the same provenance and build identity as a head, or it is not a
 // base at all.
 func (e *judgeEnv) loadBase(baseDir string, ref *reference) (*sampleSet, bool) {
-	run, err := e.locate(baseDir)
+	run, err := e.img.Locate(baseDir)
 	if err != nil {
 		return nil, false
 	}
@@ -937,7 +838,7 @@ func (e *judgeEnv) loadBase(baseDir string, ref *reference) (*sampleSet, bool) {
 }
 
 func printInvalid(w io.Writer, err error) int {
-	reason, ok := invalidReason(err)
+	reason, ok := benchprofile.InvalidReason(err)
 	if !ok {
 		reason = "unreadable"
 	}

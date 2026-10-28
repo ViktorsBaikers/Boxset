@@ -5,7 +5,8 @@ with the language and release group parsing each runs) and custom-format compila
 implemented. Quality and title parsing are checked against the complete frozen fixture tables, including the series
 episode title cases (daily, absolute, anime, multi-episode, season pack, special, Unicode, title-only) in
 `internal/parse/title_series.go`, `language_series.go` and `releasegroup_series.go`. The production latency benchmark and its
-eligibility judge are implemented (see "Production latency benchmark"); no eligible measurement has been run here, so nothing in
+eligibility judge are implemented (see "Production latency benchmark"), together with the access series' timing and memory
+protocol, its data-mode (V2) record rules and both final judges; no eligible measurement has been run here, so nothing in
 this report is a performance claim, and no ARM latency claim is made.
 
 ## What exists
@@ -17,9 +18,11 @@ this report is a performance claim, and no ARM latency claim is made.
 | Fixture contract | `internal/parse/corpus/corpus.go` | Header/Case/Value schema 2, bounded JSONL `Read`/`Marshal`, dispositions (format version 1), `TimeContext.Materialize` |
 | Fixtures | `testdata/parser/series.jsonl`, `movie.jsonl`, `dispositions.json` | The asserted cases (series 1522, movie 836) and the (currently empty) owner dispositions; new cases are added by hand |
 | Emulation | `scripts/parse-emulated.sh` | Cross-compiled tests under `qemu-aarch64` and `qemu-arm` |
-| Runner | `scripts/dev-run.sh` | Fixed-user, network-less container with fixed-name draft and benchmark write maps |
-| Benchmark | `bench/parser/main.go`, `eligibility.go` | Production per-call latency CLI (`-out`) and the final judge (`-judge`); the host-evidence schema and its eligibility rules |
-| Benchmark runner | `scripts/dev-run.sh --bench CPUSET`, `scripts/dev-run-smoke.sh --benchmark-evidence` | Reference-profile child limits, read-only `/config`, host-written before/during/after records; the evidence controls |
+| Runner | `scripts/dev-run.sh` | Fixed-user, network-less container with fixed-name draft and benchmark write maps, a read-only `/config` and, in data mode, one writable data directory |
+| Benchmark profile | `bench/internal/benchprofile/profile.go` | The V1 and V2 record schemas and their strict decoders, the eligibility predicates (`CheckEligibility` for V1 host evidence, `CheckDataEligibility` for V2 data then host evidence) and the image reader both judges share |
+| Benchmark | `bench/parser/main.go` | Production per-call latency CLI (`-out`) and the final judge of V1 records (`-judge`) |
+| Access benchmark | `bench/access/main.go`, `protocol.go` | The access series' timing and memory protocol (`-out`, `-control slow`) and the final judge of V2 records (`-judge`) |
+| Benchmark runner | `scripts/dev-run.sh --bench CPUSET [--bench-data RUN/work]`, `scripts/dev-run-smoke.sh --benchmark-evidence` | Reference-profile child limits, read-only `/config`, host-written before/during/after records (V1, or V2 in data mode); the evidence controls |
 
 Licence: parser source files carry only the licence identifier GPL-3.0 and name no project.
 Dependency: `github.com/dlclark/regexp2/v2` v2.8.4, exact pin in `go.mod`/`go.sum`.
@@ -317,7 +320,7 @@ at most 32 MiB, through the redactor) and publishes it with the host's records, 
 `RUN/samples/samples.jsonl`, `RUN/before.json` (after the container exists, before it starts), `RUN/during.json` (every
 observation while it runs, once a second) and `RUN/after.json` (after it stopped). A nonzero child publishes nothing and keeps its
 status. The three records are written from the host, are not mounted into the child and cannot be written by it. Each is a single
-line of fixed numbers, enums and booleans (the schema and the rules are owned by `bench/parser/eligibility.go`): the topology of
+line of fixed numbers, enums and booleans (the schema and the rules are owned by `bench/internal/benchprofile`): the topology of
 the reserved set (counts of logical CPUs, cores, SMT siblings, NUMA nodes), the most non-benchmark user threads that were allowed
 to run, or runnable, on a reserved CPU, load, minimum available memory, the cumulative swap-in and swap-out page counters at the
 start and end of the stage, the container's memory limits and whether its cpuset was applied, and the `/config` filesystem. They
@@ -339,6 +342,46 @@ is compared only when it is itself complete, eligible and tied to its own run, i
 corpora and case inputs on linux/amd64 with 30 rounds; another lock or parser source, date or compile time does not matter, and an
 incomparable base is reported as `base=incomparable`, never compared. Measuring never prints the pass line. A published run
 is data: do not edit it, and commit it only on purpose.
+
+### Data mode and the two record versions
+
+`--bench-data "$RUN/work"` (valid only with `--bench`, and exactly the `work` child of that invocation's own fresh `--write`
+run) gives the child one writable data directory beside the unchanged read-only `/config`: after the image build the runner
+creates `$RUN` and then `$RUN/work`, keeps both device:inode pairs in memory, adds only the literal
+`BOXSET_DATA_DIR=/bench-data` to the child and binds `$RUN/work` writable there. Before the start, while the created container
+is stopped and its exact two-bind set has been read back, it streams a metadata-only tar holding exactly one entry — the
+directory `bench-data`, uid=gid=1000, mode 0700, no payload — through `docker cp -a - CTR:/`, so the trusted daemon sets the
+fresh mount root; the host then requires `$RUN/work` uid 1000, mode 0700, the same device:inode and empty. A failure of that
+step is `bench_evidence_failed`, nothing starts, and there is no fallback to a world-writable directory, a privileged child, an
+added capability, a host `chown` or a host-uid requirement.
+
+A data-mode run's records are V2: one JSON object per stage with exactly the seven top-level keys
+`{"schema":2,"stage":…,"run":…,"image":…,"inputs":…,"host":{…},"data":{…}}`. `host` carries the V1 host fields unchanged
+in name, type, range and order, so the shipped V1 predicate applies to it with no mapping; the identity keys sit on the
+envelope, not inside `host`. `data` is `{"data_fs":"ext4"|"other","data_nvme","data_writable","data_bound","data_mounted"}`,
+each boolean true only where it held at every observation of its stage: the work directory's backing filesystem and NVMe device
+(`df` and the backing-disk proof), owner uid 1000 with owner write, no group or other write and a read-write bind, the same
+device:inode under the same `$RUN` identity and empty at `before`, and the mount, read through `docker inspect` at `before` and
+`after` and through `/proc/<pid>/root/bench-data` while the child runs. No path, user, host name or inode number is recorded.
+Without `--bench-data` every record stays the V1 object.
+
+The two judges read one version each and refuse the other as `record_incomplete`: `bench/parser -judge` judges V1 records and
+`bench/access -judge` V2 records. The access judge applies the data rules before the host ones and with their own tokens —
+`data_filesystem`, `data_mount`, `data_binding` — then the shared V1 predicate, so an ineligible host keeps every token it
+always had and an eligible `/config` never stands in for data evidence. The sample sets are separate wires as well: the
+parser's `parser-latency-samples` and the access protocol's `access-timing-samples`, whose header ties it to the run, the image
+inputs, `/bench-data`, one UTC date and the producing binary (`production`, `fill-fixture` for the RSS hold, or `slow-control`
+with build tags `benchslow`).
+
+Cleanup in data mode is the recorded sequence and nothing else. Only after the measured container's checked removal, and only
+while both identities still match, a bounded same-image helper container (fixed uid 1000, `--cap-drop ALL`, `--network none`,
+`--log-driver=none`, only the `$RUN/work` bind at `/bench-data`) runs exactly
+`sh -euc 'chmod -R u+rwX /bench-data; find /bench-data -mindepth 1 -delete'` and is then removed with a checked removal; the
+host removes the now-empty `work` through its own `$RUN` and publishes the four files into the empty `$RUN`. Every exit without
+publication attempts the same identity-gated cleanup. A mismatch, a helper failure, a non-empty `work` or a container still
+present is `dev-run: bench_data_cleanup_failed` and nothing is published; the run is reported as
+`dev-run: bench_data_residual=PATH`, because a mismatch or a failed cleanup never authorizes traversing a substituted path, so
+the owner removes that reported residual.
 
 ### INVALID and its recovery
 
@@ -390,7 +433,24 @@ directories and every ancestor (31 attempts denied, bytes, owners, modes and ino
 records (one core), a run that is not in the image, a missing record, a hostile record, an oversized record, an after-state
 swapped for another stage, a record of another run, a link and an overlapping workload, a complete look-alike the child makes
 inside the data directory (its own, writable files) and one outside the image, each INVALID with exit 3 and never a pass line, and, with
-independently written valid records beside the same samples, passes.
+independently written valid records beside the same samples, passes. Its data-mode controls run on the same scratch, after the
+V1 ones: the crossing control is a real `--bench-data` invocation of the unmodified runner on this host's own `/sys` and `df`,
+with no namespace fixture, so its five data facts are the host's own — a scratch that is not NVMe ext4 is recorded with that
+false fact (`data_fs:"other"`, `data_nvme:false`) and the access judge answers `data_filesystem` — and its four published
+files, gone `work` directory and seven-key V2 records (five envelope keys, no eighth, the V1 host fields in the V1 writer's
+order, five data keys) are asserted on those bytes while the parser judge refuses them (`record_incomplete`). A second real
+run loses owner write on its `work` directory mid-run: its `before` record still holds `data_writable`, its `during` and
+`after` records must not, and the access judge answers `data_binding` for that record — the aggregation rule is only true when
+the fact held at every observation. The image is also shown to carry no live work directory, from inside the judging child,
+while the replaced-work control's leftovers sit in the tree. A separate fixture control (the private sysfs tree bound as
+`/sys` in a mount namespace of its own, a df shim naming the fixture's ext4 md0) proves the eligible-data path: `data_nvme`
+true and the access judge's `topology` or `date_rollover` over the nested `host` window; a host that denies the namespace
+reports it `unavailable`, never a pass. The
+V2 counterparts of the two date controls, five hostile V2 rows (their own `data_*`, `record_missing` and `identity_mismatch`
+tokens), the access package's own control samples (`ACCESS-BENCH-PASS`) and a slow-control set carrying the fixture's three
+delays (`ACCESS-BENCH-FAIL reason=start_budget`, its start band at 300 ms beside the key and list bands) follow; a failed child
+publishes nothing and leaves no run, and a `work` directory replaced during the run is `bench_data_cleanup_failed` with the
+substituted path never traversed, emptied or removed, the run left as the reported residual.
 
 Proof status. The deterministic eligibility, verdict and provenance checks (`TestEligibility…`, `TestLatencyGate…`) and the full
 corpus measurement with its write-failure control (`TestBenchmarkCorpus`, excluded under `-race`) are unit tests and make no

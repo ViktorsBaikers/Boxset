@@ -1,0 +1,7 @@
+.svelte-kit/
+build/
+test-results/
+project.inlang/.lix/
+project.inlang/.meta.json
+project.inlang/README.md
+project.inlang/cache/

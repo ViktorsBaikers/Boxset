@@ -2,6 +2,7 @@
 
 - **Status:** Accepted, 2026-10-15. Owner decision (q-2026-10-15-001): "Distro support for OS packages: use recorded supported-Debian/security-maintenance status for dev-image OS libraries, fonts and data; retain exact pins, licences/copyright hashes and actual compatibility; retain the twelve-month release/substantive-work rule for Go/npm dependencies, direct tools and base-image admission. No other safety, stack, Git or host-resource approval."
 - **Supersedes in part:** AC-001's twelve-month release or substantive-commit test, only for the development image's Debian OS library, font and data rows defined below. Nothing else in AC-001 changes.
+- **Amended:** 2026-10-21. Owner decision (q-2026-10-20-002, option 1): a narrow sqlc tool-admission extension of the closed direct-tool list, keeping the exact pin, publisher/source/licence, integrity, maintenance and actual-compatibility checks. sqlc is admitted as the `archive` row `sqlc` only; no other direct tool is added and no other category changes.
 
 ## Decision
 
@@ -11,7 +12,7 @@ The S5 admission report (`docs/spikes/s5-version-admission.md`) holds one row pe
 | --- | --- | --- |
 | `base-image` | image | annual: `release\|upload\|commit <immutable id> <YYYY-MM-DD> <https URL> work=<subject>/<version>` |
 | `archive-snapshot` | snapshot | provenance only: `identity <timestamp> <URL>`; never maintenance evidence |
-| `direct-tool` | archive, apt, apt-fetch: Go, Bun, golangci-lint, chrome-headless-shell, the compiler packages `gcc` and `libc6-dev`, `qemu-user`, `unzip` | annual, as above |
+| `direct-tool` | archive, apt, apt-fetch: Go, Bun, golangci-lint, sqlc, chrome-headless-shell, the compiler packages `gcc` and `libc6-dev`, `qemu-user`, `unzip` | annual, as above |
 | `go-dependency` | go | annual, as above |
 | `npm-dependency` | npm | annual, as above |
 | `os-library` | apt whose installed `Section` is `libs` | distro support |

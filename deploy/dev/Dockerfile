@@ -48,6 +48,9 @@ ADD --checksum=sha256:${BUN_SHA256} https://github.com/oven-sh/bun/releases/down
 ARG GOLANGCI_LINT_VERSION=2.14.0
 ARG GOLANGCI_LINT_SHA256=ab90aeb7b066f92a33415b638a50fe5344bbb75a0d32ad30cc248d88f81032ab
 ADD --checksum=sha256:${GOLANGCI_LINT_SHA256} https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64.tar.gz /dl/golangci-lint.tar.gz
+ARG SQLC_VERSION=1.31.1
+ARG SQLC_SHA256=497ae4fcdfa64c5b0c311ffe4c2bd991e43991e82e5367792ed78bc2dca27354
+ADD --checksum=sha256:${SQLC_SHA256} https://github.com/sqlc-dev/sqlc/releases/download/v${SQLC_VERSION}/sqlc_${SQLC_VERSION}_linux_amd64.tar.gz /dl/sqlc.tar.gz
 # Playwright's chromium-headless-shell for the admitted playwright-core
 # revision (browsers.json chromium-headless-shell revision 1248).
 ARG PLAYWRIGHT_CHROMIUM_REVISION=1248
@@ -60,14 +63,15 @@ RUN set -eu; \
     unzip -q -j /dl/bun.zip bun-linux-x64/bun -d /out/bin; \
     tar -xzf /dl/golangci-lint.tar.gz -C /out/bin --strip-components=1 \
       "golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64/golangci-lint"; \
+    tar -xzf /dl/sqlc.tar.gz -C /out/bin sqlc; \
     shell="/out/ms-playwright/chromium_headless_shell-${PLAYWRIGHT_CHROMIUM_REVISION}"; \
     mkdir -p "$shell"; \
     unzip -q /dl/chrome-headless-shell.zip -d "$shell"; \
     : > "$shell/INSTALLATION_COMPLETE"; \
     cp /usr/share/doc/unzip/copyright /out/evidence/apt-fetch/unzip.copyright; \
-    chmod 0755 /out/bin/bun /out/bin/golangci-lint
+    chmod 0755 /out/bin/bun /out/bin/golangci-lint /out/bin/sqlc
 
-# dev: Go, Bun, golangci-lint, C compiler, CA/timezone data, QEMU user
+# dev: Go, Bun, golangci-lint, sqlc, C compiler, CA/timezone data, QEMU user
 # emulation and Playwright's pinned chromium-headless-shell. Host runner/driver
 # and the Docker CLI/socket are never copied in. The proof child is the fixed
 # unprivileged user boxset 1000:1000 whatever the host UID. Everything under
@@ -224,3 +228,76 @@ RUN set -eu; \
     install -d -o 1000 -g 1000 -m 0700 /capture; \
     find /usr /etc -xtype l -delete; \
     find /usr /etc ! -type l -perm /022 -exec chmod go-w {} +
+# The generated Paraglide messages module is what `svelte-kit sync` + `svelte-check` type-check
+# against, and the runner's standalone `check` has no vite build before it: compile it here, from
+# the frozen plugin, offline, as the child's own user.
+USER boxset
+RUN cd /src/web && HOME=/home/boxset bun --bun paraglide-js compile --project ./project.inlang --outdir ./.svelte-kit/paraglide
+USER root
+
+# live: the Compose dev image (`compose.dev.yaml`, `make dev`). FROM work, so the web shell is built
+# here, in the stage, by the committed `build` script (adapter-static `rmSync`s its whole `pages`
+# directory, so this never happens in the owner tree); Compose copies that shell up into an anonymous
+# `internal/server/dist` volume. The uid-1000 targets /config, /var/cache/bun and web/.svelte-kit
+# exist here, beside the already uid-1000 web/node_modules, /go/pkg/mod and /var/cache/go-build,
+# so fresh named volumes copy up that ownership. /usr/local/share/boxset/deps is the root-owned
+# read-only dependency seed `deploy/dev/watch.ts` reads: copies of the frozen web/node_modules and Go
+# download cache (a file proxy for GOPROXY) plus the manifest stamps web.sha256 (bun version, then
+# sha256sum of web/package.json and web/bun.lock) and go.sha256 (sha256sum of go.mod and go.sum);
+# web.sha256 is also the node_modules stamp, written last.
+FROM work AS live
+USER boxset
+RUN cd /src && HOME=/home/boxset bun --cwd=web run build
+USER root
+RUN set -eu; \
+    seed=/usr/local/share/boxset/deps; \
+    mkdir -p "$seed/web" "$seed/go/cache" /config /var/cache/bun; \
+    cp -a /src/web/node_modules "$seed/web/node_modules"; \
+    cp -a /go/pkg/mod/cache/download "$seed/go/cache/download"; \
+    { bun --version; cd /src/web && sha256sum package.json bun.lock; } > "$seed/web.sha256"; \
+    { cd /src && sha256sum go.mod go.sum; } > "$seed/go.sha256"; \
+    chown -R root:root "$seed"; \
+    chmod -R go-w,a+rX "$seed"; \
+    cp "$seed/web.sha256" /src/web/node_modules/.boxset-deps.sha256; \
+    chown 1000:1000 /src/web/node_modules/.boxset-deps.sha256 /config /var/cache/bun; \
+    chmod 0700 /config
+# Source entries are directory-backed links, while generated paths stay real volume targets.
+# The dependency alias is outside the readonly checkout bind for native config imports.
+RUN set -eu; \
+    mkdir -p /checkout/source; \
+    ln -s /src/web/node_modules /checkout/node_modules; \
+    for entry in .prettierignore bun.lock e2e eslint.config.js messages package.json \
+      playwright.config.ts prettier.config.js project.inlang scripts src tsconfig.json vite.config.ts; do \
+      rm -rf "/src/web/$entry"; \
+      ln -s "/checkout/source/web/$entry" "/src/web/$entry"; \
+    done
+WORKDIR /src
+
+# binary-build / binary: `make build`. The shell is built in the stage, the production command is
+# built CGO_ENABLED=0 -trimpath and must answer GET / with the rewritten shell before the scratch
+# stage `binary` exports only /boxset (the lock-export/host-redact local-export pattern).
+FROM work AS binary-build
+USER boxset
+RUN set -eu; \
+    cd /src; \
+    HOME=/home/boxset bun --cwd=web run build; \
+    test -s internal/server/dist/200.html || { echo "binary-build: the web build produced no 200.html" >&2; exit 1; }; \
+    export GOPATH=/go GOMODCACHE=/go/pkg/mod GOCACHE=/var/cache/go-build GOTOOLCHAIN=local GOFLAGS=-mod=readonly GOPROXY=off GOENV=off; \
+    CGO_ENABLED=0 go build -trimpath -o /tmp/boxset ./cmd/boxset; \
+    go version -m /tmp/boxset | grep -q 'CGO_ENABLED=0' || { echo "binary-build: the binary was not built with CGO_ENABLED=0" >&2; exit 1; }; \
+    mkdir /tmp/data; \
+    env -i BOXSET_DATA_DIR=/tmp/data BOXSET_PORT=18484 /tmp/boxset serve & pid=$!; \
+    trap 'kill "$pid" 2>/dev/null || true' EXIT; \
+    n=0; \
+    until bun -e 'const r = await fetch("http://127.0.0.1:18484/ping"); process.exit(r.status === 200 && r.headers.get("x-boxset-state") === "ready" ? 0 : 1)' 2>/dev/null; do \
+      n=$((n + 1)); [ "$n" -lt 100 ] || { echo "binary-build: the binary never became ready" >&2; exit 1; }; sleep 0.3; \
+    done; \
+    bun -e 'const r = await fetch("http://127.0.0.1:18484/"); const t = await r.text(); process.exit(r.status === 200 && t.includes("<html") && !t.includes("__boxset_base__") ? 0 : 1)' \
+      || { echo "binary-build: GET / is not the rewritten shell" >&2; exit 1; }; \
+    bun -e 'import assert from "node:assert/strict"; import { readdirSync, readFileSync } from "node:fs"; const dir="internal/server/dist/_app/immutable/assets"; const pkg="web/node_modules/@fontsource-variable/archivo"; for (const [suffix, source] of [[".woff2","files/archivo-latin-standard-normal.woff2"],[".txt","LICENSE"]]) { const names=readdirSync(dir).filter(n=>n.endsWith(suffix)); assert.equal(names.length,1); const r=await fetch("http://127.0.0.1:18484/_app/immutable/assets/"+names[0],{headers:{"Accept-Encoding":"identity"}}); assert.equal(r.status,200); assert.deepEqual(Buffer.from(await r.arrayBuffer()),readFileSync(pkg+"/"+source)); }'; \
+    kill -TERM "$pid"; \
+    wait "$pid"; \
+    mkdir /tmp/out; \
+    cp /tmp/boxset /tmp/out/boxset
+FROM scratch AS binary
+COPY --from=binary-build /tmp/out/boxset /boxset

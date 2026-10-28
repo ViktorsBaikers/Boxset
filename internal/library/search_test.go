@@ -760,23 +760,8 @@ func TestSearchTermQuoted(t *testing.T) {
 // title nor the alias table.
 func TestSearchQueryPlan(t *testing.T) {
 	w := newSearchWorld(t)
-	ctx := t.Context()
 	w.aliases(w.addTitle("Plan Title"), nil, "plan alias")
-	var plan []string
-	err := w.db.Read(ctx, func(tx *sql.Tx) error {
-		return oracleCollectArgs(ctx, tx, "EXPLAIN QUERY PLAN "+qSearch, func(rows *sql.Rows) error {
-			var id, parent, unused int
-			var detail string
-			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
-				return err
-			}
-			plan = append(plan, detail)
-			return nil
-		}, `"plan"`, 10)
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	plan := planLines(t, w.db, qSearch, `"plan"`, 10)
 	t.Logf("plan:\n%s", strings.Join(plan, "\n"))
 	all := strings.Join(plan, "\n")
 	if n := strings.Count(all, "VIRTUAL TABLE INDEX"); n != 2 {
@@ -795,19 +780,4 @@ func TestSearchQueryPlan(t *testing.T) {
 	if !strings.Contains(all, "SEARCH a USING INTEGER PRIMARY KEY") {
 		t.Fatalf("alias rows are not reached by primary key:\n%s", all)
 	}
-}
-
-// oracleCollectArgs is oracleCollect with query arguments.
-func oracleCollectArgs(ctx context.Context, q oracleQueryer, query string, each func(*sql.Rows) error, args ...any) error {
-	rows, err := q.QueryContext(ctx, query, args...)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		if err := each(rows); err != nil {
-			return err
-		}
-	}
-	return rows.Err()
 }

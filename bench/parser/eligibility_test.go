@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ViktorsBaikers/Boxset/bench/internal/benchprofile"
 )
 
 const (
@@ -22,36 +24,36 @@ var testBase = time.Date(2026, 10, 17, 10, 15, 0, 0, time.UTC).Unix()
 // validFacts is an independent serialized control: four physical same-NUMA cores
 // without SMT siblings, no foreign workload, 4 GiB with no container swap, no swap
 // activity, a read-only empty ext4 NVMe /config and one UTC date.
-func validFacts(stage string) Facts {
-	f := Facts{
-		Schema: factsSchema, Stage: stage, Run: testRun, Image: testImage, Inputs: testInputs,
+func validFacts(stage string) benchprofile.Facts {
+	f := benchprofile.Facts{
+		Schema: benchprofile.FactSchema, Stage: stage, Run: testRun, Image: testImage, Inputs: testInputs,
 		StartUnix: testBase, EndUnix: testBase, Observations: 1,
 		CPUs: 4, Cores: 4, ThreadsPerCoreMax: 2, SiblingsOutsideSet: 4, NUMANodes: 1,
 		Load1MilliMax: 20, MemAvailableKiBMin: 16 << 20,
 		SwapInStart: 7, SwapInEnd: 7, SwapOutStart: 9, SwapOutEnd: 9,
-		MemLimitBytes: requiredMemory, MemSwapLimitBytes: requiredMemory, CpusetMatches: true,
-		ConfigFS: configFSExt4, ConfigNVMe: true, ConfigEmpty: true, ConfigReadOnly: true,
+		MemLimitBytes: benchprofile.RequiredMemory, MemSwapLimitBytes: benchprofile.RequiredMemory, CpusetMatches: true,
+		ConfigFS: benchprofile.ConfigFSExt4, ConfigNVMe: true, ConfigEmpty: true, ConfigReadOnly: true,
 	}
 	switch stage {
-	case stageDuring:
+	case benchprofile.StageDuring:
 		f.StartUnix, f.EndUnix, f.Observations = testBase+1, testBase+9, 9
-	case stageAfter:
+	case benchprofile.StageAfter:
 		f.StartUnix, f.EndUnix = testBase+10, testBase+10
 	}
 	return f
 }
 
-func validRecs() [3]Facts {
-	return [3]Facts{validFacts(stageBefore), validFacts(stageDuring), validFacts(stageAfter)}
+func validRecs() [3]benchprofile.Facts {
+	return [3]benchprofile.Facts{validFacts(benchprofile.StageBefore), validFacts(benchprofile.StageDuring), validFacts(benchprofile.StageAfter)}
 }
 
 // writeRecs serializes records into dir the way the judge reads them.
-func writeRecs(t *testing.T, dir string, recs [3]Facts) {
+func writeRecs(t *testing.T, dir string, recs [3]benchprofile.Facts) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for i, stage := range []string{stageBefore, stageDuring, stageAfter} {
+	for i, stage := range benchprofile.FactStages {
 		data, err := json.Marshal(recs[i])
 		if err != nil {
 			t.Fatal(err)
@@ -69,7 +71,7 @@ func writeFile(t *testing.T, path string, data []byte) {
 
 func wantInvalid(t *testing.T, err error, reason string) {
 	t.Helper()
-	got, ok := invalidReason(err)
+	got, ok := benchprofile.InvalidReason(err)
 	if !ok || got != reason {
 		t.Fatalf("verdict = %v, want INVALID %s", err, reason)
 	}
@@ -78,69 +80,77 @@ func wantInvalid(t *testing.T, err error, reason string) {
 func TestEligibilityValidControlIsValid(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), testRun)
 	writeRecs(t, dir, validRecs())
-	recs, err := loadFacts(dir)
+	recs, err := benchprofile.LoadFacts(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := checkEligibility(testRun, recs); err != nil {
+	if err := benchprofile.CheckEligibility(testRun, recs); err != nil {
 		t.Fatalf("valid control: %v", err)
 	}
 	if !reflect.DeepEqual(recs, validRecs()) {
 		t.Fatalf("round trip changed the records: %+v", recs)
+	}
+	// The /config witness may be on XFS: the same evidence with the other accepted word passes.
+	xfs := validRecs()
+	for i := range xfs {
+		xfs[i].ConfigFS = benchprofile.ConfigFSXFS
+	}
+	if err := benchprofile.CheckEligibility(testRun, xfs); err != nil {
+		t.Fatalf("valid control on xfs: %v", err)
 	}
 }
 
 func TestEligibilityRejectsEveryBreach(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		mutate func(r *[3]Facts)
+		mutate func(r *[3]benchprofile.Facts)
 		reason string
 	}{
-		{"three cores", func(r *[3]Facts) { r[1].CPUs, r[1].Cores = 3, 3 }, "topology"},
-		{"five cores", func(r *[3]Facts) { r[0].CPUs, r[0].Cores = 5, 5 }, "topology"},
-		{"logical cpus are not cores", func(r *[3]Facts) { r[2].Cores = 2 }, "smt"},
-		{"two members share a core", func(r *[3]Facts) { r[1].Cores = 3 }, "smt"},
-		{"cores unknown", func(r *[3]Facts) { r[0].Cores = 0 }, "topology"},
-		{"threads per core unknown", func(r *[3]Facts) { r[1].ThreadsPerCoreMax = 0 }, "topology"},
-		{"more cores than cpus", func(r *[3]Facts) { r[1].Cores = 5 }, "topology"},
-		{"cross numa", func(r *[3]Facts) { r[1].NUMANodes = 2 }, "numa"},
-		{"unknown numa", func(r *[3]Facts) { r[0].NUMANodes = 0 }, "numa"},
-		{"foreign thread allowed before", func(r *[3]Facts) { r[0].ForeignAllowedMax = 1 }, "overlap"},
-		{"foreign thread allowed during", func(r *[3]Facts) { r[1].ForeignAllowedMax = 3 }, "overlap"},
-		{"foreign thread runnable after", func(r *[3]Facts) { r[2].ForeignRunnableMax = 1 }, "overlap"},
-		{"busy external sibling before", func(r *[3]Facts) { r[0].SiblingRunnableMax = 1 }, "smt"},
-		{"busy external sibling during", func(r *[3]Facts) { r[1].SiblingRunnableMax = 2 }, "smt"},
-		{"busy external sibling after", func(r *[3]Facts) { r[2].SiblingRunnableMax = 1 }, "smt"},
-		{"swap in during a stage", func(r *[3]Facts) { r[1].SwapInEnd++ }, "swap"},
-		{"swap out during a stage", func(r *[3]Facts) { r[0].SwapOutEnd++ }, "swap"},
-		{"swap between before and during", func(r *[3]Facts) {
+		{"three cores", func(r *[3]benchprofile.Facts) { r[1].CPUs, r[1].Cores = 3, 3 }, "topology"},
+		{"five cores", func(r *[3]benchprofile.Facts) { r[0].CPUs, r[0].Cores = 5, 5 }, "topology"},
+		{"logical cpus are not cores", func(r *[3]benchprofile.Facts) { r[2].Cores = 2 }, "smt"},
+		{"two members share a core", func(r *[3]benchprofile.Facts) { r[1].Cores = 3 }, "smt"},
+		{"cores unknown", func(r *[3]benchprofile.Facts) { r[0].Cores = 0 }, "topology"},
+		{"threads per core unknown", func(r *[3]benchprofile.Facts) { r[1].ThreadsPerCoreMax = 0 }, "topology"},
+		{"more cores than cpus", func(r *[3]benchprofile.Facts) { r[1].Cores = 5 }, "topology"},
+		{"cross numa", func(r *[3]benchprofile.Facts) { r[1].NUMANodes = 2 }, "numa"},
+		{"unknown numa", func(r *[3]benchprofile.Facts) { r[0].NUMANodes = 0 }, "numa"},
+		{"foreign thread allowed before", func(r *[3]benchprofile.Facts) { r[0].ForeignAllowedMax = 1 }, "overlap"},
+		{"foreign thread allowed during", func(r *[3]benchprofile.Facts) { r[1].ForeignAllowedMax = 3 }, "overlap"},
+		{"foreign thread runnable after", func(r *[3]benchprofile.Facts) { r[2].ForeignRunnableMax = 1 }, "overlap"},
+		{"busy external sibling before", func(r *[3]benchprofile.Facts) { r[0].SiblingRunnableMax = 1 }, "smt"},
+		{"busy external sibling during", func(r *[3]benchprofile.Facts) { r[1].SiblingRunnableMax = 2 }, "smt"},
+		{"busy external sibling after", func(r *[3]benchprofile.Facts) { r[2].SiblingRunnableMax = 1 }, "smt"},
+		{"swap in during a stage", func(r *[3]benchprofile.Facts) { r[1].SwapInEnd++ }, "swap"},
+		{"swap out during a stage", func(r *[3]benchprofile.Facts) { r[0].SwapOutEnd++ }, "swap"},
+		{"swap between before and during", func(r *[3]benchprofile.Facts) {
 			r[1].SwapInStart++
 			r[1].SwapInEnd++
 		}, "swap"},
-		{"swap after", func(r *[3]Facts) {
+		{"swap after", func(r *[3]benchprofile.Facts) {
 			r[2].SwapOutStart += 5
 			r[2].SwapOutEnd += 5
 		}, "swap"},
-		{"memory not 4g", func(r *[3]Facts) { r[0].MemLimitBytes = 8 << 30 }, "memory"},
-		{"container swap allowed", func(r *[3]Facts) { r[1].MemSwapLimitBytes = 8 << 30 }, "memory"},
-		{"container swap unlimited", func(r *[3]Facts) { r[1].MemSwapLimitBytes = 0 }, "memory"},
-		{"free memory below the limit", func(r *[3]Facts) { r[1].MemAvailableKiBMin = minMemoryAvailKiB - 1 }, "memory"},
-		{"cpuset not applied", func(r *[3]Facts) { r[0].CpusetMatches = false }, "container"},
-		{"config not ext4", func(r *[3]Facts) { r[0].ConfigFS = configFSOther }, "filesystem"},
-		{"config not nvme", func(r *[3]Facts) { r[1].ConfigNVMe = false }, "filesystem"},
-		{"config not empty", func(r *[3]Facts) { r[2].ConfigEmpty = false }, "filesystem"},
-		{"config not empty during only", func(r *[3]Facts) { r[1].ConfigEmpty = false }, "filesystem"},
-		{"config not empty before only", func(r *[3]Facts) { r[0].ConfigEmpty = false }, "filesystem"},
-		{"config writable", func(r *[3]Facts) { r[0].ConfigReadOnly = false }, "filesystem"},
-		{"run identity", func(r *[3]Facts) { r[1].Run = "bench-20261017T101501Z" }, "identity_mismatch"},
-		{"image identity", func(r *[3]Facts) { r[2].Image = "sha256:" + strings.Repeat("c", 64) }, "identity_mismatch"},
-		{"input identity", func(r *[3]Facts) { r[0].Inputs = strings.Repeat("d", 64) }, "identity_mismatch"},
-		{"after-state record swapped", func(r *[3]Facts) { r[2].Stage = stageBefore }, "record_stage"},
-		{"after before during", func(r *[3]Facts) { r[2].StartUnix, r[2].EndUnix = testBase, testBase }, "order"},
-		{"window ends before it starts", func(r *[3]Facts) { r[1].EndUnix = r[1].StartUnix - 1 }, "order"},
-		{"one during observation", func(r *[3]Facts) { r[1].Observations = 1 }, "incomplete_sampling"},
-		{"no before observation", func(r *[3]Facts) { r[0].Observations = 0 }, "incomplete_sampling"},
-		{"date rollover", func(r *[3]Facts) {
+		{"memory not 4g", func(r *[3]benchprofile.Facts) { r[0].MemLimitBytes = 8 << 30 }, "memory"},
+		{"container swap allowed", func(r *[3]benchprofile.Facts) { r[1].MemSwapLimitBytes = 8 << 30 }, "memory"},
+		{"container swap unlimited", func(r *[3]benchprofile.Facts) { r[1].MemSwapLimitBytes = 0 }, "memory"},
+		{"free memory below the limit", func(r *[3]benchprofile.Facts) { r[1].MemAvailableKiBMin = benchprofile.MinMemoryAvailKiB - 1 }, "memory"},
+		{"cpuset not applied", func(r *[3]benchprofile.Facts) { r[0].CpusetMatches = false }, "container"},
+		{"config other", func(r *[3]benchprofile.Facts) { r[0].ConfigFS = benchprofile.ConfigFSOther }, "filesystem"},
+		{"config not nvme", func(r *[3]benchprofile.Facts) { r[1].ConfigNVMe = false }, "filesystem"},
+		{"config not empty", func(r *[3]benchprofile.Facts) { r[2].ConfigEmpty = false }, "filesystem"},
+		{"config not empty during only", func(r *[3]benchprofile.Facts) { r[1].ConfigEmpty = false }, "filesystem"},
+		{"config not empty before only", func(r *[3]benchprofile.Facts) { r[0].ConfigEmpty = false }, "filesystem"},
+		{"config writable", func(r *[3]benchprofile.Facts) { r[0].ConfigReadOnly = false }, "filesystem"},
+		{"run identity", func(r *[3]benchprofile.Facts) { r[1].Run = "bench-20261017T101501Z" }, "identity_mismatch"},
+		{"image identity", func(r *[3]benchprofile.Facts) { r[2].Image = "sha256:" + strings.Repeat("c", 64) }, "identity_mismatch"},
+		{"input identity", func(r *[3]benchprofile.Facts) { r[0].Inputs = strings.Repeat("d", 64) }, "identity_mismatch"},
+		{"after-state record swapped", func(r *[3]benchprofile.Facts) { r[2].Stage = benchprofile.StageBefore }, "record_stage"},
+		{"after before during", func(r *[3]benchprofile.Facts) { r[2].StartUnix, r[2].EndUnix = testBase, testBase }, "order"},
+		{"window ends before it starts", func(r *[3]benchprofile.Facts) { r[1].EndUnix = r[1].StartUnix - 1 }, "order"},
+		{"one during observation", func(r *[3]benchprofile.Facts) { r[1].Observations = 1 }, "incomplete_sampling"},
+		{"no before observation", func(r *[3]benchprofile.Facts) { r[0].Observations = 0 }, "incomplete_sampling"},
+		{"date rollover", func(r *[3]benchprofile.Facts) {
 			day := time.Date(2026, 10, 17, 23, 59, 59, 0, time.UTC).Unix()
 			r[0].StartUnix, r[0].EndUnix = day, day
 			r[1].StartUnix, r[1].EndUnix = day, day+1
@@ -150,15 +160,15 @@ func TestEligibilityRejectsEveryBreach(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			recs := validRecs()
 			tc.mutate(&recs)
-			wantInvalid(t, checkEligibility(testRun, recs), tc.reason)
+			wantInvalid(t, benchprofile.CheckEligibility(testRun, recs), tc.reason)
 		})
 	}
 	// The directory name is part of the identity.
-	wantInvalid(t, checkEligibility("bench-20261017T101501Z", validRecs()), "identity_mismatch")
+	wantInvalid(t, benchprofile.CheckEligibility("bench-20261017T101501Z", validRecs()), "identity_mismatch")
 }
 
 func TestEligibilityRecordBoundaries(t *testing.T) {
-	good, err := json.Marshal(validFacts(stageBefore))
+	good, err := json.Marshal(validFacts(benchprofile.StageBefore))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,8 +192,8 @@ func TestEligibilityRecordBoundaries(t *testing.T) {
 		data   []byte
 		reason string // empty: valid
 	}{
-		{"exactly 64 KiB", pad(maxFactBytes), ""},
-		{"one byte over 64 KiB", pad(maxFactBytes + 1), "record_oversized"},
+		{"exactly 64 KiB", pad(benchprofile.MaxFactBytes), ""},
+		{"one byte over 64 KiB", pad(benchprofile.MaxFactBytes + 1), "record_oversized"},
 		{"empty", nil, "record_malformed"},
 		{"not an object", []byte(`[1,2,3]`), "record_malformed"},
 		{"trailing second object", append(append([]byte{}, good...), good...), "record_malformed"},
@@ -214,10 +224,10 @@ func TestEligibilityRecordBoundaries(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), testRun)
 			writeRecs(t, dir, validRecs())
 			writeFile(t, filepath.Join(dir, "before.json"), tc.data)
-			_, err := loadFacts(dir)
+			_, err := benchprofile.LoadFacts(dir)
 			if tc.reason == "" {
 				if err != nil {
-					t.Fatalf("loadFacts = %v, want valid", err)
+					t.Fatalf("benchprofile.LoadFacts = %v, want valid", err)
 				}
 				return
 			}
@@ -236,12 +246,12 @@ func TestEligibilityRecordFileKinds(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, "after.json")); err != nil {
 		t.Fatal(err)
 	}
-	_, err := loadFacts(dir)
+	_, err := benchprofile.LoadFacts(dir)
 	wantInvalid(t, err, "record_missing")
 
 	dir = fresh()
 	target := filepath.Join(t.TempDir(), "target.json")
-	data, _ := json.Marshal(validFacts(stageDuring))
+	data, _ := json.Marshal(validFacts(benchprofile.StageDuring))
 	writeFile(t, target, data)
 	if err := os.Remove(filepath.Join(dir, "during.json")); err != nil {
 		t.Fatal(err)
@@ -249,7 +259,7 @@ func TestEligibilityRecordFileKinds(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(dir, "during.json")); err != nil {
 		t.Fatal(err)
 	}
-	_, err = loadFacts(dir)
+	_, err = benchprofile.LoadFacts(dir)
 	wantInvalid(t, err, "record_nonregular")
 
 	dir = fresh()
@@ -259,35 +269,47 @@ func TestEligibilityRecordFileKinds(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "before.json"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, err = loadFacts(dir)
+	_, err = benchprofile.LoadFacts(dir)
 	wantInvalid(t, err, "record_nonregular")
 
 	// A record that holds another stage is not the stage's record.
 	dir = fresh()
-	data, _ = json.Marshal(validFacts(stageAfter))
+	data, _ = json.Marshal(validFacts(benchprofile.StageAfter))
 	writeFile(t, filepath.Join(dir, "during.json"), data)
-	_, err = loadFacts(dir)
+	_, err = benchprofile.LoadFacts(dir)
 	wantInvalid(t, err, "record_stage")
 }
 
 // Records carry numbers, enums and booleans only: every string field is one of the
-// five fixed-shape identities, so no path, CPU list, command line or host name has
-// a place to go.
+// fixed-shape identities or an enum, so no path, CPU list, command line or host name
+// has a place to go. Both schemas are walked: the V1 record and the V2 envelope with
+// its host and data blocks.
 func TestEligibilityRecordsCarryNoHostText(t *testing.T) {
-	allowed := map[string]bool{"stage": true, "run": true, "image": true, "inputs": true, "config_fs": true}
-	for field := range reflect.TypeFor[Facts]().Fields() {
-		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
-		switch field.Type.Kind() {
-		case reflect.Int64, reflect.Bool:
-		case reflect.String:
-			if !allowed[name] {
-				t.Errorf("string field %s is not a fixed identity or enum", name)
+	allowed := map[string]bool{"stage": true, "run": true, "image": true, "inputs": true, "config_fs": true, "data_fs": true}
+	// A block or an embedded half is a struct, not a value the wire carries: its own
+	// fields are the wire's, so the walk follows it.
+	var walk func(typ reflect.Type)
+	walk = func(typ reflect.Type) {
+		for field := range typ.Fields() {
+			if field.Type.Kind() == reflect.Struct {
+				walk(field.Type)
+				continue
 			}
-		default:
-			t.Errorf("field %s has kind %s", name, field.Type.Kind())
+			name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+			switch field.Type.Kind() {
+			case reflect.Int64, reflect.Bool:
+			case reflect.String:
+				if !allowed[name] {
+					t.Errorf("string field %s is not a fixed identity or enum", name)
+				}
+			default:
+				t.Errorf("field %s has kind %s", name, field.Type.Kind())
+			}
 		}
 	}
-	data, err := json.Marshal(validFacts(stageBefore))
+	walk(reflect.TypeFor[benchprofile.Facts]())
+	walk(reflect.TypeFor[benchprofile.Record]())
+	data, err := json.Marshal(validFacts(benchprofile.StageBefore))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,8 +317,8 @@ func TestEligibilityRecordsCarryNoHostText(t *testing.T) {
 		t.Fatalf("record is not compact fixed text: %d bytes", len(data))
 	}
 	var keys map[string]json.RawMessage
-	if err := json.Unmarshal(data, &keys); err != nil || len(keys) != len(factKeys) {
-		t.Fatalf("keys = %d, want %d (%v)", len(keys), len(factKeys), err)
+	if err := json.Unmarshal(data, &keys); err != nil || len(keys) != len(benchprofile.FactKeys) {
+		t.Fatalf("keys = %d, want %d (%v)", len(keys), len(benchprofile.FactKeys), err)
 	}
 }
 
@@ -335,8 +357,8 @@ func TestEligibilityJudgeExitsInvalid(t *testing.T) {
 // false: through the final judge, exit 3, never the pass line. Every key of the
 // schema, in every stage's record, is tried with null and with absence.
 func TestEligibilityNullAndAbsentRequiredScalarsAreInvalid(t *testing.T) {
-	for _, key := range factKeys {
-		for _, stage := range factStages {
+	for _, key := range benchprofile.FactKeys {
+		for _, stage := range benchprofile.FactStages {
 			for _, mode := range []string{"null", "absent"} {
 				t.Run(stage+" "+key+" "+mode, func(t *testing.T) {
 					env := testEnv(t)
@@ -359,8 +381,8 @@ func TestEligibilityNullAndAbsentRequiredScalarsAreInvalid(t *testing.T) {
 					files[stage+".json"] = data
 					publishFiles(t, env, testRun, files)
 					wantJudged(t, env, testRun, reason)
-					if _, err := decodeFacts(data); err == nil {
-						t.Fatal("decodeFacts accepted it")
+					if _, err := benchprofile.DecodeFacts(data); err == nil {
+						t.Fatal("benchprofile.DecodeFacts accepted it")
 					}
 				})
 			}

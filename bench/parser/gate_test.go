@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ViktorsBaikers/Boxset/bench/internal/benchprofile"
 	"github.com/ViktorsBaikers/Boxset/internal/parse"
 	"github.com/ViktorsBaikers/Boxset/internal/parse/corpus"
 )
@@ -35,7 +36,7 @@ func testManifest(t *testing.T) (path string, content []byte) {
 // materialized for the local day startDate names.
 func wantItems(t *testing.T, startDate string) ([]item, int) {
 	t.Helper()
-	day, err := time.ParseInLocation(factsDateLayout, startDate, time.Local)
+	day, err := time.ParseInLocation(benchprofile.DateLayout, startDate, time.Local)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +273,7 @@ func TestBenchmarkMeasuresEveryTimedCall(t *testing.T) {
 	manifestPath, _ := testManifest(t)
 	clock := &fakeClock{t: time.Now()}
 	// The corpora's input count is the warmup length; derive it as the producer does not.
-	want, _ := wantItems(t, clock.t.Format(factsDateLayout))
+	want, _ := wantItems(t, clock.t.Format(benchprofile.DateLayout))
 	n := len(want)
 	tr, build := newTracer(t, n, clock)
 	set, err := measure(testRoot, manifestPath, testRun, rounds, 1, build, clock.now)

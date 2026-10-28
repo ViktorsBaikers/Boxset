@@ -106,7 +106,20 @@ type connector struct {
 	want     ConnPolicy
 	connects atomic.Int64
 	first    atomic.Pointer[ConnPolicy]
+	commits  atomic.Int64 // Write transactions committed through the pool this connector feeds
 }
+
+// countCommit records one committed transaction; a nil connector (a read) counts nothing.
+func (c *connector) countCommit() {
+	if c != nil {
+		c.commits.Add(1)
+	}
+}
+
+// Commits is the number of Write transactions committed since Open. Reads and
+// the migrations Open itself ran are not counted; a rolled-back or failed
+// commit is not counted.
+func (d *DB) Commits() int64 { return d.writerC.commits.Load() }
 
 func (c *connector) Driver() driver.Driver { return c.base.Driver() }
 

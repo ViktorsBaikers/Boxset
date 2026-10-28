@@ -1,0 +1,14 @@
+22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw,errors=remount-ro
+23 22 0:21 / /tmp rw,nosuid,nodev shared:2 - tmpfs tmpfs rw
+24 22 0:22 / /var/lib/docker rw,relatime shared:3 - overlay overlay rw,lowerdir=/l,upperdir=/u,workdir=/w
+25 22 8:16 / /data rw,relatime shared:4 - xfs /dev/sdb rw
+26 22 8:32 / /exotic rw,relatime shared:5 - boxsetlocalfs /dev/sdc rw
+27 22 0:52 / /srv rw,relatime shared:6 - nfs 10.0.0.2:/srv rw,vers=4.2
+28 27 8:48 / /srv/local rw,relatime shared:7 - ext4 /dev/sdd rw
+29 22 0:53 / /mnt/nfs rw,relatime shared:8 - nfs 10.0.0.2:/export rw,vers=4.2
+30 22 0:54 / /stack rw,relatime shared:9 - nfs 10.0.0.2:/stack rw,vers=4.2
+31 30 8:64 / /stack rw,relatime shared:10 - ext4 /dev/sde rw
+40 22 0:60 / /netstore/sub rw,relatime shared:11 - nfs 10.0.0.2:/sub rw,vers=4.2
+41 22 8:80 / /netstore rw,relatime shared:12 - ext4 /dev/sdf rw
+51 50 8:96 / /ordok rw,relatime shared:13 - ext4 /dev/sdg rw
+50 22 0:61 / /ordok rw,relatime shared:14 - nfs 10.0.0.2:/ordok rw,vers=4.2

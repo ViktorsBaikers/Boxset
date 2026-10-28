@@ -490,7 +490,7 @@ func planLines(t *testing.T, db *store.DB, query string, args ...any) []string {
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var id, parent, unused int
 			var detail string

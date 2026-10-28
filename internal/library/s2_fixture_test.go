@@ -148,6 +148,23 @@ func applyS2(t *testing.T) *s2World {
 	return w
 }
 
+// applyS2Eligible builds the S2 world from every fixture step except a
+// conflict step whose op is membership or persona. That step title-holds
+// tmdb:603, so a test whose premise is an eligible tmdb:603/hd or /dc slot
+// builds its world here. The canonical rows equal applyS2's, and tmdb:603/uhd
+// keeps the two holds of the conflicting imports.
+func applyS2Eligible(t *testing.T) *s2World {
+	t.Helper()
+	w := newS2World(t)
+	for _, s := range w.fx.Steps {
+		if s.Conflict && (s.Op == "membership" || s.Op == "persona") {
+			continue
+		}
+		w.apply(s)
+	}
+	return w
+}
+
 func (w *s2World) applyAll() {
 	w.t.Helper()
 	for i, s := range w.fx.Steps {
@@ -156,7 +173,7 @@ func (w *s2World) applyAll() {
 	}
 }
 
-// apply runs one step. A conflict step must fail with ErrIdentityConflict and write nothing.
+// apply runs one step. A conflict step must fail with ErrIdentityConflict, write no counted row and leave only its hold.
 func (w *s2World) apply(s s2Step) {
 	t := w.t
 	t.Helper()
@@ -270,7 +287,7 @@ func dump(t *testing.T, db *store.DB, q string, args ...any) []string {
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		cols, err := rows.Columns()
 		if err != nil {
 			return err

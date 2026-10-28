@@ -1,6 +1,7 @@
 package library
 
 import (
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
@@ -90,11 +91,36 @@ func TestS2IdentityReuse(t *testing.T) {
 		}
 	}
 
-	// Replaying every step, conflicts included, changes no row.
-	before := snapshot(t, w.db)
+	// The conflict steps leave exactly their holds: one per conflicting import on
+	// tmdb:603/uhd, and one title-wide hold for the membership that requests tmdb:603 as a series.
+	title, uhd := w.titles["tmdb:603"], w.slotID("tmdb:603", "uhd")
+	wantHolds := []string{
+		fmt.Sprintf("[%q,\"import:movie-uhd/movie/42@slot:%d\",%d,%d]", string(ReasonIdentityConflict), uhd, title, uhd),
+		fmt.Sprintf("[%q,\"import:movie-uhd/movie/43@slot:%d\",%d,%d]", string(ReasonIdentityConflict), uhd, title, uhd),
+		fmt.Sprintf("[%q,%q,%d,null]", string(ReasonIdentityConflict), enrollScope(title), title),
+	}
+	slices.Sort(wantHolds)
+	if got := dump(t, w.db, `SELECT reason_code, scope_key, title_id, slot_id FROM review_hold`); !slices.Equal(got, wantHolds) {
+		t.Fatalf("holds after the fixture = %v, want %v", got, wantHolds)
+	}
+	// The world without the enrollment step has the same canonical rows and only the import holds.
+	eligible := applyS2Eligible(t)
+	if got, want := snapshot(t, eligible.db), snapshot(t, w.db); !sameSnapshot(got, want) {
+		t.Fatalf("eligible world rows differ from the full fixture:\n got %v\nwant %v", got, want)
+	}
+	importHolds := dump(t, w.db, `SELECT reason_code, scope_key, title_id, slot_id, params FROM review_hold WHERE scope_key LIKE 'import:%'`)
+	if got := holdRows(t, eligible.db); len(importHolds) != 2 || !slices.Equal(got, importHolds) {
+		t.Fatalf("eligible world holds = %v, want the two import holds %v", got, importHolds)
+	}
+
+	// Replaying every step, conflicts included, changes no row and adds no hold.
+	before, held := snapshot(t, w.db), holdRows(t, w.db)
 	w.applyAll()
 	if after := snapshot(t, w.db); !sameSnapshot(before, after) {
 		t.Fatalf("replay changed rows: before %v after %v", before, after)
+	}
+	if got := holdRows(t, w.db); !slices.Equal(got, held) {
+		t.Fatalf("replay changed holds: %v -> %v", held, got)
 	}
 }
 
@@ -506,7 +532,7 @@ func (w *s2World) watchWrites() {
 		for rows.Next() {
 			var name string
 			if err := rows.Scan(&name); err != nil {
-				rows.Close()
+				_ = rows.Close()
 				return err
 			}
 			tables = append(tables, name)
@@ -575,8 +601,13 @@ func TestIdentityInputRejectedBeforeWrite(t *testing.T) {
 	mem("name NUL", "tmdb:5", "movie", "a\x00b")
 	mem("name bad utf8", "tmdb:5", "movie", "\xff")
 	mem("name long", "tmdb:5", "movie", strings.Repeat("a", 300))
+	mem("name empty on a movie requested as a series", "tmdb:603", "series", "")
 	add("persona key upper", func() error {
 		_, err := w.lib.ApplyPersona(ctx, PersonaRequest{LibraryID: movies, Persona: "4K", MetadataID: "tmdb:5", Kind: "movie", Name: "N"})
+		return err
+	})
+	add("persona key upper on a movie requested as a series", func() error {
+		_, err := w.lib.ApplyPersona(ctx, PersonaRequest{LibraryID: movies, Persona: "4K", MetadataID: "tmdb:603", Kind: "series", Name: "Synthetic Movie A"})
 		return err
 	})
 	add("persona bad title", func() error {
@@ -676,6 +707,30 @@ func TestIdentityInputRejectedBeforeWrite(t *testing.T) {
 				t.Errorf("rejected input changed rows:\nbefore %v\nafter  %v", before, after)
 			}
 		})
+	}
+}
+
+// Validation runs before admission: with a context that is already canceled, a
+// malformed request is still refused as invalid input, while the same
+// well-formed request reaches the store and reports the cancellation. Neither
+// call changes a row.
+func TestIdentityInputRejectedBeforeWriteCanceledContext(t *testing.T) {
+	w := applyS2(t)
+	seriesSlot := w.slotID("tvdb:9001", "hd")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	before := snapshot(t, w.db)
+
+	err := w.lib.SetSlotEpisode(ctx, SlotEpisodeChange{SlotID: seriesSlot, Season: 1, Number: 1, Monitored: false, State: "done", SizeBytes: 1})
+	if !errors.Is(err, ErrInvalidInput) || errors.Is(err, context.Canceled) {
+		t.Errorf("invalid request on a canceled context: %v, want ErrInvalidInput and not context.Canceled", err)
+	}
+	err = w.lib.SetSlotEpisode(ctx, SlotEpisodeChange{SlotID: seriesSlot, Season: 1, Number: 1, Monitored: false, State: "live", SizeBytes: 1})
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrInvalidInput) {
+		t.Errorf("valid request on a canceled context: %v, want context.Canceled and not ErrInvalidInput", err)
+	}
+	if after := snapshot(t, w.db); !sameSnapshot(before, after) {
+		t.Errorf("canceled-context calls changed rows:\nbefore %v\nafter  %v", before, after)
 	}
 }
 

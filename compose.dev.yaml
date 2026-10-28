@@ -1,0 +1,92 @@
+# Private live development loop: backend live reload and the Vite dev
+# server in one container.
+#   docker compose -f compose.dev.yaml up --build --renew-anon-volumes
+# (make dev). Every published port is loopback-only. The service runs as
+# uid 1000 with read-only source and root filesystems. The anonymous web
+# scaffold links source/config to the directory-backed checkout view,
+# retaining atomic-save visibility without creating checkout entries.
+name: boxset
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: deploy/dev/Dockerfile
+      target: live
+    user: '1000:1000'
+    read_only: true
+    tmpfs:
+      - /tmp:exec,mode=1777
+    init: true
+    stop_grace_period: 40s
+    working_dir: /src
+    command: ['bun', '/src/deploy/dev/watch.ts']
+    ports:
+      - '127.0.0.1:8484:8484'
+      - '127.0.0.1:5173:5173'
+    environment:
+      HOME: /tmp
+      BOXSET_DATA_DIR: /config
+      BOXSET_PORT: '8484'
+      BUN_INSTALL_CACHE_DIR: /var/cache/bun
+      CGO_ENABLED: '0'
+      GOPATH: /go
+      GOMODCACHE: /go/pkg/mod
+      GOCACHE: /var/cache/go-build
+      GOTOOLCHAIN: local
+      GOTELEMETRY: 'off'
+      GOENV: 'off'
+      GOFLAGS: -mod=readonly
+      GOPROXY: file:///usr/local/share/boxset/deps/go/cache/download
+    volumes:
+      - type: bind
+        source: .
+        target: /src
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        target: /src/web
+        read_only: true
+      - type: bind
+        source: .
+        target: /checkout/source
+        read_only: true
+        bind:
+          create_host_path: false
+      - config:/config
+      - web_node_modules:/src/web/node_modules
+      - web_svelte_kit:/src/web/.svelte-kit
+      - go_mod_cache:/go/pkg/mod
+      - go_build_cache:/var/cache/go-build
+      - bun_cache:/var/cache/bun
+      # Anonymous: copied up from the `live` image's in-image shell build,
+      # renewed by every `make dev` (--renew-anon-volumes) and never
+      # written by the service.
+      - type: volume
+        target: /src/internal/server/dist
+        read_only: true
+    healthcheck:
+      test:
+        - CMD
+        - bun
+        - -e
+        - |
+          const ok = (u) =>
+            fetch(u).then((r) => r.status === 200, () => false);
+          Promise.all([
+            ok('http://127.0.0.1:8484/ping'),
+            ok('http://127.0.0.1:5173/'),
+          ]).then((all) => process.exit(all.every(Boolean) ? 0 : 1));
+      interval: 3s
+      timeout: 5s
+      retries: 100
+      start_period: 10s
+
+volumes:
+  config:
+  web_node_modules:
+  web_svelte_kit:
+  go_mod_cache:
+  go_build_cache:
+  bun_cache:

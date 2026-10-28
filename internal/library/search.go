@@ -195,7 +195,7 @@ func (l *Library) Search(ctx context.Context, term string, limit int) ([]TitleID
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var id TitleID
 			if err := rows.Scan(&id); err != nil {

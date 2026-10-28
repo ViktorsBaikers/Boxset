@@ -23,7 +23,7 @@
 # byte under GOSUMDB=sum.golang.org.
 #
 # `--tools` runs the eight web tools (vite-build, svelte-check, eslint, prettier,
-# vitest-browser, vite-dev, playwright-axe, sv) with Bun against the synthetic probe
+# vitest-browser, vite-dev, playwright-axe, sv) with Bun against the public shell
 # page in /src/web, in that order, and stops at the first failing tool (nothing after
 # it runs):
 #   scripts/dev-run.sh --write docs/spikes/issue-drafts --capture DIR -- scripts/s5-toolchain.sh --tools
@@ -199,7 +199,7 @@ if [ "$MODE" = facts ]; then
 	exit 0
 fi
 
-# --- tools: the eight web tools, executed by Bun, against the synthetic probe -----------------
+# --- tools: the eight web tools, executed by Bun, against the public shell --------------------
 # Order is fixed; the first failing tool stops the run (nothing after it starts) and its
 # bounded draft is written in place to the fixed name. Servers listen on container loopback only.
 if [ "$MODE" = tools ]; then
@@ -237,7 +237,7 @@ appendFileSync(
 );
 EOF
 	S5_IDENT_FILE=$RES/ident
-	BUN_OPTIONS="--preload $RES/ident.ts"
+	BUN_OPTIONS="--preload=$RES/ident.ts"
 	export S5_IDENT_FILE BUN_OPTIONS
 	PIDS=
 	stop_servers() {
@@ -360,25 +360,73 @@ EOF
 	cd "$WEB" || exit 125
 	VITE=$(bin vite)
 
-	# 1. vite-build: production build, then a loopback preview of that build.
-	start vite-build 'bun vite build; bun vite preview --host 127.0.0.1 --port 4173 (loopback check)'
-	run vite-build vite-build 240 bun "$VITE" build
+	# 1. vite-build: the committed `build` script (vite build, then precompress into internal/server/dist),
+	# its output, then a loopback preview of that build under the placeholder base it was built for.
+	DIST=/src/internal/server/dist
+	PBASE=/__boxset_base__
+	start vite-build 'bun run build (vite build + precompress into internal/server/dist); bun vite preview --host 127.0.0.1 --port 4173 (loopback check)'
+	run vite-build vite-build 240 bun run build
 	_st=$?
 	[ "$_st" = 0 ] || fail "$_st" 'vite build exited nonzero' vite-build
-	[ -f build/index.html ] || fail 1 'build/index.html is missing' vite-build
-	_js=$(find build/_app -type f -name '*.js' 2>/dev/null | wc -l | tr -d ' ')
+	[ -f "$DIST/200.html" ] || fail 1 'internal/server/dist/200.html is missing' vite-build
+	grep -qF "$PBASE" "$DIST/200.html" || fail 1 "internal/server/dist/200.html does not hold $PBASE" vite-build
+	_js=$(find "$DIST/_app" -type f -name '*.js' 2>/dev/null | wc -l | tr -d ' ')
 	[ "$_js" -ge 1 ] || fail 1 'no JavaScript chunk was emitted' vite-build
-	grep -rqF 'Add one activation' build/_app || fail 1 'the probe button label is not in the built output' vite-build
-	_o=$(env S5_TOOL=control bun -e 'import { m } from "./.svelte-kit/paraglide/messages.js"; const en = await Bun.file("messages/en.json").json(); const k = Object.keys(en); console.log(k.length, k.every((x) => typeof m[x] === "function" && m[x]() === en[x]))' 2>&1)
-	[ "$_o" = '3 true' ] || fail 1 "the generated Paraglide messages do not return the en.json values ($_o)" vite-build
+	grep -rqF 'Loading Boxset' "$DIST/_app" || fail 1 'the public loading message is not in the built output' vite-build
+	# A placeholder-bearing _app file has no compressed sibling; every other _app/immutable file has all three.
+	_held=0
+	_pre=0
+	for _f in $(find "$DIST/_app" -type f ! -name '*.br' ! -name '*.zst' ! -name '*.gz'); do
+		if grep -qF "${PBASE#/}" "$_f"; then
+			_held=$((_held + 1))
+			{ [ ! -e "$_f.br" ] && [ ! -e "$_f.zst" ] && [ ! -e "$_f.gz" ]; } || fail 1 "${_f#"$DIST"/} holds the base placeholder and has a compressed sibling" vite-build
+		else
+			case $_f in
+			"$DIST"/_app/immutable/*)
+				{ [ -s "$_f.br" ] && [ -s "$_f.zst" ] && [ -s "$_f.gz" ]; } || fail 1 "${_f#"$DIST"/} lacks a .br, .zst or .gz sibling" vite-build
+				_pre=$((_pre + 1))
+				;;
+			esac
+		fi
+	done
+	{ [ "$_held" -ge 1 ] && [ "$_pre" -ge 1 ]; } || fail 1 "placeholder-bearing files=$_held precompressed files=$_pre" vite-build
+	_o=$(env S5_TOOL=control bun -e 'import { m } from "./.svelte-kit/paraglide/messages.js";
+const en = await Bun.file("messages/en.json").json();
+if (!en || typeof en !== "object" || Array.isArray(en)) throw new Error("invalid message catalogue");
+const keys = Object.keys(en);
+let checked = 0;
+let usernameChecked = false;
+for (const key of keys) {
+  const template = en[key];
+  if (typeof template !== "string" || typeof m[key] !== "function") throw new Error("invalid message export: " + key);
+  let expected = template;
+  let actual;
+  if (key === "setup_created_message") {
+    if (!template.includes("{username}") || /[{}]/.test(template.replaceAll("{username}", ""))) throw new Error("unsupported message placeholder: " + key);
+    expected = template.replaceAll("{username}", "example");
+    actual = m[key]({ username: "example" });
+    usernameChecked = true;
+  } else {
+    if (/[{}]/.test(template)) throw new Error("unsupported message placeholder: " + key);
+    actual = m[key]();
+  }
+  if (typeof actual !== "string" || actual !== expected) throw new Error("message mismatch: " + key);
+  checked++;
+}
+if (keys.length === 0 || checked !== keys.length || !usernameChecked) throw new Error("incomplete message checks");
+console.log(keys.length, checked, true);' 2>&1)
+	_st=$?
+	set -- $_o
+	case ${1:-}:${2:-} in *[!0-9:]*) _st=1 ;; esac
+	{ [ "$_st" = 0 ] && [ "$#" = 3 ] && [ "${1:-0}" -gt 0 ] && [ "${2:-}" = "${1:-}" ] && [ "${3:-}" = true ]; } || fail 1 "the generated Paraglide messages do not return the en.json values ($_o)" vite-build
 	start_server vite-build preview-check bun "$VITE" preview --host 127.0.0.1 --port 4173 --strictPort
-	wait_http http://127.0.0.1:4173/ "$SRVPID"
+	wait_http "http://127.0.0.1:4173$PBASE/" "$SRVPID"
 	_st=$?
 	[ "$_st" = 0 ] || fail "$_st" 'vite preview did not serve the build on loopback' vite-build preview-check
-	http_has http://127.0.0.1:4173/ '__sveltekit' || fail 1 'vite preview did not serve the SvelteKit shell' vite-build preview-check
+	http_has "http://127.0.0.1:4173$PBASE/" '__sveltekit' || fail 1 'vite preview did not serve the SvelteKit shell' vite-build preview-check
 	stop_servers >/dev/null
 	ident vite-build 1 || fail 1 'vite-build did not run on Bun only' vite-build
-	pass "build_js_files=$_js preview=served"
+	pass "build_js_files=$_js placeholder_files=$_held precompressed=$_pre preview=served"
 
 	# 2. svelte-check: sync first, then a threshold-warning check that must count files.
 	start svelte-check 'bun svelte-kit sync; bun svelte-check --tsconfig ./tsconfig.json --output machine --threshold warning --fail-on-warnings'
@@ -409,8 +457,8 @@ EOF
 	pass "files=$_f errors=0 warnings=0 control=rejected"
 
 	# 4. prettier: check passes and the same configuration really reformats a planted input.
-	start prettier 'bun prettier --check src e2e messages and the config files'
-	run prettier prettier 120 bun "$(bin prettier)" --check 'src/**/*.{ts,svelte}' 'e2e/**/*.ts' 'messages/*.json' '*.config.{js,ts}'
+	start prettier 'bun prettier --check src e2e scripts messages and the config files'
+	run prettier prettier 120 bun "$(bin prettier)" --check 'src/**/*.{ts,svelte,css,html}' 'e2e/**/*.ts' 'scripts/**/*.ts' 'messages/*.json' '*.config.{js,ts}'
 	_st=$?
 	[ "$_st" = 0 ] || fail "$_st" 'prettier --check exited nonzero' prettier
 	grep -qF 'All matched files use Prettier code style!' "$RES/prettier.out" || fail 1 'prettier did not report the matched files as formatted' prettier
@@ -428,24 +476,24 @@ EOF
 	ident vitest-browser 1 || fail 1 'vitest did not run on Bun only' vitest
 	pass "tests=$1 passed=$2 failed=0 skipped=0 browser=chromium-headless-shell"
 
-	# 6. vite dev: the dev server transforms the probe module on loopback (kept up for the browser run).
+	# 6. vite dev: the dev server transforms a shell module on loopback (kept up for the browser run).
 	start vite-dev 'bun vite dev --host 127.0.0.1 --port 5173 --strictPort'
 	start_server vite-dev vite-dev bun "$VITE" dev --host 127.0.0.1 --port 5173 --strictPort
 	_dev=$SRVPID
 	wait_http http://127.0.0.1:5173/ "$_dev"
 	_st=$?
 	[ "$_st" = 0 ] || fail "$_st" 'vite dev did not serve on loopback' vite-dev
-	http_has http://127.0.0.1:5173/src/lib/toolchain-probe/Probe.svelte 'svelte_internal_client' || fail 1 'vite dev did not transform the probe component' vite-dev
+	http_has http://127.0.0.1:5173/src/lib/ui/Button.svelte 'svelte_internal_client' || fail 1 'vite dev did not transform the Button component' vite-dev
 	ident vite-dev 1 || fail 1 'vite dev did not run on Bun only' vite-dev
-	pass 'served=transformed-probe-module'
+	pass 'served=transformed-ui-module'
 
 	# 7. playwright + axe: dev and preview, desktop and mobile, with four captures.
-	start playwright-axe 'bun playwright test (dev http://127.0.0.1:5173, preview http://127.0.0.1:4173)'
+	start playwright-axe "bun playwright test shell.spec.ts (dev http://127.0.0.1:5173, preview http://127.0.0.1:4173$PBASE/)"
 	start_server vite-build preview bun "$VITE" preview --host 127.0.0.1 --port 4173 --strictPort
-	wait_http http://127.0.0.1:4173/ "$SRVPID"
+	wait_http "http://127.0.0.1:4173$PBASE/" "$SRVPID"
 	_st=$?
 	[ "$_st" = 0 ] || fail "$_st" 'vite preview did not serve the build on loopback' preview
-	run playwright-axe playwright 400 env S5_DEV_URL=http://127.0.0.1:5173 S5_PREVIEW_URL=http://127.0.0.1:4173 bun "$(bin playwright)" test
+	run playwright-axe playwright 400 env BOXSET_SHELL_HOST=static S5_DEV_URL=http://127.0.0.1:5173/ "S5_PREVIEW_URL=http://127.0.0.1:4173$PBASE/" bun "$(bin playwright)" test shell.spec.ts
 	_st=$?
 	[ "$_st" = 0 ] || fail "$_st" 'playwright test exited nonzero' playwright
 	_o=$(env S5_TOOL=control F="$WEB/test-results/report.json" bun -e 'const r = JSON.parse(await Bun.file(process.env.F).text()); const s = r.stats; console.log(s.expected, s.unexpected, s.skipped, s.flaky)')
@@ -472,7 +520,7 @@ EOF
 	# package is not part of the admitted set, so the disposable copy uses the admitted one.
 	sed -i 's#@sveltejs/adapter-auto#@sveltejs/adapter-static#' "$SVP/vite.config.ts"
 	# Packages are linked one by one: Kit writes its generated $app/tsconfig.json next to them, and
-	# a whole-directory link would put that file (and its relative paths) into the probe's tree.
+	# a whole-directory link would put that file (and its relative paths) into the generated project's tree.
 	mkdir "$SVP/node_modules" || fail 1 'could not prepare the generated project packages' sv-create
 	find "$WEB/node_modules" -mindepth 1 -maxdepth 1 ! -name '$app' | while IFS= read -r _e; do ln -s "$_e" "$SVP/node_modules/${_e##*/}"; done
 	(cd "$SVP" && run sv sv-sync 120 bun "$(bin svelte-kit)" sync)
@@ -502,6 +550,7 @@ SNAPSHOT=$(grep '^ARG DEBIAN_SNAPSHOT=' "$DOCKERFILE") && SNAPSHOT=${SNAPSHOT#AR
 GO_V=
 BUN_V=
 LINT_V=
+SQLC_V=
 CHROME_SHELL_V=
 
 grep '^| ADM-' "$REPORT" >"$T/rows"
@@ -732,7 +781,7 @@ while IFS='|' read -r _ id kind category name version pin source publisher licen
 	archive-snapshot) [ "$kind" = snapshot ] || cat_ok=0 ;;
 	direct-tool)
 		case $kind:$name in
-		archive:go | archive:bun | archive:golangci-lint | archive:chrome-headless-shell | apt:gcc | apt:libc6-dev | apt:qemu-user | apt-fetch:unzip) ;;
+		archive:go | archive:bun | archive:golangci-lint | archive:sqlc | archive:chrome-headless-shell | apt:gcc | apt:libc6-dev | apt:qemu-user | apt-fetch:unzip) ;;
 		*) cat_ok=0 ;;
 		esac
 		;;
@@ -782,6 +831,7 @@ while IFS='|' read -r _ id kind category name version pin source publisher licen
 		go) GO_V=$version ;;
 		bun) BUN_V=$version ;;
 		golangci-lint) LINT_V=$version ;;
+		sqlc) SQLC_V=$version ;;
 		chrome-headless-shell) CHROME_SHELL_V=$version ;;
 		esac
 		;;
@@ -914,10 +964,13 @@ while IFS='|' read -r _ id kind category name version pin source publisher licen
 			gl_d=${gl#* }
 			if { [ "$gl_v" = "$version" ] && [ -n "$gmc" ] && case $gl_d in "$gmc"/?*) true ;; *) false ;; esac; }; then
 				got_lic=
-				if [ -f "$gl_d/LICENSE" ]; then
-					set -- $(sha256sum "$gl_d/LICENSE")
-					got_lic=$1
-				fi
+				for _lf in LICENSE LICENSE.txt LICENSE.md; do
+					if [ -f "$gl_d/$_lf" ]; then
+						set -- $(sha256sum "$gl_d/$_lf")
+						got_lic=$1
+						break
+					fi
+				done
 				[ "$got_lic" = "$want_lic" ] || block "$id" "licence_mismatch: license-sha256=$want_lic, module LICENSE is ${got_lic:-missing}"
 				esc=$(printf '%s' "$name" | sed 's/[A-Z]/!&/g' | tr 'A-Z' 'a-z')
 				got_info=$(S5_INFO=$gmc/cache/download/$esc/@v/$version.info bun -e 'const i=JSON.parse(require("fs").readFileSync(process.env.S5_INFO,"utf8"));const o=i.Origin||{};console.log([i.Version||"",o.URL||"",o.Hash||"",o.Ref||""].join("\t"))' 2>/dev/null)
@@ -1116,7 +1169,9 @@ fi
 if grep -Eq 'chrome-linux64|chromium-\$\{|chrome-for-testing-public/[^ ]*/chrome-linux64' "$DOCKERFILE"; then
 	unlisted dockerfile "full Chrome archive"
 fi
-if grep -Eq '"(workspaces|overrides|resolutions|scripts)"' "$PKG"; then block web/package.json "unexpected workspaces/overrides/scripts"; fi
+if grep -Eq '"(workspaces|overrides|resolutions)"' "$PKG"; then block web/package.json "unexpected workspaces/overrides/resolutions"; fi
+S5_PKG=$PKG bun -e 'const p=JSON.parse(require("fs").readFileSync(process.env.S5_PKG,"utf8"));const top=["name","private","type","dependencies","devDependencies","optionalDependencies","peerDependencies","scripts"];const want={build:"bun --bun vite build && bun scripts/precompress.ts",check:"bun --bun svelte-kit sync && bun --bun svelte-check --tsconfig ./tsconfig.json --threshold warning --fail-on-warnings && bun --bun eslint --max-warnings 0 . && bun --bun prettier --check .",test:"bun --bun vitest run","check:api":"bun scripts/check-api.ts"};const q=k=>JSON.stringify(k).slice(0,80);if(p===null||typeof p!=="object"||Array.isArray(p))console.log("manifest_not_object");else{for(const k of Object.keys(p))if(!top.includes(k))console.log("field_unknown "+q(k));const s=p.scripts;if(s!==undefined){if(s===null||typeof s!=="object"||Array.isArray(s))console.log("scripts_not_object");else for(const [k,v] of Object.entries(s))if(!Object.hasOwn(want,k))console.log("scripts_unknown_key "+q(k));else if(v!==want[k])console.log("scripts_value_mismatch "+q(k))}}' >"$T/manifest" 2>"$T/manifest.err" || block web/package.json "cannot read manifest fields: $(head -c 300 "$T/manifest.err")"
+while IFS= read -r _m; do block web/package.json "$_m"; done <"$T/manifest"
 
 # --- commitments ------------------------------------------------------------------------
 cmt() {
@@ -1245,6 +1300,10 @@ else
 		block golangci-lint "planted printf defect not rejected with a named diagnostic (status $lst): $lout"
 	fi
 fi
+
+# sqlc: the admitted release runs from the image and reports exactly that version.
+sqv=$(sqlc version 2>&1)
+if [ -n "$SQLC_V" ] && [ "$sqv" = "v$SQLC_V" ]; then ok "sqlc $SQLC_V"; else block sqlc "version output '$sqv' is not v${SQLC_V:-?}"; fi
 
 # Browser: only Playwright's chromium-headless-shell, resolvable and launching.
 rev=$(grep '^ARG PLAYWRIGHT_CHROMIUM_REVISION=' "$DOCKERFILE") && rev=${rev#ARG PLAYWRIGHT_CHROMIUM_REVISION=}

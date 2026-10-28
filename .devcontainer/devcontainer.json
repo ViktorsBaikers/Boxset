@@ -1,0 +1,8 @@
+{
+	"name": "Boxset",
+	"dockerComposeFile": ["../compose.dev.yaml"],
+	"service": "dev",
+	"workspaceFolder": "/src",
+	"overrideCommand": false,
+	"shutdownAction": "none"
+}
