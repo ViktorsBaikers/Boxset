@@ -139,6 +139,7 @@ The tables are machine-read. One row per introduced direct package/tool/image, p
 | ADM-217 | go | go-dependency | github.com/danielgtaylor/huma/v2 | v2.39.1 | h1:0kwF4ltQoYZ+IU55VPy+BcGekzgF44R64daTGde1H+g= | go-proxy https://proxy.golang.org origin=https://github.com/danielgtaylor/huma commit=198225eaac0c8be4aaa1962d5a9a075d3a6fd062 ref=refs/tags/v2.39.1 | Daniel G. Taylor (GitHub danielgtaylor/huma) | MIT license-sha256=8581fc55ebc53d30053517be42affdd6a9cb829188d054d0846b85201e21583d | commit 198225eaac0c8be4aaa1962d5a9a075d3a6fd062 2026-07-29 https://github.com/danielgtaylor/huma/commit/198225eaac0c8be4aaa1962d5a9a075d3a6fd062 work=github.com/danielgtaylor/huma/v2/v2.39.1 | pure Go, no cgo: linux/amd64 linux/arm64 linux/arm windows/amd64 windows/arm64 darwin/amd64 freebsd/amd64 freebsd/arm64 | n/a |
 | ADM-218 | go | go-dependency | golang.org/x/crypto | v0.57.0 | h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M= | go-proxy https://proxy.golang.org origin=https://go.googlesource.com/crypto commit=3f62bf119e84c6e35e8518a2958089ade622d1a3 ref=refs/tags/v0.57.0 | The Go Authors (go.googlesource.com/crypto) | BSD-3-Clause license-sha256=911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad | commit 3f62bf119e84c6e35e8518a2958089ade622d1a3 2026-09-08 https://go.googlesource.com/crypto/+/3f62bf119e84c6e35e8518a2958089ade622d1a3 work=golang.org/x/crypto/v0.57.0 | pure Go, no cgo: linux/amd64 linux/arm64 linux/arm windows/amd64 windows/arm64 darwin/amd64 freebsd/amd64 freebsd/arm64 | n/a |
 | ADM-219 | go | go-dependency | golang.org/x/text | v0.42.0 | h1:JbOZXgfeCPU9gacVtYliJqOhD+zhrEqK4LfdpmlUZqI= | go-proxy https://proxy.golang.org origin=https://go.googlesource.com/text commit=fafe4a06967e06550e69ee42787d9902845d2a3f ref=refs/tags/v0.42.0 | The Go Authors (go.googlesource.com/text) | BSD-3-Clause license-sha256=911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad | commit fafe4a06967e06550e69ee42787d9902845d2a3f 2026-09-08 https://go.googlesource.com/text/+/fafe4a06967e06550e69ee42787d9902845d2a3f work=golang.org/x/text/v0.42.0 | pure Go, no cgo: linux/amd64 linux/arm64 linux/arm windows/amd64 windows/arm64 darwin/amd64 freebsd/amd64 freebsd/arm64 | n/a |
+| ADM-300 | go | go-dependency | golang.org/x/time | v0.16.0 | h1:vMb6ptszcQMkcwiRTAuNNU50gom6++Q/6gY2hDM6VDE= | go-proxy https://proxy.golang.org origin=https://go.googlesource.com/time commit=fb013b3d305a26f5ef5350a6eaffc7c87a200383 ref=refs/tags/v0.16.0 | The Go Authors (go.googlesource.com/time) | BSD-3-Clause license-sha256=911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad | commit fb013b3d305a26f5ef5350a6eaffc7c87a200383 2026-08-19 https://go.googlesource.com/time/+/fb013b3d305a26f5ef5350a6eaffc7c87a200383 work=golang.org/x/time/v0.16.0 | pure Go, no cgo: linux/amd64 linux/arm64 linux/arm windows/amd64 windows/arm64 darwin/amd64 freebsd/amd64 freebsd/arm64 | n/a |
 
 ## Commitments (recorded, not installed)
 
@@ -327,7 +328,7 @@ with the rows that cause them:
 
 ## Runner notes
 
-- `scripts/dev-run.sh [--write docs/spikes/issue-drafts] [--capture DIR] [--timeout SECONDS] -- COMMAND [ARG...]` is one small POSIX
+- `scripts/dev-run.sh [--write docs/spikes/issue-drafts|internal/outbound/testdata/fixtures/<set>] [--capture DIR] [--timeout SECONDS] -- COMMAND [ARG...]` is one small POSIX
   `sh` wrapper around Docker, run from the repository root. `--bench` stops with `bench_unavailable` until the work that
   introduces it lands (`--capture` with `--bench` is `capture_flag_invalid`), and any other `--write` path is
   `write_path_invalid`; `--capture DIR` is described in the capture
@@ -382,6 +383,14 @@ with the rows that cause them:
   published even when the child exits nonzero. Overflow, an unknown status or a failed export, removal or publication
   publishes nothing further and exits 125; a later rename failure can leave earlier names already published, so rerun. There
   is no rollback and no crash-durability claim, and a draft is never filed externally.
+- `--write internal/outbound/testdata/fixtures/<set>` publishes only `exchanges.json`, the one name the child left under
+  `/src/internal/outbound/testdata/fixtures/<set>`: the same one-entry tar stream and redaction as a draft, at most 8 MiB
+  raw and 8 MiB emitted (`draft_overflow` above it, `export_invalid` for a link, a directory, a second entry or any other
+  type, and `export_failed` when the child exited 0 without the file: the recorder writes it or refuses). `<set>` is one
+  lower-case `[a-z0-9-]` word of at most 32 characters and nothing else: another case, a nested
+  path, a `.` component, a longer name, the root without a set or a trailing slash is `write_path_invalid` before Docker,
+  and a symlinked root or ancestor is `write_root_invalid`. Unlike a draft, a fixture set is published only when the child
+  exited 0, so a refused recording (it prints one fixed reason word) leaves the committed set untouched.
 - Recovery of a failing bootstrap. Before the redactor exists the runner prints only a fixed stage reason and exits 125, never a
   raw build diagnostic: `redact_unavailable` (the `host-redact` build, export or check failed) or `temp_dir_failed` (the
   private scratch directory). Confirm that the Docker daemon is running and that the registry and snapshot network the pinned

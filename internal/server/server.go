@@ -6,6 +6,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -21,6 +22,10 @@ import (
 	"github.com/ViktorsBaikers/Boxset/internal/api"
 	"github.com/ViktorsBaikers/Boxset/internal/auth"
 	"github.com/ViktorsBaikers/Boxset/internal/bounded"
+	"github.com/ViktorsBaikers/Boxset/internal/events"
+	"github.com/ViktorsBaikers/Boxset/internal/jobs"
+	"github.com/ViktorsBaikers/Boxset/internal/store"
+	storedb "github.com/ViktorsBaikers/Boxset/internal/store/db"
 )
 
 // State is the lifecycle state /ping reports. The values are the only text the
@@ -56,6 +61,15 @@ type Backend struct {
 	// Recovering names why the installation is not ready: key_missing,
 	// key_mismatch or restore_in_progress. Empty in every other state.
 	Recovering string
+	// Jobs is the installation's one runtime, which the jobs read model reads
+	// from. Nil until the effects composition attaches it.
+	Jobs *jobs.Runtime
+	// DB is the one store the composition owns: the users event's revision is
+	// read from it after an edit commits.
+	DB *store.DB
+	// Hub is the installation's one event hub. Nil until the effects composition
+	// attaches it.
+	Hub *events.Hub
 }
 
 // Server is one http.Server with the recorded runtime bounds and a lifecycle state.
@@ -191,6 +205,36 @@ func (s *Server) ListUsers(ctx context.Context, query auth.UserQuery, visit func
 	})
 }
 
+// Events is the installation's one hub behind GET /api/v1/events.
+func (s *Server) Events() *events.Hub {
+	b := s.backend.Load()
+	if b == nil {
+		return nil
+	}
+	return b.Hub
+}
+
+// Installation is the installation identity the session response reports: the
+// same ready-time read the cookie name and the stream's hello carry.
+func (s *Server) Installation(ctx context.Context) (string, error) {
+	b := s.backend.Load()
+	if b == nil || b.Sessions == nil {
+		return "", errors.New("server: not attached")
+	}
+	return b.Sessions.Installation(ctx)
+}
+
+// ListJobs is the jobs read model behind GET /api/v1/system/jobs: it reads the
+// rows the runtime owns and decides nothing, because the guard already required
+// the route's right.
+func (s *Server) ListJobs(ctx context.Context, q jobs.Query) (jobs.Page, error) {
+	b := s.backend.Load()
+	if b == nil || b.Jobs == nil {
+		return jobs.Page{}, errors.New("server: not attached")
+	}
+	return b.Jobs.List(ctx, q)
+}
+
 // UpdateUser runs one authorized user edit and records its audit event: the
 // credential kind, action, result and reason only, never the verifier, a name,
 // the request or the target's payload.
@@ -200,6 +244,17 @@ func (s *Server) UpdateUser(ctx context.Context, actor auth.Actor, id int64, pat
 		return auth.User{}, errors.New("server: not attached")
 	}
 	u, err := b.Sessions.UpdateUser(ctx, actor, id, patch)
+	if err == nil && b.Hub != nil {
+		// The edit committed, so its users frame carries the revision the trigger
+		// wrote: a reader invalidates against it instead of refetching blind. The
+		// affected principal's idle streams close before another frame.
+		if revision, err := b.collectionRevision(ctx); err == nil {
+			b.Hub.Publish(events.Event{Name: events.NameUsers, Payload: api.EventUsers{CollectionRevision: revision}})
+		} else if b.Log != nil {
+			b.Log.Warn("users frame dropped", "reason", "collection_revision_unavailable")
+		}
+		b.Hub.PrincipalChanged(u.ID)
+	}
 	if b.Log != nil {
 		result, reason := "edited", "none"
 		var conflict *auth.RevisionConflict
@@ -221,6 +276,18 @@ func (s *Server) UpdateUser(ctx context.Context, actor auth.Actor, id int64, pat
 		b.Log.Info("user edit", "credential", actor.Credential(), "action", "user.update", "result", result, "reason", reason)
 	}
 	return u, err
+}
+
+// collectionRevision reads the users collection revision the edit's trigger
+// wrote, in its own snapshot and without deciding anything.
+func (b *Backend) collectionRevision(ctx context.Context) (int64, error) {
+	var revision int64
+	err := b.DB.Read(ctx, func(tx *sql.Tx) error {
+		var err error
+		revision, err = storedb.New(tx).UsersCollectionRevision(ctx)
+		return err
+	})
+	return revision, err
 }
 
 // ping is public: 200 "ok" with the lifecycle enum, never cached, in every state.

@@ -1,0 +1,229 @@
+{
+  "schema": 1,
+  "set": "outbound-contract",
+  "provenance": {
+    "source": "synthetic",
+    "redistribution": "repository-tests-only"
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8080/catalog"
+      },
+      "response": {
+        "status": 200,
+        "header": {
+          "Content-Length": [
+            "36"
+          ],
+          "Content-Type": [
+            "application/json"
+          ]
+        },
+        "body": "eyJpdGVtcyI6WyJhbHBoYSIsImJldGEiXSwibmV4dCI6IiJ9"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8080/shape"
+      },
+      "response": {
+        "status": 200,
+        "header": {
+          "Content-Length": [
+            "22"
+          ],
+          "Content-Type": [
+            "application/json"
+          ]
+        },
+        "body": "eyJpdGVtcyI6Im5vdC1hLWxpc3QifQ=="
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8080/secure"
+      },
+      "response": {
+        "status": 401,
+        "header": {
+          "Content-Length": [
+            "24"
+          ],
+          "Content-Type": [
+            "application/json"
+          ]
+        },
+        "body": "eyJlcnJvciI6InVuYXV0aG9yaXplZCJ9"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8080/throttled"
+      },
+      "response": {
+        "status": 429,
+        "header": {
+          "Content-Length": [
+            "21"
+          ],
+          "Content-Type": [
+            "application/json"
+          ],
+          "Retry-After": [
+            "1"
+          ]
+        },
+        "body": "eyJlcnJvciI6InNsb3dfZG93biJ9"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8080/throttled"
+      },
+      "response": {
+        "status": 200,
+        "header": {
+          "Content-Length": [
+            "22"
+          ],
+          "Content-Type": [
+            "application/json"
+          ]
+        },
+        "body": "eyJpdGVtcyI6W10sIm5leHQiOiIifQ=="
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8080/duplicates/"
+      },
+      "response": {
+        "status": 200,
+        "header": {
+          "Content-Length": [
+            "35"
+          ],
+          "Content-Type": [
+            "application/json"
+          ]
+        },
+        "body": "eyJpdGVtcyI6WyJhbHBoYSJdLCJuZXh0Ijoic2Vjb25kIn0="
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8080/duplicates/second"
+      },
+      "response": {
+        "status": 200,
+        "header": {
+          "Content-Length": [
+            "29"
+          ],
+          "Content-Type": [
+            "application/json"
+          ]
+        },
+        "body": "eyJpdGVtcyI6WyJhbHBoYSJdLCJuZXh0IjoiIn0="
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8080/repeat/"
+      },
+      "response": {
+        "status": 200,
+        "header": {
+          "Content-Length": [
+            "35"
+          ],
+          "Content-Type": [
+            "application/json"
+          ]
+        },
+        "body": "eyJpdGVtcyI6WyJkZWx0YSJdLCJuZXh0Ijoic2Vjb25kIn0="
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8080/repeat/second"
+      },
+      "response": {
+        "status": 200,
+        "header": {
+          "Content-Length": [
+            "28"
+          ],
+          "Content-Type": [
+            "application/json"
+          ]
+        },
+        "body": "eyJpdGVtcyI6W10sIm5leHQiOiJzZWNvbmQifQ=="
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8080/partial"
+      },
+      "response": {
+        "status": 200,
+        "header": {
+          "Content-Length": [
+            "100"
+          ],
+          "Content-Type": [
+            "application/json"
+          ]
+        },
+        "body": "eyJpdGVtcyI6Ww=="
+      },
+      "fault": "partial"
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8080/reset"
+      },
+      "fault": "reset_after_write"
+    },
+    {
+      "request": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8080/apply"
+      },
+      "fault": "timeout_before_response"
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8080/account"
+      },
+      "response": {
+        "status": 200,
+        "header": {
+          "Content-Length": [
+            "78"
+          ],
+          "Content-Type": [
+            "application/json"
+          ],
+          "Set-Cookie": [
+            "session=\u003ccookie\u003e"
+          ]
+        },
+        "body": "eyJrZXkiOiI8Y3JlZGVudGlhbD4iLCJjb29raWUiOiI8Y29va2llPiIsInVzZXIiOiI8dXNlcj4iLCJob3N0IjoiPGhvc3RuYW1lPiJ9"
+      }
+    }
+  ]
+}

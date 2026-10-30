@@ -5,3 +5,6 @@ project.inlang/.lix/
 project.inlang/.meta.json
 project.inlang/README.md
 project.inlang/cache/
+# Generated from internal/api/openapi.json by scripts/check-api.ts: it keeps the
+# generator's bytes, so prettier leaves it alone.
+src/lib/api.gen.ts

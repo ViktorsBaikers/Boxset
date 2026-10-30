@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/api/v1/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Stream committed events */
+        get: operations["streamEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/session": {
         parameters: {
             query?: never;
@@ -34,6 +51,23 @@ export interface paths {
         put?: never;
         /** Create the first admin with the setup token */
         post: operations["createFirstAdmin"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/system/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List jobs */
+        get: operations["listJobs"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -100,6 +134,66 @@ export interface components {
             password: string;
             username: string;
         };
+        EventHello: {
+            /** @enum {string} */
+            credential: "cookie" | "key" | "local_bypass";
+            installId: string;
+            /** Format: int64 */
+            restoreEpoch: number;
+            rights: ("status:read" | "users:read" | "users:write")[];
+            /** Format: int64 */
+            userId: number;
+            /** Format: int64 */
+            watermark: number;
+        };
+        EventJob: {
+            job: components["schemas"]["Job"];
+        };
+        EventResync: {
+            /** @enum {string} */
+            reason: "epoch" | "gap" | "invalid_id" | "overflow";
+            /** Format: int64 */
+            watermark: number;
+        };
+        EventSystem: {
+            /** @enum {string} */
+            state: "starting" | "recovering" | "ready" | "draining";
+        };
+        EventUsers: {
+            /** Format: int64 */
+            collectionRevision: number;
+        };
+        Job: {
+            /** Format: int64 */
+            attempts: number;
+            /** @enum {string} */
+            class: "required" | "optional";
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            dueAt: string;
+            /** Format: int64 */
+            id: number;
+            kind: string;
+            /** @enum {string} */
+            lane: "interactive" | "background";
+            /** Format: int64 */
+            maxAttempts: number;
+            reasonCode?: string;
+            reasonParams?: {
+                [key: string]: string | number;
+            };
+            /** Format: int64 */
+            revision: number;
+            /** @enum {string} */
+            state: "queued" | "running" | "reconciling" | "succeeded" | "failed" | "review" | "expired";
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        JobPage: {
+            items: components["schemas"]["Job"][];
+            nextCursor?: string;
+        };
         Problem: {
             code: string;
             /** Format: int64 */
@@ -124,6 +218,7 @@ export interface components {
             credential: "cookie" | "key" | "local_bypass";
             /** Format: date-time */
             expiresAt?: string;
+            installId?: string;
             localBypassEnabled: boolean;
             /** Format: int64 */
             restoreEpoch: number;
@@ -209,6 +304,73 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    streamEvents: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Last-Event-ID"?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": components["schemas"]["EventHello"] | components["schemas"]["EventResync"] | components["schemas"]["EventJob"] | components["schemas"]["EventUsers"] | components["schemas"]["EventSystem"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     getSession: {
         parameters: {
             query?: never;
@@ -533,6 +695,85 @@ export interface operations {
             };
             /** @description Service Unavailable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    listJobs: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string;
+                state?: "queued" | "running" | "reconciling" | "succeeded" | "failed" | "review" | "expired";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobPage"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

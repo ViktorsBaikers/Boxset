@@ -3,6 +3,7 @@
 	import { resolve } from '$app/paths';
 	import { goto } from '$app/navigation';
 	import { ApiError, logout } from '../lib/api';
+	import { leaveEvents, stopEvents } from '../lib/events/client';
 	import { access } from '../lib/session';
 	import Button from '../lib/ui/Button.svelte';
 	import Status from '../lib/ui/Status.svelte';
@@ -33,11 +34,16 @@
 		onMutate: () => {
 			ending = true;
 			void client.cancelQueries({ queryKey: ['access'] });
-			client.removeQueries();
 		},
 		onSuccess: () => {
+			// The session is settled as ended, so every tab must stop reading the shared
+			// stream; a failed attempt below leaves the other tabs alone.
+			stopEvents();
 			client.clear();
 			return goto(resolve('/sign-in'));
+		},
+		onError: () => {
+			leaveEvents();
 		},
 		retry: false
 	}));
@@ -113,7 +119,7 @@
 		<Status tone="fault">{m.session_sign_out_failed()}</Status>
 		<Button onclick={() => signOut.mutate()}>{m.session_sign_out()}</Button>
 		<a class="text-control text-ink underline" href={resolve('/sign-in')}>{m.session_sign_in()}</a>
-	{:else if !visible || ending || current.isPending || current.isFetching}
+	{:else if !visible || ending || current.isPending}
 		<Status>{m.loading_status()}</Status>
 	{:else if current.isError}
 		<Status tone="fault">{failure}</Status>

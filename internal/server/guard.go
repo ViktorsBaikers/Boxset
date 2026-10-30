@@ -16,6 +16,36 @@ import (
 	"github.com/ViktorsBaikers/Boxset/internal/secret"
 )
 
+// headStream answers a HEAD of a stream route: ServeMux resolves HEAD to the GET
+// pattern, so the stream handler would otherwise be written frames net/http
+// discards. It advertises the answer the GET would give — the stream's own
+// headers when the hub would admit one, the route's own refusal (503 draining,
+// 429 stream_cap) when it would not — and holds no stream slot.
+func (s *Server) headStream(w http.ResponseWriter, r *http.Request) {
+	ref, ok := auth.CredentialRefFrom(r.Context())
+	if !ok || !ref.Valid() {
+		api.WriteProblem(w, api.NewProblem(http.StatusUnauthorized, "credential_invalid"), nil)
+		return
+	}
+	hub := s.Events()
+	if hub == nil {
+		api.WriteProblem(w, api.NewProblem(http.StatusInternalServerError, "internal_error"), nil)
+		return
+	}
+	if refusal := hub.Refusal(ref); refusal != nil {
+		problem, retry := api.StreamRefusal(refusal)
+		var header http.Header
+		if retry > 0 {
+			header = retryAfter(retry)
+		}
+		api.WriteProblem(w, problem, header)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+}
+
 // guard is the route guard of architecture § Route guard order, after the
 // server limits and the base strip: a secret in the query is refused, the mux
 // resolves the pattern and the route-class table classifies it. public-doc rows
@@ -26,7 +56,14 @@ import (
 func (s *Server) guard(mux *http.ServeMux, routes map[string]api.Route) http.Handler {
 	// serve is the authorized dispatch: it arms the route deadline and charges the
 	// resolved credential's read budget, so it is entered only after the gate has
-	// authorized the route.
+	// authorized the route. A stream route is dispatched straight to the mux
+	// instead: it holds its credential's stream for the life of the connection,
+	// which the hub's own per-credential and global stream caps bound, so it never
+	// spends a short-lived read reservation on every other request of that
+	// credential. A HEAD of it is one request and no stream, so it pays that
+	// reservation and is answered where the hub's refusal can precede the head.
+	// The gate arms the route deadline on it either way, with the read side left
+	// off a stream: its frames and heartbeats keep refreshing the write side.
 	serve := s.admit(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if redact.QueryHasSecret(r.URL.RawQuery) {
@@ -61,7 +98,14 @@ func (s *Server) guard(mux *http.ServeMux, routes map[string]api.Route) http.Han
 		// route deadline but outside the read budget: the budget is charged once the
 		// gate's own authenticator has resolved the credential, so a request that
 		// presents nothing or presents a dead credential still gets its recorded 401.
-		s.gate(w, r, mux, listed, route, serve)
+		dispatch := serve
+		if route.Stream {
+			dispatch = mux
+			if r.Method == http.MethodHead {
+				dispatch = s.admit(http.HandlerFunc(s.headStream))
+			}
+		}
+		s.gate(w, r, mux, listed, route, dispatch)
 	})
 }
 
@@ -72,7 +116,13 @@ func (s *Server) guard(mux *http.ServeMux, routes map[string]api.Route) http.Han
 // resolved is taken by the authorized dispatch, and by the status read a confined
 // installation serves, once a credential is resolved.
 func (s *Server) gate(w http.ResponseWriter, r *http.Request, mux *http.ServeMux, listed bool, route api.Route, serve http.Handler) {
-	s.routeBound(w)
+	if route.Stream {
+		// A stream outlives the route deadline: its frames and heartbeats refresh
+		// the write side, so it carries no read deadline.
+		s.streamBound(w)
+	} else {
+		s.routeBound(w)
+	}
 	state := s.currentState()
 	b := s.backend.Load()
 	// A pending restore refuses in every state, draining included: it has not
@@ -205,6 +255,10 @@ func (s *Server) confined(w http.ResponseWriter, r *http.Request, b *Backend, ro
 // by the lookup gate and refused 401 rather than held behind the store's readers.
 func (s *Server) authenticate(w http.ResponseWriter, r *http.Request, b *Backend, route api.Route, listed bool) (auth.Principal, *http.Request, bool) {
 	var p auth.Principal
+	// ref is the provenance this authentication accepted, for the consumers that
+	// revalidate it later; it is minted in the branch that decided it, never
+	// rebuilt from the request afterwards.
+	var ref auth.CredentialRef
 	// configured is the installation's direct-peer grant, a warning fact and
 	// never a grant on an ineligible peer.
 	configured := len(b.LocalBypass) > 0
@@ -264,8 +318,9 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request, b *Backend
 			}
 			identity.LocalBypassEnabled = configured
 			p = auth.Principal{Rights: identity.Rights}
+			ref = auth.KeyRef(identity)
 			r = r.WithContext(auth.WithActor(auth.WithSession(r.Context(), identity), auth.ActorOf(identity)))
-		} else if PeerMatches(r.RemoteAddr, b.LocalBypass) && !PeerMatches(r.RemoteAddr, b.TrustedProxies) && hostAllowed(r.Host, b.AllowedHosts) {
+		} else if bypassRef, granted := auth.BypassRef(r.RemoteAddr, b.LocalBypass, b.TrustedProxies); granted && hostAllowed(r.Host, b.AllowedHosts) {
 			st, err := b.Setup.State(r.Context())
 			if err != nil {
 				if lookupExpired(w, r) {
@@ -286,6 +341,7 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request, b *Backend
 				api.WriteProblem(w, api.NewProblem(500, "internal_error"), nil)
 				return p, r, false
 			}
+			ref = bypassRef.WithEpoch(epoch)
 			p = auth.Principal{Rights: []string{auth.RightStatusRead, auth.RightUsersRead, auth.RightUsersWrite}}
 			session := auth.Session{Credential: auth.CredentialLocalBypass, Rights: p.Rights, RestoreEpoch: epoch, LocalBypassEnabled: configured}
 			ctx := auth.WithActor(r.Context(), auth.BypassActor(epoch))
@@ -334,6 +390,7 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request, b *Backend
 			identity.LocalBypassEnabled = configured
 			identity.CanLogout = true
 			p = auth.Principal{Rights: identity.Rights}
+			ref = auth.SessionRef(identity)
 			ctx := auth.WithActor(auth.WithSession(r.Context(), identity), auth.ActorOf(identity))
 			r = r.WithContext(auth.WithCookieSession(ctx, identity))
 		}
@@ -342,8 +399,10 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request, b *Backend
 			return p, r, false
 		}
 		// The lookup is over: the route is served on the context the request arrived
-		// with, carrying the identity just resolved.
+		// with, carrying the identity and the provenance one of the three branches
+		// above just resolved.
 		r = identityOn(arrived, r)
+		r = r.WithContext(auth.WithCredentialRef(r.Context(), ref))
 	}
 	return p, r, true
 }

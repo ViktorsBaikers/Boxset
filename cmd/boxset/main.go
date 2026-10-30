@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -23,6 +22,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	// The binary carries the zone database, so a schedule keeps its IANA wall
+	// clock in a container that ships no zoneinfo files.
+	_ "time/tzdata"
 
 	"github.com/mattn/go-isatty"
 
@@ -38,6 +40,10 @@ import (
 	storedb "github.com/ViktorsBaikers/Boxset/internal/store/db"
 )
 
+// drainTimeout is how long a stop waits for requests in flight; the drain order
+// itself belongs to the composition.
+const drainTimeout = server.DrainTimeout
+
 // Exit codes: 2 is a usage or configuration error, 3 a startup refusal that
 // names its reason on stderr, 1 an unhealthy answer from `boxset healthcheck`.
 const (
@@ -45,9 +51,6 @@ const (
 	exitUsage   = 2
 	exitRefused = 3
 )
-
-// drainTimeout is how long a stop waits for requests in flight.
-const drainTimeout = 30 * time.Second
 
 // Proof seams: a test wraps the real step to hold the process inside it. The
 // publisher runs inside the startup migration; the store close is the last
@@ -287,16 +290,12 @@ func apiKey(args []string, stdout, stderr io.Writer) int {
 	return exit
 }
 
-// serve starts the server in the order that keeps the data directory safe: the
-// data directory is resolved to one absolute filesystem path, then the storage
-// check, then the lifetime lock, then a journal an interrupted restore left
-// (finished, discarded, or — where the platform cannot complete one — refused
-// before anything else is opened), then the web shell (read once from
-// BOXSET_URL_BASE; an invalid base or an unusable embedded build refuses here,
-// with nothing listening and the store unopened), then the listener (so /ping
-// answers while the store opens), then the store, whose pending migration is
-// preceded by a verified snapshot. Nothing opens the database before the lock
-// is held, and the lock is released only after the store is closed.
+// serve starts the server through the one production composition: it reads the
+// environment, refuses a configuration it cannot use, checks the mount and
+// hands the rest to server.Start, which owns the data directory from the
+// lifetime lock to the ready transition. A signal ends it through
+// Serving.Stop, which owns the drain order and releases the lock last. Exit
+// codes, diagnostics and the crash monitor stay here.
 func serve(stderr io.Writer) int {
 	// A child is never a server: the marker the runner puts in a child's whole
 	// environment keeps a helper from starting a second lock holder, a scheduler
@@ -326,7 +325,6 @@ func serve(stderr io.Writer) int {
 			allowedHosts = append(allowedHosts, h)
 		}
 	}
-	log := slog.New(redact.NewHandler(slog.NewTextHandler(stderr, nil)))
 	port := os.Getenv("BOXSET_PORT")
 	if port == "" {
 		port = "8484"
@@ -347,255 +345,109 @@ func serve(stderr io.Writer) int {
 		}
 		return refuse(stderr, "mount_check_failed", err)
 	}
-	lock, err := install.Acquire(dir)
-	if errors.Is(err, install.ErrLockHeld) {
-		return refuse(stderr, "lock_held", errors.New("another Boxset server is using this data directory; stop it first"))
-	}
-	if err != nil {
-		return refuse(stderr, "lock_failed", err)
-	}
-	// Released last: only after the store is closed, so no mutation outlives the lock.
-	lockSafe := true
-	defer func() {
-		if !lockSafe {
-			return
-		}
-		if err := lock.Release(); err != nil {
-			say(stderr, "boxset: release lock: %v\n", err)
-			return
-		}
-		log.Info("lock released", "reason", "lock_released")
-	}()
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// The server's own log is the rotating file under the data directory, beside
-	// stderr: neither file ever holds more than its cap, so a log flood costs a
-	// fixed amount of disk and never blocks the drain.
-	rotating, err := logs.Open(dir)
+	cfg := server.ServeConfig{
+		DataDir:         dir,
+		Port:            port,
+		URLBase:         os.Getenv("BOXSET_URL_BASE"),
+		TrustedProxies:  trusted,
+		LocalBypass:     bypass,
+		AllowedHosts:    allowedHosts,
+		EnvSetupToken:   envToken,
+		Version:         version(),
+		SetupHint:       setupHint(),
+		Log:             serveLog(stderr),
+		CrashMonitor:    startCrashMonitor,
+		PublishSnapshot: publishSnapshot,
+		ResumeRestore:   resumeRestore,
+		CloseStore:      func(db *store.DB) error { return closeStore(db) },
+	}
+	serving, err := server.Start(ctx, cfg)
 	if err != nil {
-		return refuse(stderr, "log_unavailable", err)
-	}
-	defer func() {
-		if err := rotating.Close(); err != nil {
-			say(stderr, "boxset: log_close_failed\n")
-		}
-	}()
-	log = slog.New(redact.NewHandler(logs.NewRingHandler(slog.NewTextHandler(logSink{file: rotating, console: stderr}, nil))))
-
-	// The crash monitor is this binary as a child: it drains the runtime's crash
-	// output and publishes it only once this process has ended.
-	stopCrashMonitor, err := startCrashMonitor(dir)
-	if err != nil {
-		return refuse(stderr, "crash_monitor_unavailable", err)
-	}
-	defer stopCrashMonitor()
-
-	layout := install.Layout{Dir: dir}
-	// A journal an interrupted restore left is finished or discarded before the
-	// shell, the listener and the store exist, so neither a migration nor a
-	// request ever sees half a restore. Where the platform cannot complete one,
-	// its presence refuses the start before anything else is opened instead of
-	// serving state nobody reconciled.
-	recovering := ""
-	switch present, err := journalPresent(layout); {
-	case err != nil:
-		return refuse(stderr, "restore_journal_unreadable", err)
-	case present:
-		if _, err := resumeRestore(ctx, layout, restoreOptions(log)); err != nil {
-			if errors.Is(err, install.ErrRestoreUnsupported) {
-				return refuse(stderr, "restore_unsupported", err)
-			}
-			log.Warn("restore did not finish", "reason", server.ReasonRestoreInProgress, "error", err)
-			recovering = server.ReasonRestoreInProgress
-		}
-	}
-
-	srv, err := server.New(os.Getenv("BOXSET_URL_BASE"))
-	if err != nil {
-		return refuse(stderr, "shell_unavailable", err)
-	}
-	// `boxset healthcheck` reads this file, so it answers while this server runs
-	// and never opens the store the lock protects.
-	if err := server.WriteRunState(dir, server.Starting); err != nil {
-		return refuse(stderr, "run_state_unavailable", err)
-	}
-	ln, err := net.Listen("tcp", ":"+port)
-	if err != nil {
-		return refuse(stderr, "listen_failed", err)
-	}
-	served := make(chan error, 1)
-	go func() { served <- srv.Serve(ln) }()
-
-	migrationStart := time.Now()
-	db, err := openAccessStore(ctx, dir, log)
-	if err != nil {
-		_ = drain(srv) // the store failure is the reason reported
-		if errors.Is(err, install.ErrSnapshotUnsupported) {
-			return refuse(stderr, "snapshot_unsupported", err)
-		}
-		return refuse(stderr, "store_unavailable", err)
-	}
-	migrationMs := time.Since(migrationStart).Milliseconds()
-	backend, err := prepareAccess(ctx, db, dir, envToken, log)
-	if err != nil {
-		_ = drain(srv)
-		code := refuse(stderr, "setup_unavailable", err)
-		if errors.Is(err, auth.ErrEnvTokenInvalid) {
-			code = exitUsage
-		}
-		if cerr := closeStore(db); cerr != nil {
-			lockSafe = false
-			say(stderr, "boxset: close store: %v\n", cerr)
-		}
-		return code
-	}
-	// An installation whose keys cannot be opened never becomes ready: nothing
-	// authenticates until every record's key and the current key are usable.
-	if recovering == "" {
-		reason, err := secret.New(db, dir).Check(ctx)
-		switch {
-		case err != nil:
-			log.Warn("installation key check failed", "reason", secret.ReasonMissing, "error", err)
-			recovering = secret.ReasonMissing
-		case reason != "":
-			recovering = reason
-		}
-	}
-	backend.AllowedHosts = allowedHosts
-	backend.TrustedProxies = trusted
-	backend.LocalBypass = bypass
-	backend.Version = version()
-	backend.MigrationMs = migrationMs
-	backend.Sessions = backend.Setup.Sessions()
-	workerCtx, cancelWorker := context.WithCancel(context.Background())
-	workerDone := make(chan struct{})
-	var workerStop error
-	go func() {
-		defer close(workerDone)
-		timer := time.NewTicker(time.Minute)
-		defer timer.Stop()
-		for {
-			select {
-			case <-workerCtx.Done():
-				workerStop = workerCtx.Err()
-				return
-			case <-timer.C:
-				if err := backend.Sessions.FlushMetadata(workerCtx); err != nil && workerCtx.Err() == nil {
-					log.Warn("credential metadata flush failed", "reason", "metadata_flush_failed")
-				}
-			}
-		}
-	}()
-	backend.Recovering = recovering
-	srv.Attach(backend)
-	if recovering == "" {
-		srv.SetState(server.Ready)
-		if err := server.WriteRunState(dir, server.Ready); err != nil {
-			log.Warn("run state not recorded", "reason", "run_state_unavailable")
-		}
-	} else {
-		log.Warn("installation is recovering: no credential authenticates until it is healed", "reason", recovering)
-		srv.SetState(server.Recovering)
-		if err := server.WriteRunState(dir, server.Recovering); err != nil {
-			log.Warn("run state not recorded", "reason", "run_state_unavailable")
-		}
+		return serveRefusal(stderr, err)
 	}
 
 	exit := 0
 	select {
 	case <-ctx.Done():
-	case err := <-served:
+	case err := <-serving.Served():
 		exit = refuse(stderr, "listen_failed", err)
 	}
 	// The admission snapshot is read before anything is stopped, so a wait already
 	// standing behind a live writer is recorded as it was, not as this stop left it.
-	admission := db.Admission()
-	log.Info("signal received", "reason", "signal_received", "phase", admission.Phase.String(), "waiting", admission.Waiting, "records", admission.Records, "ordinal", admission.Ordinal, "generation", admission.Generation)
-	srv.SetState(server.Draining)
-	if err := server.WriteRunState(dir, server.Draining); err != nil {
-		log.Warn("run state not recorded", "reason", "run_state_unavailable")
+	if serving.Effects != nil && serving.Effects.Log != nil {
+		admission := serving.Effects.DB.Admission()
+		serving.Effects.Log.Info("signal received", "reason", "signal_received", "phase", admission.Phase.String(), "waiting", admission.Waiting, "records", admission.Records, "ordinal", admission.Ordinal, "generation", admission.Generation)
 	}
-	backend.Sessions.StopMetadata()
-	cancelWorker()
 	drainCtx, cancelDrain := context.WithTimeout(context.Background(), drainTimeout)
 	defer cancelDrain()
-	if err := srv.Shutdown(drainCtx); err != nil {
-		say(stderr, "boxset: drain: %v\n", err)
-		exit = exitRefused
-	}
-	select {
-	case <-workerDone:
-		log.Info("metadata worker stopped", "reason", "worker_terminal", "cause", stopReason(workerStop))
-		log.Info("metadata worker joined", "reason", "worker_joined")
-	case <-drainCtx.Done():
-		// Exit without unwinding the lock while a mutation capability remains.
-		os.Exit(refuse(stderr, "metadata_drain_failed", drainCtx.Err()))
-	}
-	// Close has no context of its own: own the one call here and join it under the
-	// same deadline, so a stuck close neither outlives the stop nor unwinds the lock.
-	closed := make(chan error, 1)
-	go func() { closed <- closeStore(db) }()
-	var closeErr error
-	select {
-	case closeErr = <-closed:
-	case <-drainCtx.Done():
-		os.Exit(refuse(stderr, "store_close_failed", drainCtx.Err()))
-	}
-	if closeErr != nil {
-		lockSafe = false
-		say(stderr, "boxset: close store: %v\n", closeErr)
-		exit = exitRefused
-	} else {
-		log.Info("store closed", "reason", "store_closed")
+	if err := serving.Stop(drainCtx); err != nil {
+		exit = stopFailure(stderr, err, exit)
 	}
 	return exit
 }
 
-// stopReason names the cause a worker or attempt ended with, in the fixed
-// vocabulary the shutdown record carries.
-func stopReason(err error) string {
-	switch {
-	case err == nil:
-		return "done"
-	case errors.Is(err, context.DeadlineExceeded):
-		return "deadline"
-	case errors.Is(err, context.Canceled):
-		return "canceled"
-	default:
-		return "error"
+// serveLog opens the installation's retained log: the rotating file under the
+// data directory, beside stderr. Neither file ever holds more than its cap, so
+// a log flood costs a fixed amount of disk and never blocks the drain.
+func serveLog(stderr io.Writer) func(dir string) (*slog.Logger, func() error, error) {
+	return func(dir string) (*slog.Logger, func() error, error) {
+		rotating, err := logs.Open(dir)
+		if err != nil {
+			return nil, nil, err
+		}
+		log := slog.New(redact.NewHandler(logs.NewRingHandler(slog.NewTextHandler(logSink{file: rotating, console: stderr}, nil))))
+		return log, func() error {
+			if err := rotating.Close(); err != nil {
+				say(stderr, "boxset: log_close_failed\n")
+				return err
+			}
+			return nil
+		}, nil
 	}
 }
 
-// prepareAccess arms setup while it is open and reads the facts the status
-// route reports. The setup token itself is never logged: the log names only
-// the command that prints it.
-func prepareAccess(ctx context.Context, db *store.DB, dir, envToken string, log *slog.Logger) (server.Backend, error) {
-	b := server.Backend{Setup: auth.NewSetup(db, auth.NewHasher(), dir), Log: log}
-	start := time.Now()
-	open, err := b.Setup.Arm(ctx, envToken)
-	if err != nil {
-		return b, err
-	}
-	if open {
-		b.SetupMs = time.Since(start).Milliseconds()
-		log.Info("setup is open: create the first admin at /setup with the setup token", "reason", "setup_open", "command", setupHint())
-	}
-	err = db.Read(ctx, func(tx *sql.Tx) error {
-		q := storedb.New(tx)
-		hashes, err := q.ListSchemaHashes(ctx)
-		if err != nil {
-			return err
+// serveRefusal reports why a start was refused, with the landed reason word and
+// exit code. A setup token the environment hands over but auth refuses is a
+// configuration error, not a refusal to start.
+func serveRefusal(stderr io.Writer, err error) int {
+	var refused *server.RefusedError
+	if errors.As(err, &refused) {
+		if refused.Reason == "setup_unavailable" && errors.Is(refused.Err, auth.ErrEnvTokenInvalid) {
+			return refuseCode(stderr, exitUsage, refused.Reason, refused.Err)
 		}
-		if len(hashes) > 0 {
-			b.SchemaVersion = hashes[len(hashes)-1].Version
-		}
-		inst, err := q.GetInstallation(ctx)
-		b.RestoreEpoch = inst.RestoreEpoch
-		return err
-	})
-	return b, err
+		return refuse(stderr, refused.Reason, refused.Err)
+	}
+	return refuse(stderr, "serve_failed", err)
+}
+
+// stopFailure puts one stopped installation's failure into the landed exit code
+// and diagnostics. A store that could not be closed, or a credential worker that
+// could not be joined, exits without unwinding the lock: a mutation capability
+// may still exist.
+func stopFailure(stderr io.Writer, err error, exit int) int {
+	var stopped *server.StopError
+	if !errors.As(err, &stopped) {
+		return refuse(stderr, "stop_failed", err)
+	}
+	switch stopped.Reason {
+	case server.ReasonDrain:
+		say(stderr, "boxset: drain: %v\n", stopped.Err)
+		return exitRefused
+	case server.ReasonMetadataDrain:
+		os.Exit(refuse(stderr, "metadata_drain_failed", stopped.Err))
+	case server.ReasonStoreCloseDeadline:
+		os.Exit(refuse(stderr, "store_close_failed", stopped.Err))
+	case server.ReasonStoreClose:
+		say(stderr, "boxset: close store: %v\n", stopped.Err)
+		return exitRefused
+	case server.ReasonAttemptsLive:
+		say(stderr, "boxset: attempts_live: %v\n", stopped.Err)
+		return exitRefused
+	}
+	return refuse(stderr, "stop_failed", err)
 }
 
 // logSink writes the server log to the rotating file and to stderr. The two are
@@ -608,13 +460,6 @@ func (s logSink) Write(p []byte) (int, error) {
 	_, _ = s.file.Write(p)
 	_, _ = s.console.Write(p)
 	return len(p), nil
-}
-
-// drain stops the listener and waits up to drainTimeout for requests in flight.
-func drain(srv *server.Server) error {
-	ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
-	defer cancel()
-	return srv.Shutdown(ctx)
 }
 
 // startCrashMonitor points the runtime's crash output at a child of this binary

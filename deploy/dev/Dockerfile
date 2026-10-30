@@ -277,6 +277,10 @@ WORKDIR /src
 # built CGO_ENABLED=0 -trimpath and must answer GET / with the rewritten shell before the scratch
 # stage `binary` exports only /boxset (the lock-export/host-redact local-export pattern).
 FROM work AS binary-build
+# A measured build pins the shell version from the child's own command inside the container; a real
+# build keeps SvelteKit's default, so a pin handed to the build itself is refused here.
+ARG BOXSET_BUILD_VERSION
+RUN test -z "${BOXSET_BUILD_VERSION:-}" || { echo "binary-build: BOXSET_BUILD_VERSION is a measured pin, not a build argument" >&2; exit 1; }
 USER boxset
 RUN set -eu; \
     cd /src; \

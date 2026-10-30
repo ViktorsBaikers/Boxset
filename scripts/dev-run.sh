@@ -1,6 +1,6 @@
 #!/bin/sh
 # Canonical Boxset dev runner (host, repository root only):
-#   scripts/dev-run.sh [--write docs/spikes/issue-drafts|docs/spikes/data/bench-<UTC>/samples] [--capture DIR] [--bench CPUSET] [--bench-data PATH] [--timeout SECONDS] -- COMMAND [ARG...]
+#   scripts/dev-run.sh [--write docs/spikes/issue-drafts|docs/spikes/data/bench-<UTC>/samples|internal/outbound/testdata/fixtures/<set>] [--capture DIR] [--bench CPUSET] [--bench-data PATH] [--timeout SECONDS] -- COMMAND [ARG...]
 #
 # Rebuilds the `work` image from the current allowlisted inputs (frozen locks,
 # never a lock regeneration) and runs COMMAND with its exact argv in one fresh,
@@ -18,25 +18,27 @@
 # deadline, or 125 with a fixed reason word on stderr.
 #
 # --write publishes the fixed names the child left under /src/<root>, one root per
-# run: docs/spikes/issue-drafts (s5-admission.md, s5-tools.md; at most 64 KiB each)
-# or, with --bench, a fresh docs/spikes/data/bench-<UTC>/samples root (samples.jsonl;
-# at most 32 MiB). Only after the container stopped, each name is exported as one tar
+# run: docs/spikes/issue-drafts (s5-admission.md, s5-tools.md; at most 64 KiB each),
+# internal/outbound/testdata/fixtures/<set> (exchanges.json; at most 8 MiB; <set> is one
+# lower-case [a-z0-9-] word of at most 32 characters and nothing else resolves it), or,
+# with --bench, a fresh docs/spikes/data/bench-<UTC>/samples root (samples.jsonl; at most
+# 32 MiB). Only after the container stopped, each name is exported as one tar
 # stream that must hold exactly one regular file within its cap, streamed straight
 # through the redactor (never spooled raw) and capped, and published by a private
 # part plus `mv` only after the owned container was removed. A draft is published
-# even when the child exits nonzero; benchmark samples are published only when the child
-# exited 0 and every name was exported (a missing, oversize, linked or non-regular
-# name publishes nothing). The archive's member names are checked in a pipe and only
-# fixed result tokens are kept; copy diagnostics pass through the capped redactor
-# before they are kept. A later rename failure may leave earlier names published.
-# There is no rollback and no durability claim.
+# even when the child exits nonzero; a fixture set and benchmark samples are published
+# only when the child exited 0 and every name was exported (a missing, oversize, linked
+# or non-regular name publishes nothing). The archive's member names are checked in a
+# pipe and only fixed result tokens are kept; copy diagnostics pass through the capped
+# redactor before they are kept. A later rename failure may leave earlier names
+# published. There is no rollback and no durability claim.
 #
 # --bench CPUSET (CPUSET = the owner's reserved cores, digits, commas and ranges) runs the child as a
 # reference-profile benchmark: --cpuset-cpus CPUSET --memory 4g --memory-swap 4g and the host directory
 # BOXSET_BENCH_CONFIG (an absolute path, read from the environment at run time and never written
 # anywhere) mounted read-only at /config. It is valid only with --write of a fresh
 # docs/spikes/data/bench-<UTC YYYYMMDDTHHMMSSZ>/samples root and never with --capture; every other
-# form is rejected before Docker with `dev-run: bench_invalid side=<cpuset|write|samples|config|daemon>`
+# form is rejected before Docker with `dev-run: bench_invalid side=<cpuset|write|samples|config|cgroup|daemon>`
 # or `dev-run: bench_unavailable side=config` (variable unset or empty), exit 125; the daemon must be
 # a unix socket of this machine that runs this machine's kernel (the host /proc and /sys are what is
 # observed), and no endpoint is ever printed. The container itself is proven to be this machine's: the pid
@@ -59,6 +61,14 @@
 # or any export failure publishes nothing. Observation is not a reservation: the owner reserves the
 # cores, and the next invocation, from a refreshed image, decides by record version — `bench/parser -judge
 # RUN` for a V1 run and `bench/access -judge RUN` for a data mode's V2 records.
+#
+# BOXSET_BENCH_CGROUP_PARENT (--bench only) names one top-level cgroup slice of this machine: at most 64
+# characters of [A-Za-z0-9._-] ending `.slice`, with no `/`, no `..`, no whitespace, no newline and no
+# leading dash, so it can never name a path below the cgroup root. The slice must exist and its effective
+# cpuset (/sys/fs/cgroup/<slice>/cpuset.cpus.effective) must be exactly the --bench CPUSET, so a container
+# cannot be placed in system.slice or any other slice that holds more cores than the reservation. Any
+# other value, an absent or unreadable slice, a cpuset that differs, or a docker create that fails while a
+# placement is set is `dev-run: bench_invalid side=cgroup`, exit 125; unset passes no cgroup parent.
 # --timeout is whole seconds: above 600 s only together with --bench, and never above 3600; every other
 # form is `dev-run: timeout_invalid`.
 #
@@ -147,6 +157,7 @@ BENCHCPU=
 BENCHLIST=
 BENCHRUN=
 BENCHCFG=
+BENCHCG=
 HAVE_BENCHDATA=0
 BENCHDATA=
 WORKSRC=
@@ -175,7 +186,7 @@ die() {
 }
 
 usage() {
-	printf '%s\n' 'usage: scripts/dev-run.sh [--write docs/spikes/issue-drafts|docs/spikes/data/bench-<UTC>/samples] [--capture DIR] [--bench CPUSET] [--bench-data PATH] [--timeout SECONDS] -- COMMAND [ARG...]' >&2
+	printf '%s\n' 'usage: scripts/dev-run.sh [--write docs/spikes/issue-drafts|docs/spikes/data/bench-<UTC>/samples|internal/outbound/testdata/fixtures/<set>] [--capture DIR] [--bench CPUSET] [--bench-data PATH] [--timeout SECONDS] -- COMMAND [ARG...]' >&2
 	die usage
 }
 
@@ -488,6 +499,24 @@ if [ "$HAVE_BENCH" = 1 ]; then
 	case $BENCHCFG in /*) ;; *) die 'bench_invalid side=config' ;; esac
 	case $BENCHCFG in *[!A-Za-z0-9_./+@=-]* | */ | *//* | */./* | */../* | */. | */..) die 'bench_invalid side=config' ;; esac
 	{ [ -d "$BENCHCFG" ] && [ ! -L "$BENCHCFG" ]; } || die 'bench_invalid side=config'
+	BENCHCG=${BOXSET_BENCH_CGROUP_PARENT:-}
+	if [ -n "$BENCHCG" ]; then
+		# One top-level slice name: no path, no `..`, no whitespace, no leading dash, no empty stem.
+		case $BENCHCG in
+		*.slice) ;;
+		*) die 'bench_invalid side=cgroup' ;;
+		esac
+		case $BENCHCG in
+		-* | *[!A-Za-z0-9._-]* | *..* | .slice) die 'bench_invalid side=cgroup' ;;
+		esac
+		[ "${#BENCHCG}" -le 64 ] || die 'bench_invalid side=cgroup'
+		# The placement must be this machine's own slice for exactly the reserved cores: a slice that is
+		# absent, unreadable, or holds any other cpuset (system.slice above all) would let competing work
+		# share the measurement, so it is refused before Docker with its own reason word.
+		_cgc=$(cat "/sys/fs/cgroup/$BENCHCG/cpuset.cpus.effective" 2>/dev/null) || die 'bench_invalid side=cgroup'
+		bench_ids "$_cgc" || die 'bench_invalid side=cgroup'
+		[ "$IDS" = "$BENCHLIST" ] || die 'bench_invalid side=cgroup'
+	fi
 fi
 if [ "$HAVE_WRITE" = 1 ]; then
 	case $WRITE in
@@ -498,6 +527,22 @@ if [ "$HAVE_WRITE" = 1 ]; then
 		WRITE_CHAIN='docs docs/spikes docs/spikes/data'
 		WCAP=33554432
 		STREAMCAP=33751040
+		;;
+	internal/outbound/testdata/fixtures/*)
+		# The set name is the only variable part of this root: one lower-case
+		# [a-z0-9-] word of at most 32 characters. Anything else or a nested path is
+		# not a set; the set's own directory is judged by the write chain below.
+		_set=${WRITE#internal/outbound/testdata/fixtures/}
+		case $_set in
+		'' | *[!a-z0-9-]*) die write_path_invalid ;;
+		esac
+		[ "${#_set}" -le 32 ] || die write_path_invalid
+		DRAFTS='exchanges.json'
+		# The set directory is part of the chain: a linked or non-directory set is a
+		# refused root, exactly as a linked draft root is.
+		WRITE_CHAIN="internal internal/outbound internal/outbound/testdata internal/outbound/testdata/fixtures $WRITE"
+		WCAP=8388608
+		STREAMCAP=8585216
 		;;
 	*) die write_path_invalid ;;
 	esac
@@ -549,7 +594,7 @@ for _t in docker mktemp timeout od tr rm mv mkdir rmdir cat find sha256sum chmod
 	command -v "$_t" >/dev/null 2>&1 || die host_tool_missing
 done
 if [ "$HAVE_BENCH" = 1 ]; then
-	for _t in awk date df sort id timeout stat readlink; do
+	for _t in awk date df findmnt sort id timeout stat readlink; do
 		command -v "$_t" >/dev/null 2>&1 || die host_tool_missing
 	done
 	# The benchmark counts competing tasks in /proc: that view must be positively the whole machine's, and
@@ -661,6 +706,15 @@ esac
 # --- benchmark data directory (--bench-data) ---------------------------------------------------
 # The host creates, observes and removes the child's data directory; the child only ever writes through
 # its bind. Nothing here ever traverses a path whose identity stopped matching.
+# bench_mount_devfs MOUNTINFO: "<major:minor> <fstype>" of the mount at /bench-data in a mountinfo table,
+# or nothing when the table names none. A mountinfo line is `id parent major:minor root mount_point
+# mount_options [optional...] - fstype source super_options`: the filesystem word is the field after the
+# `-` separator, never a fixed position (field 9 is the mount source of a bind, e.g. /dev/md4).
+bench_mount_devfs() {
+	awk -v mp=/bench-data '
+		{ for (i = 1; i <= NF && $i != "-"; i++) ; if (i > NF) next }
+		$5 == mp { print $3, $(i + 1); exit }' "$1"
+}
 # bench_mounts: DMNT (1 or 0) for the created container's exact mount set — none, the one read-only
 # /config bind, or with data mode that bind beside the writable work bind, whose running container must
 # also show the work directory's device and inode at /bench-data — and MOUNT_RW (1 when the work bind is
@@ -701,7 +755,35 @@ EOF
 				[ "$_md" = "$WORK_DEVID" ] || DMNT=0
 			else
 				_mp=$(timeout 30 docker inspect --format '{{.State.Running}}' "$CTR" 2>/dev/null) || return 1
-				[ "$_mp" = false ] || return 1
+				# A product that made its own process non-dumpable
+				# (internal/child's PrepareManagedOwner) cannot expose
+				# /proc/<pid>/root to this user. The mount table is still
+				# world-readable: confirm the same filesystem is mounted at
+				# /bench-data, beside the inspected bind. A container that
+				# stopped meanwhile leaves the inspected mount set standing.
+				if [ "$_mp" = true ]; then
+					_mm=$(bench_mount_devfs "/proc/$1/mountinfo" 2>/dev/null)
+					_awk=$?
+					# The re-inspection after a failed read: a table that went away because the task
+					# vanished is not a hard failure (the inspected mount set stands); a table that
+					# cannot be read while the task still runs is an unreadable observation.
+					if [ "$_awk" != 0 ]; then
+						_mp=$(timeout 30 docker inspect --format '{{.State.Running}}' "$CTR" 2>/dev/null) || return 1
+						[ "$_mp" != true ] || return 1
+					else
+						# The mount must be the work directory's own filesystem: same major:minor as
+						# the host directory it binds, and a benchmark filesystem word.
+						_hm=$(timeout 30 findmnt -n -o MAJ:MIN --target "$BENCHRUN/work" 2>/dev/null) || return 1
+						_hm=$(printf '%s\n' "$_hm" | awk 'NR == 1 { gsub(/[ \t]/, ""); print }')
+						case $_hm in '' | *[!0-9:]*) return 1 ;; esac
+						set -- $_mm
+						{ [ $# = 2 ] && [ "$1" = "$_hm" ]; } || DMNT=0
+						case ${2:-} in
+						ext4 | xfs) ;;
+						*) DMNT=0 ;;
+						esac
+					fi
+				fi
 			fi
 		fi
 	fi
@@ -816,10 +898,16 @@ create_ctr() {
 	timeout 60 docker create --name "$CTR" --label "boxset.dev-run=$RUNID" --network none \
 		--cap-drop ALL --security-opt no-new-privileges --log-driver=none --user 1000:1000 --workdir /src \
 		${_lim:+--cpuset-cpus "$BENCHCPU" --memory 4g --memory-swap 4g} \
+		${_lim:+${BENCHCG:+--cgroup-parent "$BENCHCG"}} \
 		${_mnt_cfg:+--mount "$_mnt_cfg"} ${_mnt_data:+--mount "$_mnt_data"} \
 		--env-file "$T/lit" "$IMG" "$@" >"$T/create.id" 2>/dev/null
 }
-create_ctr "$@" || die create_failed
+if ! create_ctr "$@"; then
+	# A create that fails while a placement is set is the placement's own refusal (the slice may have
+	# gone, or the daemon may reject it), never the opaque create_failed.
+	[ -z "$BENCHCG" ] || die 'bench_invalid side=cgroup'
+	die create_failed
+fi
 CID=$(cat "$T/create.id" 2>/dev/null) || die create_failed
 bind_container "$CID" "$CTR" || die create_failed
 [ "$(timeout 30 docker inspect --format '{{.HostConfig.LogConfig.Type}}' "$CTR" 2>/dev/null)" = none ] || die log_driver_invalid
@@ -890,6 +978,16 @@ bench_topology() {
 		TOPO_CORES=0
 		TOPO_TPC=0
 		TOPO_NUMA=0
+	fi
+	# Where the per-CPU node links name none, the kernel's own possible list decides when it is
+	# present; only an absent node sysfs (a kernel without NUMA) is inferred as exactly one node,
+	# never a scan that merely found nothing.
+	if [ "$TOPO_NUMA" = 0 ] && [ "$_unk" = 0 ]; then
+		if [ -r /sys/devices/system/node/possible ]; then
+			_np=$(cat /sys/devices/system/node/possible 2>/dev/null) && bench_ids "$_np" && set -- $IDS && TOPO_NUMA=$#
+		elif [ ! -e /sys/devices/system/node ]; then
+			TOPO_NUMA=1
+		fi
 	fi
 }
 # bench_overlap: "ALLOWED RUNNABLE SEEN": the user threads outside this run's container (CID) whose

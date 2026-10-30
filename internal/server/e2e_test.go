@@ -34,7 +34,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/ViktorsBaikers/Boxset/internal/api"
 	"github.com/ViktorsBaikers/Boxset/internal/auth"
+	"github.com/ViktorsBaikers/Boxset/internal/events"
 	"github.com/ViktorsBaikers/Boxset/internal/install"
 	"github.com/ViktorsBaikers/Boxset/internal/redact"
 	"github.com/ViktorsBaikers/Boxset/internal/secret"
@@ -2073,4 +2075,770 @@ func freePort(t *testing.T) string {
 	}
 	defer func() { _ = l.Close() }()
 	return strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
+}
+
+// browserStreamSetupToken arms the installation the browser rows sign in to.
+const browserStreamSetupToken = "synthetic-browser-stream-setup"
+
+// The row's own reads and actions, answered outside every base:
+//
+//	GET  /__stream-probe          the event route's counters
+//	POST /__stream-control?action=restart|expire|system|job
+const browserStreamProbePath = "/__stream-probe"
+const browserStreamControlPath = "/__stream-control"
+
+// browserStreamResync is one resync frame the probe read off the wire.
+type browserStreamResync struct {
+	Watermark int64  `json:"watermark"`
+	Reason    string `json:"reason"`
+}
+
+// browserStreamProbe is what one installation's event route served: the requests it
+// admitted, whether they carried the session cookie, the cursor each request named,
+// the frames the streams delivered (hello's own id and any resync), and how many
+// requests ended.
+type browserStreamProbe struct {
+	mu       sync.Mutex
+	requests int
+	ended    int
+	cookie   bool
+	hello    bool
+	cursors  []string
+	lastID   string
+	helloID  string
+	resync   *browserStreamResync
+	resyncID string
+}
+
+func (p *browserStreamProbe) begin(cookie bool, cursor string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.requests++
+	p.cookie = p.cookie || cookie
+	if p.cursors == nil {
+		p.cursors = []string{}
+	}
+	p.cursors = append(p.cursors, cursor)
+}
+
+func (p *browserStreamProbe) finish() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ended++
+}
+
+// observe reads the frames a stream has written so far in this response: the last
+// applied id is what a reconnect must carry, and hello's watermark plus a resync are
+// the delivered kinds the restart row asserts.
+func (p *browserStreamProbe) observe(seen []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, block := range bytes.Split(seen, []byte("\n\n")) {
+		var id, event, data string
+		for _, line := range bytes.Split(block, []byte("\n")) {
+			switch {
+			case bytes.HasPrefix(line, []byte("id: ")):
+				id = string(line[len("id: "):])
+			case bytes.HasPrefix(line, []byte("event: ")):
+				event = string(line[len("event: "):])
+			case bytes.HasPrefix(line, []byte("data: ")):
+				data = string(line[len("data: "):])
+			}
+		}
+		if event == "" || data == "" {
+			continue
+		}
+		if id != "" {
+			p.lastID = id
+		}
+		switch event {
+		case "hello":
+			// The hello's own id names the sequence it replayed, so the restart row
+			// observes the replay rather than reading the resync's watermark twice.
+			p.hello = true
+			p.helloID = id
+		case "resync":
+			var payload browserStreamResync
+			if json.Unmarshal([]byte(data), &payload) == nil {
+				p.resync = &payload
+				p.resyncID = id
+			}
+		}
+	}
+}
+
+func (p *browserStreamProbe) snapshot() (requests, ended int, cookie, hello bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.requests, p.ended, p.cookie, p.hello
+}
+
+// browserStreamCounters is the probe's JSON view, which the browser rows read.
+func (p *browserStreamProbe) counters() []byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cursors := p.cursors
+	if cursors == nil {
+		cursors = []string{}
+	}
+	body, _ := json.Marshal(struct {
+		Requests int                  `json:"requests"`
+		Ended    int                  `json:"ended"`
+		Cookie   bool                 `json:"cookie"`
+		Hello    bool                 `json:"hello"`
+		Cursors  []string             `json:"cursors"`
+		LastID   string               `json:"last_id"`
+		HelloID  string               `json:"hello_id"`
+		Resync   *browserStreamResync `json:"resync"`
+		ResyncID string               `json:"resync_id"`
+	}{p.requests, p.ended, p.cookie, p.hello, cursors, p.lastID, p.helloID, p.resync, p.resyncID})
+	return body
+}
+
+// browserStreamSniff passes frames through unchanged and remembers what each stream
+// wrote, which is what makes hello, a resync and the reconnect cursor observable.
+type browserStreamSniff struct {
+	http.ResponseWriter
+	probe *browserStreamProbe
+	seen  []byte
+}
+
+func (s *browserStreamSniff) Write(p []byte) (int, error) {
+	const frameLimit = 16 << 10
+	if len(s.seen) < frameLimit {
+		room := frameLimit - len(s.seen)
+		if room > len(p) {
+			room = len(p)
+		}
+		s.seen = append(s.seen, p[:room]...)
+		if bytes.Contains(s.seen, []byte("\n\n")) {
+			s.probe.observe(s.seen)
+		}
+	}
+	return s.ResponseWriter.Write(p)
+}
+
+func (s *browserStreamSniff) Flush() {
+	_ = http.NewResponseController(s.ResponseWriter).Flush()
+}
+
+func (s *browserStreamSniff) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
+// browserStreamInstallation is one real installation over its own store, serving the
+// product's handler behind the row's probe and control reads.
+type browserStreamInstallation struct {
+	base     string
+	origin   string // the mapped name the first-touch row loads
+	loopback string // what a Playwright CLI row reaches it by
+	probe    *browserStreamProbe
+	handler  *browserStreamHandler
+	db       *store.DB
+	setup    *auth.Setup
+	// effects is replaced by a restart while the control handlers read it, so every
+	// access goes through effectsMu.
+	effectsMu sync.Mutex
+	effects   *Effects
+}
+
+func (in *browserStreamInstallation) liveEffects() *Effects {
+	in.effectsMu.Lock()
+	defer in.effectsMu.Unlock()
+	return in.effects
+}
+
+func (in *browserStreamInstallation) replaceEffects(effects *Effects) {
+	in.effectsMu.Lock()
+	in.effects = effects
+	in.effectsMu.Unlock()
+}
+
+// browserStreamHandler serves one installation's product handler, counts its event
+// route, and answers the control reads: a restart swaps in a fresh composition over
+// the same store, an expire ends the sessions the tabs hold, and a system or job
+// action publishes one frame of that kind through the live composition.
+type browserStreamHandler struct {
+	base    string
+	probe   *browserStreamProbe
+	mu      sync.Mutex
+	active  http.Handler
+	restart func() (http.Handler, error)
+	expire  func() error
+	system  func() error
+	job     func() error
+}
+
+func (h *browserStreamHandler) counters() string {
+	return string(h.probe.counters())
+}
+
+func (h *browserStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == browserStreamProbePath && r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = io.WriteString(w, h.counters())
+		return
+	}
+	if r.URL.Path == browserStreamControlPath && r.Method == http.MethodPost {
+		switch r.URL.Query().Get("action") {
+		case "restart":
+			next, err := h.restart()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			h.mu.Lock()
+			h.active = next
+			h.mu.Unlock()
+		case "expire":
+			if err := h.expire(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		case "system":
+			if err := h.system(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		case "job":
+			if err := h.job(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		default:
+			http.Error(w, "unknown action", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	h.mu.Lock()
+	next := h.active
+	h.mu.Unlock()
+	if r.URL.Path != h.base+"/api/v1/events" || r.Method != http.MethodGet {
+		next.ServeHTTP(w, r)
+		return
+	}
+	h.probe.begin(strings.Contains(r.Header.Get("Cookie"), "boxset-"), r.Header.Get("Last-Event-ID"))
+	next.ServeHTTP(&browserStreamSniff{ResponseWriter: w, probe: h.probe}, r)
+	h.probe.finish()
+}
+
+// newBrowserStreamInstallation opens one installation whose first admin is firstAdmin
+// and, for each extra account in order, one user with the given role.
+func newBrowserStreamInstallation(t *testing.T, base, firstAdmin string, accounts [][2]string) *browserStreamInstallation {
+	t.Helper()
+	dir := t.TempDir()
+	db, err := store.Open(t.Context(), filepath.Join(dir, "boxset.db"), store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	setup := auth.NewSetup(db, auth.NewHasher(), dir)
+	if _, err := setup.Arm(t.Context(), browserStreamSetupToken); err != nil {
+		t.Fatal(err)
+	}
+	effects, err := NewEffects(db, setup, ServeConfig{Boot: "browser-stream", Version: "test"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Attach(Backend{
+		Setup:         setup,
+		Sessions:      effects.Sessions,
+		Hub:           effects.Hub,
+		Jobs:          effects.Jobs,
+		DB:            db,
+		SchemaVersion: 4,
+		RestoreEpoch:  1,
+		Version:       "test",
+	})
+	s.SetState(Ready)
+	in := &browserStreamInstallation{base: base, probe: &browserStreamProbe{}, db: db, setup: setup, effects: effects}
+	in.handler = &browserStreamHandler{base: base, probe: in.probe, active: s.http.Handler}
+	in.handler.expire = func() error {
+		return db.Write(context.Background(), func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(context.Background(), "DELETE FROM session")
+			return err
+		})
+	}
+	hub := func() (*events.Hub, error) {
+		live := in.liveEffects()
+		if live == nil || live.Hub == nil {
+			return nil, errors.New("no live composition")
+		}
+		return live.Hub, nil
+	}
+	in.handler.system = func() error {
+		live, err := hub()
+		if err != nil {
+			return err
+		}
+		live.Publish(events.Event{Name: events.NameSystem, Payload: api.EventSystem{State: "ready"}})
+		return nil
+	}
+	in.handler.job = func() error {
+		live, err := hub()
+		if err != nil {
+			return err
+		}
+		at := time.Unix(1_700_000_000, 0).UTC()
+		live.Publish(events.Event{Name: events.NameJob, Payload: api.EventJob{Job: api.Job{
+			ID: 1, Kind: "test", Class: "optional", Lane: "background", State: "succeeded",
+			Attempts: 1, MaxAttempts: 1, DueAt: at, CreatedAt: at, UpdatedAt: at, Revision: 1,
+		}}})
+		return nil
+	}
+	in.handler.restart = func() (http.Handler, error) {
+		// A restart ends the streams the old process served before the new composition
+		// can admit one, exactly as a drain does.
+		if previous := in.liveEffects(); previous != nil && previous.Hub != nil {
+			previous.Hub.Close()
+		}
+		restarted, err := NewEffects(db, setup, ServeConfig{Boot: "browser-stream-restart", Version: "test"}, nil)
+		if err != nil {
+			return nil, err
+		}
+		next, err := New(base)
+		if err != nil {
+			return nil, err
+		}
+		next.Attach(Backend{
+			Setup:         setup,
+			Sessions:      restarted.Sessions,
+			Hub:           restarted.Hub,
+			Jobs:          restarted.Jobs,
+			DB:            db,
+			SchemaVersion: 4,
+			RestoreEpoch:  1,
+			Version:       "test",
+		})
+		next.SetState(Ready)
+		// One committed frame before any client can reconnect, so the resync watermark
+		// the restart announces is this composition's sequence and not a vacuous zero.
+		restarted.Hub.Publish(events.Event{Name: events.NameSystem, Payload: api.EventSystem{State: "ready"}})
+		in.replaceEffects(restarted)
+		return next.http.Handler, nil
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = http.Serve(ln, in.handler) }()
+	t.Cleanup(func() { _ = ln.Close() })
+	// Setup is open, so that class is Host-guarded: the first admin is created over the
+	// loopback literal, before any row reaches the installation by name.
+	host := "http://" + ln.Addr().String()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, host+base+"/api/v1/setup", strings.NewReader(credentials(firstAdmin)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+browserStreamSetupToken)
+	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<16))
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("setup: %d %s", response.StatusCode, body)
+	}
+	for _, account := range accounts {
+		hasher := auth.NewHasher()
+		if _, err := auth.CreateUser(t.Context(), db, hasher, account[0], password, account[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	in.loopback = fmt.Sprintf("http://127.0.0.1:%d%s/", port, base)
+	in.origin = fmt.Sprintf("http://boxset-lan.test:%d%s/", port, base)
+	return in
+}
+
+// browserStreamSwitchboard is one origin in front of two installations: it routes every
+// request to the one it currently names, so a row can observe what a tab does when the
+// installation behind its origin is replaced.
+type browserStreamSwitchboard struct {
+	mu       sync.Mutex
+	second   *browserStreamHandler
+	active   *browserStreamHandler
+	endFirst func()
+}
+
+func newBrowserStreamSwitchboard(t *testing.T, first, second *browserStreamInstallation) (*browserStreamSwitchboard, string) {
+	t.Helper()
+	board := &browserStreamSwitchboard{second: second.handler, active: first.handler}
+	board.endFirst = func() {
+		if effects := first.liveEffects(); effects != nil && effects.Hub != nil {
+			effects.Hub.Close()
+		}
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = http.Serve(ln, board) }()
+	t.Cleanup(func() { _ = ln.Close() })
+	return board, fmt.Sprintf("http://127.0.0.1:%d/", ln.Addr().(*net.TCPAddr).Port)
+}
+
+func (s *browserStreamSwitchboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == browserStreamProbePath && r.Method == http.MethodGet {
+		s.mu.Lock()
+		active := s.active
+		s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = io.WriteString(w, active.counters())
+		return
+	}
+	if r.URL.Path == browserStreamControlPath && r.Method == http.MethodPost {
+		switch r.URL.Query().Get("action") {
+		case "switch":
+			// The first installation's streams end before the second one can admit one:
+			// the worker reconnects to the installation the origin now names.
+			s.mu.Lock()
+			s.active = s.second
+			s.mu.Unlock()
+			s.endFirst()
+		default:
+			http.Error(w, "unknown action", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	s.mu.Lock()
+	active := s.active
+	s.mu.Unlock()
+	active.ServeHTTP(w, r)
+}
+
+// TestBrowserStreamIntegration is the first-touch proof of the browser stream: the
+// built worker loads under the production CSP at a mapped, non-secure origin, the
+// stream carries the session cookie, hello arrives before the stream ends, two tabs
+// share one worker, and the document reports no policy violation. Run after
+// `bun --cwd=web run build` in the same runner child:
+//
+//	scripts/dev-run.sh --capture "$CAP" -- sh -euc 'bun --cwd=web run build; exec env CGO_ENABLED=0 go test -tags=e2e ./internal/server -run TestBrowserStreamIntegration'
+func TestBrowserStreamIntegration(t *testing.T) {
+	if os.Getenv("BOXSET_CAPTURE_DIR") == "" || os.Getenv("BOXSET_CAPTURE_CHALLENGE") == "" {
+		t.Fatal("BOXSET_CAPTURE_DIR and BOXSET_CAPTURE_CHALLENGE come from `scripts/dev-run.sh --capture DIR`")
+	}
+	installations := []*browserStreamInstallation{
+		newBrowserStreamInstallation(t, "", "owner", nil),
+		newBrowserStreamInstallation(t, "/media", "owner", nil),
+	}
+	origins := map[string]string{}
+	for _, installation := range installations {
+		origins[installation.base] = installation.origin
+	}
+	raw, err := json.Marshal(origins)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Minute)
+	defer cancel()
+	cmd := browserCommand(ctx, "bun", "-e", `
+import assert from 'node:assert/strict';
+import { chromium, expect } from '@playwright/test';
+const origins = JSON.parse(process.env.BOXSET_STREAM_ORIGINS);
+const browser = await chromium.launch({ headless: true, args: ['--host-resolver-rules=MAP boxset-lan.test 127.0.0.1'] });
+
+async function counters(page) {
+	return page.evaluate(async () => (await fetch('/__stream-probe')).json());
+}
+async function oneOpenStream(page) {
+	let last;
+	for (let attempt = 0; attempt < 150; attempt++) {
+		last = await counters(page);
+		if (last.requests === 1 && last.hello && last.cookie && last.ended === 0) return last;
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
+	throw new Error('STREAM_PROBE_TIMEOUT ' + JSON.stringify(last));
+}
+// settled waits until the probe stops moving, so a sampled count is the installation's
+// steady state rather than a moment before the second tab's confirmation arrived.
+async function settled(page) {
+	let last = await counters(page);
+	for (let attempt = 0; attempt < 150; attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		const next = await counters(page);
+		if (next.requests === last.requests && next.ended === last.ended) return next;
+		last = next;
+	}
+	throw new Error('STREAM_PROBE_TIMEOUT ' + JSON.stringify(last));
+}
+try {
+	for (const [base, origin] of Object.entries(origins)) {
+		const context = await browser.newContext();
+		try {
+			await context.addInitScript(() => {
+				// The rows drive connectivity through the app's own offline state; a
+				// headless profile's onLine never gates them.
+				Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => true });
+				window.__streamViolations = [];
+				document.addEventListener('securitypolicyviolation', (event) => {
+					window.__streamViolations.push([event.effectiveDirective, event.blockedURI]);
+				});
+			});
+			const owner = await context.newPage();
+			const loaded = await owner.goto(origin);
+			assert.equal(loaded.status(), 200);
+			const policy = loaded.headers()['content-security-policy'];
+			assert.match(policy, /script-src 'self'/);
+			assert.match(policy, /connect-src 'self'/);
+			await expect(owner.getByRole('status')).toHaveText('Sign in to check this Boxset.');
+			assert.equal(await owner.evaluate(() => window.isSecureContext), false, 'the mapped origin is not a secure context');
+			assert.equal((await counters(owner)).requests, 0, 'an unconfirmed tab opened a stream');
+
+			await owner.getByRole('link', { name: 'Sign in', exact: true }).click();
+			await owner.getByLabel('Username').fill('owner');
+			await owner.getByLabel('Password', { exact: true }).fill('correct horse battery staple');
+			await owner.getByRole('button', { name: 'Sign in', exact: true }).click();
+			await expect(owner.getByRole('status')).toHaveText('Boxset is ready.');
+			const first = await oneOpenStream(owner);
+
+			const second = await context.newPage();
+			let secondStatus = 0;
+			second.on('request', (candidate) => {
+				if (candidate.method() === 'GET' && new URL(candidate.url()).pathname.endsWith('/api/v1/system/status')) secondStatus++;
+			});
+			await second.goto(origin);
+			await expect(second.getByRole('status')).toHaveText('Boxset is ready.');
+			const shared = await settled(second);
+			assert.equal(shared.requests, 1, 'two tabs opened more than one stream');
+			assert.equal(shared.requests - shared.ended, 1, 'both tabs did not share one open stream');
+			// The second tab's own replayed hello: after its mount read it refetched the
+			// projection once from the worker's cached greeting.
+			for (let attempt = 0; attempt < 100 && secondStatus < 2; attempt++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+			}
+			await new Promise((resolve) => setTimeout(resolve, 500));
+			assert.equal(secondStatus, 2, 'the second tab did not apply its own replayed hello exactly once');
+			assert.equal(await second.evaluate(() => window.isSecureContext), false);
+
+			// The owner's document leaves: the surviving tab keeps reading the installation
+			// through one open stream, whether the worker kept it or re-established it.
+			const ownerViolations = await owner.evaluate(() => window.__streamViolations);
+			assert.deepEqual(ownerViolations, [], 'the owner document reported a policy violation');
+			await owner.close();
+			let survived = await counters(second);
+			for (let attempt = 0; attempt < 50 && survived.requests - survived.ended !== 1; attempt++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				survived = await counters(second);
+			}
+			assert.equal(survived.requests - survived.ended, 1, 'the owner exit left no single open stream');
+			assert.equal(survived.hello, true);
+			assert.equal(survived.cookie, true);
+			const violations = await second.evaluate(() => window.__streamViolations);
+			assert.deepEqual(violations, [], 'the surviving document reported a policy violation');
+			console.log('STREAM-INTEGRATION ' + JSON.stringify({ base, requests: survived.requests, hello: survived.hello, cookie: survived.cookie, ended: survived.ended, open: survived.requests - survived.ended, shared: first.requests === 1, secure: false, violations: ownerViolations.length + violations.length }));
+		} finally {
+			await context.close();
+		}
+	}
+} catch (error) {
+	console.log('STREAM-INTEGRATION-FAIL ' + (error?.name ?? 'error') + ': ' + (error?.message ?? ''));
+	process.exitCode = 1;
+} finally {
+	await browser.close();
+}
+`)
+	cmd.Dir = filepath.Join("..", "..", "web")
+	cmd.Env = browserEnv("BOXSET_STREAM_ORIGINS=" + string(raw))
+	output := &browserOutput{}
+	cmd.Stdout, cmd.Stderr = output, output
+	runErr := cmd.Run()
+	t.Log(output.String())
+	if runErr != nil || output.overflow {
+		t.Fatalf("browser stream integration: %v overflow=%t", runErr, output.overflow)
+	}
+	// Every admitted stream carried the cookie and announced hello, and the browser's
+	// own exit ended all of them: the surviving tab's single open stream was observed
+	// in the document, where the closing context could not remove it first.
+	for _, installation := range installations {
+		requests, ended, cookie, hello := installation.probe.snapshot()
+		if requests < 1 || ended != requests || !cookie || !hello {
+			t.Fatalf("%s: requests=%d ended=%d cookie=%t hello=%t", installation.base, requests, ended, cookie, hello)
+		}
+	}
+	// Both documents' policy arrays are the counter this PASS line reports, so a
+	// violation can never hide behind a literal zero.
+	violations, rows := 0, 0
+	for _, line := range strings.Split(output.String(), "\n") {
+		const prefix = "STREAM-INTEGRATION "
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		var measured struct {
+			Violations int `json:"violations"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, prefix)), &measured); err != nil {
+			t.Fatalf("stream integration measurement: %v", err)
+		}
+		rows++
+		violations += measured.Violations
+	}
+	if rows != len(installations) {
+		t.Fatalf("stream integration rows=%d want=%d", rows, len(installations))
+	}
+	if violations != 0 {
+		t.Fatalf("stream integration policy violations=%d", violations)
+	}
+	// The row runs with --capture, which publishes the four canonical captures, so it
+	// drives the same design-brief state matrix the events row does.
+	browserCaptureMatrix(t, installations[0].loopback, installations[1].loopback)
+	t.Log(fmt.Sprintf("STREAM-INTEGRATION-PASS bases=/,/media secure=false streams=1 hello=first cookie=session csp=%d documents=%d", violations, rows))
+}
+
+// browserCaptureMatrix publishes the design brief's state matrix: the existing shell
+// capture row at both supported bases asserts 320/768/1024/1440 CSS px, keyboard and
+// touch, 200% text, 400% zoom, light and dark and reduced motion with 0 CSP violations
+// and 0 axe findings, and writes the four canonical captures.
+func browserCaptureMatrix(t *testing.T, dev, media string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 6*time.Minute)
+	defer cancel()
+	captures := browserCommand(ctx, "bun", filepath.Join("node_modules", "@playwright", "test", "cli.js"), "test", "shell.spec.ts", "--grep", "loads the public shell, offers Retry offline, passes axe and captures")
+	captures.Dir = filepath.Join("..", "..", "web")
+	captures.Env = sessionBrowserEnvironment(t, "events", browserEnv("S5_DEV_URL="+dev, "S5_PREVIEW_URL="+media))
+	runSessionBrowser(t, captures, 4, nil)
+}
+
+// TestBrowserEvents drives the browser rows of the shared stream: three confirmed tabs
+// on one server stream, the owner tab's exit, a restart's resync with its cursor and
+// exact refetch, the replayed hello of a late-confirming tab, the existing sign-in and
+// no-permission states under sign-out, expiry (then the same identity signing in again
+// on one new stream), a disable and a downgrade, an unconfirmed tab, a tab that leaves
+// its route or whose sign-out attempt fails, a system frame that keeps the ready surface
+// painted, and two installations isolated behind one origin. The same run sweeps the
+// ready and sign-in states across the shell matrix (320/768/1024/1440 CSS px, light and
+// dark, reduced and full motion, default and expanded text), asserting page fit, a
+// keyboard focus ring and no layout shift in every cell, screenshots both states at
+// 320 px in light mode, and publishes the design brief's capture matrix
+// (web/e2e/shell.spec.ts) at both supported bases. Run after
+// `bun --cwd=web run build` in the same runner child:
+//
+//	scripts/dev-run.sh --capture "$CAP" -- sh -euc 'bun --cwd=web run build; exec env CGO_ENABLED=0 go test -tags=e2e ./internal/server -run TestBrowserEvents'
+func TestBrowserEvents(t *testing.T) {
+	if os.Getenv("BOXSET_CAPTURE_DIR") == "" || os.Getenv("BOXSET_CAPTURE_CHALLENGE") == "" {
+		t.Fatal("BOXSET_CAPTURE_DIR and BOXSET_CAPTURE_CHALLENGE come from `scripts/dev-run.sh --capture DIR`")
+	}
+	accounts := [][2]string{
+		{"editor", auth.RoleAdmin},
+		{"second", auth.RoleViewer},
+		{"disabled", auth.RoleViewer},
+		{"expired", auth.RoleViewer},
+		{"downgradee", auth.RoleAdmin},
+	}
+	root := newBrowserStreamInstallation(t, "", "owner", accounts)
+	media := newBrowserStreamInstallation(t, "/media", "owner", accounts)
+	// The second installation of the isolation row: its own store, installed-b as its
+	// first admin (user id 1 and restore epoch 1 like the owner of the first one, so the
+	// two confirmed triples differ only in installId), reached only through the shared
+	// origin. Its editor signs in to change a user, which publishes a users frame.
+	other := newBrowserStreamInstallation(t, "", "installed-b", [][2]string{{"editor", auth.RoleAdmin}})
+	_, switchedOrigin := newBrowserStreamSwitchboard(t, root, other)
+
+	countersPath := filepath.Join(t.TempDir(), "events-counters.txt")
+	env := browserEnv(
+		"S5_DEV_URL="+root.loopback,
+		"S5_PREVIEW_URL="+media.loopback,
+		"BOXSET_EVENTS_SWITCH="+switchedOrigin,
+		"BOXSET_EVENTS_SECOND="+other.loopback,
+		"BOXSET_EVENTS_COUNTERS="+countersPath,
+	)
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Minute)
+	defer cancel()
+	events := browserCommand(ctx, "bun", filepath.Join("node_modules", "@playwright", "test", "cli.js"), "test", "events.spec.ts")
+	events.Dir = filepath.Join("..", "..", "web")
+	events.Env = sessionBrowserEnvironment(t, "events", env)
+	// Twelve rows at each supported base plus the isolation row.
+	runSessionBrowser(t, events, 25, nil)
+
+	// The counters come from the spec's own policy collector and axe scan, one line per
+	// row, so the PASS line reports what the run measured.
+	measured, err := os.ReadFile(countersPath)
+	if err != nil {
+		t.Fatalf("events counters: %v", err)
+	}
+	csp, axe, scans, rows := 0, 0, 0, 0
+	for _, line := range strings.Split(string(measured), "\n") {
+		var lineCSP, lineAxe, lineScans int
+		if _, scanErr := fmt.Sscanf(line, "csp=%d axe=%d scans=%d", &lineCSP, &lineAxe, &lineScans); scanErr != nil {
+			continue
+		}
+		rows++
+		csp += lineCSP
+		axe += lineAxe
+		scans += lineScans
+	}
+	if rows != 25 || scans != 2 {
+		t.Fatalf("events counters rows=%d scans=%d", rows, scans)
+	}
+
+	// The capture row reports one line for every shell-matrix cell it measured. The
+	// expected set is derived here, so a cell the row skipped fails this run instead of
+	// leaving the PASS line to count itself.
+	cells := make(map[string]bool)
+	for _, line := range strings.Split(string(measured), "\n") {
+		if strings.HasPrefix(line, "cell ") {
+			cells[line] = true
+		}
+	}
+	expected := 0
+	for _, base := range []string{"root", "media"} {
+		for _, state := range []string{"sign-in", "ready"} {
+			for _, width := range []string{"320", "768", "1024", "1440"} {
+				for _, theme := range []string{"light", "dark"} {
+					for _, motion := range []string{"reduce", "no-preference"} {
+						for _, text := range []string{"base", "expanded"} {
+							cell := fmt.Sprintf(
+								"cell base=%s state=%s width=%s theme=%s motion=%s text=%s",
+								base, state, width, theme, motion, text,
+							)
+							if !cells[cell] {
+								t.Fatalf("events matrix skipped %q", cell)
+							}
+							expected++
+						}
+					}
+				}
+			}
+		}
+	}
+	if len(cells) != expected {
+		t.Fatalf("events matrix measured %d cells, expected %d", len(cells), expected)
+	}
+
+	// The capture row screenshots the two states it asserts at 320 CSS px in light
+	// mode, so the pictures the design brief names are the ones the row painted.
+	captureDir := os.Getenv("BOXSET_CAPTURE_DIR")
+	for _, base := range []string{"root", "media"} {
+		for _, state := range []string{"sign-in", "ready"} {
+			name := fmt.Sprintf("events-%s-%s-320-light.png", base, state)
+			path := filepath.Join(captureDir, name)
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("capture %s: %v", name, err)
+			}
+			header := make([]byte, 8)
+			file, err := os.Open(path)
+			if err != nil {
+				t.Fatalf("capture %s: %v", name, err)
+			}
+			_, readErr := io.ReadFull(file, header)
+			_ = file.Close()
+			if readErr != nil || info.Size() < 20 || !bytes.Equal(header, []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}) {
+				t.Fatalf("capture %s is not a PNG (size=%d read=%v)", name, info.Size(), readErr)
+			}
+		}
+	}
+
+	browserCaptureMatrix(t, root.loopback, media.loopback)
+	t.Log(fmt.Sprintf("BROWSER-EVENTS-PASS bases=/,/media rows=%d capture=4,4 csp=%d axe=%d scans=%d cells=%d states=sign-in,ready", rows, csp, axe, scans, len(cells)))
 }

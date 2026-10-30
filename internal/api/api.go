@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -17,10 +18,19 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
 	"github.com/ViktorsBaikers/Boxset/internal/auth"
+	"github.com/ViktorsBaikers/Boxset/internal/events"
+	"github.com/ViktorsBaikers/Boxset/internal/ingest"
+	"github.com/ViktorsBaikers/Boxset/internal/jobs"
 )
 
 // Prefix is the path every native API route starts with.
 const Prefix = "/api/v1"
+
+// nativeJSONBodyBytes is the transport bound of the native JSON request cap. The
+// decoder admits ingest.MaxJSONBytes inclusive, while huma refuses a body that
+// reaches its MaxBodyBytes, so the transport bound is one byte above the cap:
+// exactly ingest.MaxJSONBytes is admitted and its successor is 413 body_too_large.
+const nativeJSONBodyBytes = ingest.MaxJSONBytes + 1
 
 // openAPIPath is where Huma serves the document (".json", "-3.0.json",
 // ".yaml" and "-3.0.yaml"); those four routes need a principal of any right.
@@ -35,11 +45,16 @@ const (
 )
 
 // Route is one native API route as the guard sees it: its ServeMux pattern,
-// credential class and the right a principal needs ("" = any right).
+// credential class, the right a principal needs ("" = any right) and whether its
+// response outlives the request read.
 type Route struct {
 	Pattern string
 	Class   string
 	Right   string
+	// Stream marks a route whose response outlives its request read: the stream
+	// serves one connection for as long as the client keeps it, so it is answered
+	// outside the read budget the request's own read was charged to.
+	Stream bool
 }
 
 // Service is the domain behind the operations.
@@ -52,14 +67,22 @@ type Service interface {
 	CreateFirstAdmin(ctx context.Context, p auth.Principal, username, password string) (auth.User, error)
 	// Status is the current lifecycle snapshot.
 	Status(ctx context.Context) (Status, error)
+	// ListJobs is one page of durable work the caller may read.
+	ListJobs(ctx context.Context, q jobs.Query) (jobs.Page, error)
+	// Events is the installation's one event hub the stream operation serves.
+	Events() *events.Hub
+	// Installation is the ready-time installation identity the session reports.
+	Installation(ctx context.Context) (string, error)
 }
 
 // operation is the documented contract of one operation: its guard class and
-// right, the error codes each status may carry and its typed registration.
+// right, the error codes each status may carry, whether its response outlives the
+// request read and its typed registration.
 type operation struct {
 	op       huma.Operation
 	class    string
 	right    string
+	stream   bool
 	errors   map[int][]string
 	register func(huma.API, huma.Operation)
 }
@@ -87,7 +110,37 @@ func New(mux *http.ServeMux, svc Service) (huma.API, []Route) {
 	for _, o := range h.operations() {
 		routes = append(routes, register(a, o))
 	}
+	registerEvents(a)
 	return a, routes
+}
+
+// registerEvents puts every event component in the document explicitly: a
+// stream response has no JSON body to derive them from, so the five frame
+// payloads are registered by name and referenced from the stream's own 200
+// response, which is what keeps them in the document. The media type is the union
+// of those payloads and carries no type of its own, so the generated client types
+// a frame as one of the components instead of an impossible intersection.
+func registerEvents(a huma.API) {
+	registry := a.OpenAPI().Components.Schemas
+	refs := make([]*huma.Schema, 0, 5)
+	for _, payload := range []any{events.EventHello{}, events.EventResync{}, EventJob{}, EventUsers{}, EventSystem{}} {
+		refs = append(refs, registry.Schema(reflect.TypeOf(payload), true, ""))
+	}
+	op := a.OpenAPI().Paths[Prefix+"/events"].Get
+	op.Responses["200"].Content = map[string]*huma.MediaType{
+		"text/event-stream": {
+			Schema: &huma.Schema{
+				Description: "One server-sent frame at a time; the data line is one of these components.",
+				OneOf:       refs,
+			},
+		},
+	}
+	// huma documents 422 beside any declared error whose operation has an input, and
+	// this operation's only input is the unbounded cursor header: a cursor it cannot
+	// parse is the stream's own resync{invalid_id}, and an over-long one is refused
+	// by the server's header bound before the handler. No validation refusal is
+	// reachable, so the recorded errors stay 401, 403, 429 stream_cap and 503 draining.
+	delete(op.Responses, "422")
 }
 
 // Document is the OpenAPI document exactly as GET /api/v1/openapi.json serves it.
@@ -137,7 +190,7 @@ func register(a huma.API, o operation) Route {
 		}
 		resp.Extensions = map[string]any{"x-boxset-codes": c}
 	}
-	return Route{Pattern: o.op.Method + " " + o.op.Path, Class: o.class, Right: o.right}
+	return Route{Pattern: o.op.Method + " " + o.op.Path, Class: o.class, Right: o.right, Stream: o.stream}
 }
 
 type handlers struct{ svc Service }
@@ -150,12 +203,12 @@ func (h *handlers) operations() []operation {
 			errors: map[int][]string{400: {"cursor_invalid", "secret_in_url"}, 401: {"unauthenticated", "credential_invalid"}, 403: {"forbidden"}, 409: {"cursor_stale"}, 422: {"validation_failed"}},
 		},
 		{
-			op:       huma.Operation{OperationID: "updateUser", Method: http.MethodPatch, Path: Prefix + "/users/{id}", Summary: "Edit user", Tags: []string{"users"}},
+			op:       huma.Operation{OperationID: "updateUser", Method: http.MethodPatch, Path: Prefix + "/users/{id}", Summary: "Edit user", Tags: []string{"users"}, MaxBodyBytes: nativeJSONBodyBytes},
 			register: func(a huma.API, op huma.Operation) { huma.Register(a, op, h.patchUser) }, class: ClassPrincipal, right: auth.RightUsersWrite,
 			errors: map[int][]string{400: {"body_invalid", "secret_in_url"}, 401: {"unauthenticated", "credential_invalid"}, 403: {"forbidden", "cross_origin_denied"}, 404: {"user_not_found"}, 409: {"revision_conflict", "last_admin"}, 413: {"body_too_large"}, 422: {"validation_failed", "patch_empty"}, 503: {"draining", "recovering"}},
 		},
 		{
-			op:       huma.Operation{OperationID: "login", Method: http.MethodPost, Path: Prefix + "/session", Summary: "Sign in", Tags: []string{"session"}, DefaultStatus: 201},
+			op:       huma.Operation{OperationID: "login", Method: http.MethodPost, Path: Prefix + "/session", Summary: "Sign in", Tags: []string{"session"}, DefaultStatus: 201, MaxBodyBytes: nativeJSONBodyBytes},
 			register: func(a huma.API, op huma.Operation) { huma.Register(a, op, h.login) }, class: ClassLogin,
 			errors: map[int][]string{400: {"body_invalid", "secret_in_url"}, 401: {"credentials_invalid"}, 403: {"cross_origin_denied"}, 413: {"body_too_large"}, 421: {"host_not_allowed"}, 422: {"validation_failed"}, 429: {"login_throttled", "hash_busy"}, 503: {"starting", "recovering", "draining"}},
 		},
@@ -177,6 +230,7 @@ func (h *handlers) operations() []operation {
 				Summary:       "Create the first admin with the setup token",
 				Tags:          []string{"setup"},
 				DefaultStatus: http.StatusCreated,
+				MaxBodyBytes:  nativeJSONBodyBytes,
 			},
 			register: func(a huma.API, op huma.Operation) { huma.Register(a, op, h.setup) },
 			class:    ClassSetup,
@@ -191,6 +245,27 @@ func (h *handlers) operations() []operation {
 				http.StatusUnprocessableEntity:   {"validation_failed"},
 				http.StatusTooManyRequests:       {"setup_throttled", "hash_busy"},
 				http.StatusServiceUnavailable:    {"recovering", "draining"},
+			},
+		},
+		{
+			op:       huma.Operation{OperationID: "streamEvents", Method: http.MethodGet, Path: Prefix + "/events", Summary: "Stream committed events", Tags: []string{"events"}},
+			register: func(a huma.API, op huma.Operation) { huma.Register(a, op, h.streamEvents) }, class: ClassPrincipal, right: auth.RightStatusRead, stream: true,
+			errors: map[int][]string{
+				http.StatusUnauthorized:       {"unauthenticated", "credential_invalid"},
+				http.StatusForbidden:          {"forbidden"},
+				http.StatusTooManyRequests:    {"stream_cap"},
+				http.StatusServiceUnavailable: {"draining"},
+			},
+		},
+		{
+			op:       huma.Operation{OperationID: "listJobs", Method: http.MethodGet, Path: Prefix + "/system/jobs", Summary: "List jobs", Tags: []string{"system"}},
+			register: func(a huma.API, op huma.Operation) { huma.Register(a, op, h.listJobs) }, class: ClassPrincipal, right: auth.RightStatusRead,
+			errors: map[int][]string{
+				http.StatusBadRequest:          {"cursor_invalid", "secret_in_url"},
+				http.StatusUnauthorized:        {"unauthenticated", "credential_invalid"},
+				http.StatusForbidden:           {"forbidden"},
+				http.StatusConflict:            {"cursor_stale"},
+				http.StatusUnprocessableEntity: {"validation_failed"},
 			},
 		},
 		{

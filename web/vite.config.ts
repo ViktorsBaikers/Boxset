@@ -15,6 +15,17 @@ const base = process.env.NODE_ENV === 'production' ? '/__boxset_base__' : '';
 // mounts the source read-only, so deploy/dev/watch.ts points it at a writable copy.
 const i18n = process.env.BOXSET_I18N_DIR ?? '.';
 
+// A measured build pins its app version so the embedded shell is byte-identical
+// across runs; an ordinary build keeps SvelteKit's per-build timestamp. The pin is a
+// short opaque token: anything else is refused rather than written into the shell.
+const buildVersion = process.env.BOXSET_BUILD_VERSION;
+if (buildVersion && !/^[A-Za-z0-9._-]{1,64}$/.test(buildVersion)) {
+	throw new Error(
+		`BOXSET_BUILD_VERSION must be 1-64 characters of [A-Za-z0-9._-], got ${JSON.stringify(buildVersion)}`
+	);
+}
+const version = buildVersion ? { name: buildVersion } : undefined;
+
 export default defineConfig({
 	// Keep component IDs logical so relative generated imports reach the .svelte-kit volume.
 	// Native config imports use Bun's default canonicalization before this option is loaded.
@@ -29,6 +40,7 @@ export default defineConfig({
 				precompress: false
 			}),
 			paths: { base },
+			version,
 			compilerOptions: { runes: true }
 		}),
 		paraglideVitePlugin({ project: `${i18n}/project.inlang`, outdir: './.svelte-kit/paraglide' })

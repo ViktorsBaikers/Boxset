@@ -781,3 +781,66 @@ func TestSearchQueryPlan(t *testing.T) {
 		t.Fatalf("alias rows are not reached by primary key:\n%s", all)
 	}
 }
+
+// TestActivationEnqueuesPurge: the activation that retires a generation writes
+// the required purge of exactly that row in the same transaction. A dataset
+// with no active row to retire, and a refused activation, write none.
+func TestActivationEnqueuesPurge(t *testing.T) {
+	w := newSearchWorld(t)
+	ctx := t.Context()
+	title := w.addTitle("Alpha Show")
+
+	first := w.stage("titles")
+	w.aliases(title, &first, "alpha one")
+	if err := w.lib.ActivateGeneration(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if n := queryInt(t, w.db, `SELECT count(*) FROM job`); n != 0 {
+		t.Fatalf("the first activation wrote %d intents, want none: it retires nothing", n)
+	}
+
+	second := w.stage("titles")
+	w.aliases(title, &second, "bravo two")
+	if err := w.lib.ActivateGeneration(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	if n := queryInt(t, w.db, `SELECT count(*) FROM job`); n != 1 {
+		t.Fatalf("%d intents after the activation, want the one purge", n)
+	}
+	intent := func() map[string]any {
+		t.Helper()
+		var kind, class, lane, state, params, dedupe, key string
+		var maxAttempts int
+		err := w.db.Read(ctx, func(tx *sql.Tx) error {
+			return tx.QueryRow(`SELECT kind, class, lane, state, params, dedupe_key, concurrency_key, max_attempts FROM job`).
+				Scan(&kind, &class, &lane, &state, &params, &dedupe, &key, &maxAttempts)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return map[string]any{"kind": kind, "class": class, "lane": lane, "state": state, "params": params, "dedupe": dedupe, "key": key, "max": maxAttempts}
+	}()
+	retired := "alias-generation:" + strconv.FormatInt(int64(first), 10)
+	if intent["kind"] != "alias.purge" || intent["class"] != "required" || intent["lane"] != "background" ||
+		intent["state"] != "queued" || intent["dedupe"] != retired || intent["key"] != retired || intent["max"] != 5 {
+		t.Fatalf("the intent = %v, want the required purge of the retired generation %s", intent, retired)
+	}
+	if want := `{"generation":"` + strconv.FormatInt(int64(first), 10) + `"}`; intent["params"] != want {
+		t.Fatalf("intent params = %v, want %s", intent["params"], want)
+	}
+	// The retired row is the one it names, and the new aliases are the ones that search.
+	if n := queryInt(t, w.db, `SELECT count(*) FROM alias_generation WHERE state = 'retired' AND id = ?`, int64(first)); n != 1 {
+		t.Fatalf("the named generation is not the retired one")
+	}
+	w.want("bravo two", title)
+	w.want("alpha one")
+	w.integrity()
+
+	// A refused activation writes no second intent and moves nothing.
+	if err := w.lib.ActivateGeneration(ctx, second); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("activating the active generation = %v, want ErrInvalidInput", err)
+	}
+	if n := queryInt(t, w.db, `SELECT count(*) FROM job`); n != 1 {
+		t.Fatalf("%d intents after the refusal, want the one purge", n)
+	}
+}

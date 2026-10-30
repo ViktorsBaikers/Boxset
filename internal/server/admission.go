@@ -29,10 +29,12 @@ const (
 	passwordRequests = 32
 )
 
-// routeDeadline is the safety net for every route the guard answers beyond the
+// routeDeadline is the safety net for every request the guard answers beyond the
 // public-doc rows: its read and write deadlines, and the server's own ReadTimeout
 // for a body that never arrives, so a request that drips or stalls ends instead
-// of holding its reader slot for the life of the server.
+// of holding its reader slot for the life of the server. A stream route carries
+// the write side only: it is legitimately idle between frames, and each frame
+// arms its own write deadline again.
 const routeDeadline = 30 * time.Second
 
 // admission bounds the read work one credential and the whole server may have in
@@ -155,12 +157,28 @@ func admittedKey(session auth.Session) string {
 // drains. It is the safety net for every route the guard answers beyond the
 // public-doc rows, and it is armed once when the route is classified.
 func (s *Server) routeBound(w http.ResponseWriter) {
+	s.bound(w, true)
+}
+
+// streamBound arms only the write side on a stream route. A stream is idle
+// between frames and its own write deadline is refreshed on every frame and
+// heartbeat, so a read deadline would end a healthy stream at the route deadline
+// instead of bounding a request that is over.
+func (s *Server) streamBound(w http.ResponseWriter) {
+	s.bound(w, false)
+}
+
+// bound arms the classified route's deadline; read decides whether its read side
+// is armed, which a stream route does not carry.
+func (s *Server) bound(w http.ResponseWriter, read bool) {
 	if s.routeDeadline <= 0 {
 		return
 	}
 	c := http.NewResponseController(w)
 	at := time.Now().Add(s.routeDeadline)
-	_ = c.SetReadDeadline(at)
+	if read {
+		_ = c.SetReadDeadline(at)
+	}
 	_ = c.SetWriteDeadline(at)
 }
 

@@ -3,9 +3,14 @@ package library
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
+
+	"github.com/ViktorsBaikers/Boxset/internal/store"
 )
 
 // Title and alias search. The FTS5 trigram index (schema 60_search.sql) holds
@@ -124,22 +129,57 @@ func (l *Library) StageGeneration(ctx context.Context, dataset string) (Generati
 
 // ActivateGeneration makes a staging generation the active one of its dataset
 // and retires the one it replaces, in one transaction: a search sees either
-// the old set or the new one.
+// the old set or the new one. The retire and the required job that deletes the
+// retired generation's aliases commit together, so a crash leaves both or
+// neither; a dataset with no active generation enqueues nothing.
 func (l *Library) ActivateGeneration(ctx context.Context, id GenerationID) error {
-	return l.db.Write(ctx, func(tx *sql.Tx) error {
-		state, dataset, err := generation(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		if state != stateStaging {
-			return invalid("generation", "is not staging")
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE alias_generation SET state = 'retired' WHERE dataset = ? AND state = 'active'`, dataset); err != nil {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE alias_generation SET state = 'active' WHERE id = ?`, int64(id))
+	return l.db.Write(ctx, func(tx *sql.Tx) error { return activateGeneration(ctx, tx, id) })
+}
+
+// activateGeneration is the activation inside the caller's write transaction, so
+// a proof can hold the process at the commit that carries the domain change and
+// its intent.
+func activateGeneration(ctx context.Context, tx *sql.Tx, id GenerationID) error {
+	state, dataset, err := generation(ctx, tx, id)
+	if err != nil {
 		return err
-	})
+	}
+	if state != stateStaging {
+		return invalid("generation", "is not staging")
+	}
+	// The row this transaction is about to retire is read before the UPDATE
+	// that retires it.
+	var retiring sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM alias_generation WHERE dataset = ? AND state = 'active'`, dataset).Scan(&retiring); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE alias_generation SET state = 'retired' WHERE dataset = ? AND state = 'active'`, dataset); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE alias_generation SET state = 'active' WHERE id = ?`, int64(id)); err != nil {
+		return err
+	}
+	if !retiring.Valid {
+		return nil
+	}
+	_, _, err = store.EnqueueJob(ctx, tx, purgeIntent(GenerationID(retiring.Int64), time.Now().Unix()))
+	return err
+}
+
+// purgeIntent is the required alias.purge job of one retired generation: one
+// open job and one live attempt per generation, with five bounded attempts.
+func purgeIntent(g GenerationID, now int64) store.JobIntent {
+	generation := strconv.FormatInt(int64(g), 10)
+	return store.JobIntent{
+		Kind:           "alias.purge",
+		Class:          store.JobRequired,
+		Lane:           store.JobBackground,
+		DedupeKey:      "alias-generation:" + generation,
+		ConcurrencyKey: "alias-generation:" + generation,
+		Params:         map[string]string{"generation": generation},
+		MaxAttempts:    5,
+		DueAt:          now,
+	}
 }
 
 // PurgeGeneration deletes up to batch aliases of a generation that is not

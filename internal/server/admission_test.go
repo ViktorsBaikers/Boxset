@@ -1,11 +1,14 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -13,6 +16,13 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/danielgtaylor/huma/v2"
+
+	"github.com/ViktorsBaikers/Boxset/internal/api"
+	"github.com/ViktorsBaikers/Boxset/internal/auth"
+	"github.com/ViktorsBaikers/Boxset/internal/jobs"
+	"github.com/ViktorsBaikers/Boxset/internal/store"
 )
 
 type passwordStageContext struct {
@@ -318,5 +328,341 @@ func TestPasswordStageSQLFailure(t *testing.T) {
 	}
 	if len(in.s.admission.passwords) != 0 {
 		t.Fatal("SQL failure leaked HTTP admission")
+	}
+}
+
+// admissionConsumer composes the server's own handler chain around a mux that
+// also holds one test-only operation. No public producer admits interactive work
+// in this milestone, so the operation that does is registered here: the parent
+// guard authorizes it exactly like a documented route, which is what makes the
+// shared 429 mapping observable over real HTTP with a real principal, runtime and
+// store file.
+func admissionConsumer(t *testing.T, in *installation, rt *jobs.Runtime) http.Handler {
+	t.Helper()
+	mux := http.NewServeMux()
+	a, routes := api.New(mux, in.s)
+	huma.Register(a, huma.Operation{
+		OperationID:   "testAcceptJob",
+		Method:        http.MethodPost,
+		Path:          api.Prefix + "/test/accept",
+		DefaultStatus: http.StatusAccepted,
+	}, func(ctx context.Context, _ *struct{}) (*struct{}, error) {
+		// The caller comes only from the authenticated principal: the operation
+		// names no user, and Accept grants nothing the request did not have.
+		session, ok := auth.SessionFrom(ctx)
+		if !ok {
+			return nil, api.NewProblem(http.StatusUnauthorized, "unauthenticated")
+		}
+		if _, err := rt.Accept(ctx, jobs.Caller{UserID: session.User.ID}, jobs.KindJobsPrune); err != nil {
+			return nil, api.AdmissionRefusal(err)
+		}
+		return nil, nil
+	})
+	table := map[string]api.Route{}
+	for _, route := range routes {
+		table[route.Pattern] = route
+	}
+	pattern := http.MethodPost + " " + api.Prefix + "/test/accept"
+	table[pattern] = api.Route{Pattern: pattern, Class: api.ClassPrincipal, Right: auth.RightStatusRead}
+	return withSecurityHeaders(compress(in.s.guard(mux, table)))
+}
+
+// admitFixture is one ready installation over a real store file whose composed
+// runtime is attached and started, with an admin API key for the caller. handler
+// builds the one runnable kind over that installation's own store, so an admitted
+// jobs.prune attempt runs the real load unless a test holds it.
+func admitFixture(t *testing.T, handler func(*store.DB) jobs.Handler) (*installation, *jobs.Runtime, http.Handler, string) {
+	t.Helper()
+	in := newInstallation(t, "", "")
+	if w := request(in.h, "POST", "/api/v1/setup", credentials("owner"), "Authorization", "Bearer "+in.token); w.Code != http.StatusCreated {
+		t.Fatalf("setup = %d %q", w.Code, w.Body.String())
+	}
+	_, key := keyFor(t, in, "admin")
+	rt, err := jobs.New(in.db, jobs.Config{Boot: "boot-http", BackgroundSlots: 1, Log: func(string, ...any) {}}, []jobs.Handler{handler(in.db)})
+	if err != nil {
+		t.Fatalf("jobs.New: %v", err)
+	}
+	backend := *in.s.backend.Load()
+	backend.Jobs = rt
+	in.s.Attach(backend)
+	if err := rt.Start(t.Context()); err != nil {
+		t.Fatalf("runtime start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := rt.Stop(ctx); err != nil {
+			t.Errorf("runtime stop: %v", err)
+		}
+	})
+	return in, rt, admissionConsumer(t, in, rt), key
+}
+
+// jobCount is the number of durable rows, the counter a refusal must not move.
+func jobCount(t *testing.T, in *installation) int64 {
+	t.Helper()
+	var n int64
+	if err := in.db.Read(t.Context(), func(tx *sql.Tx) error {
+		return tx.QueryRowContext(t.Context(), `SELECT count(*) FROM job`).Scan(&n)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// waitJobState polls one row until it reaches state.
+func waitJobState(t *testing.T, in *installation, id int64, state string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var current string
+		if err := in.db.Read(t.Context(), func(tx *sql.Tx) error {
+			return tx.QueryRowContext(t.Context(), `SELECT state FROM job WHERE id = ?`, id).Scan(&current)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if current == state {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("job %d never reached %s", id, state)
+}
+
+// ownerID is the first admin's id, the caller every admission is attributed to.
+func ownerID(t *testing.T, in *installation) int64 {
+	t.Helper()
+	var id int64
+	if err := in.db.Read(t.Context(), func(tx *sql.Tx) error {
+		return tx.QueryRowContext(t.Context(), `SELECT id FROM user ORDER BY id LIMIT 1`).Scan(&id)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// openInteractive is n open interactive rows of the caller's, not yet due so no
+// lane claims them: the admission counters, written as the rows an earlier
+// request would have left open.
+func openInteractive(t *testing.T, in *installation, createdBy int64, n int) {
+	t.Helper()
+	if err := in.db.Write(t.Context(), func(tx *sql.Tx) error {
+		for i := range n {
+			key := fmt.Sprintf("open-%d", i)
+			due := time.Now().Add(time.Hour).Unix()
+			if _, _, err := store.EnqueueJob(t.Context(), tx, store.JobIntent{
+				Kind: "http.open", Class: store.JobRequired, Lane: store.JobInteractive,
+				DedupeKey: key, ConcurrencyKey: key, MaxAttempts: 1,
+				DueAt: due, CreatedBy: &createdBy,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestJobAdmissionHTTP proves AC-024 at the HTTP boundary: the fifth request of
+// one caller and the request into a full optional queue are the recorded 429s
+// with their reason word and Retry-After, a refusal leaves the row count where it
+// was, and an admitted request completes without its caller.
+func TestJobAdmissionHTTP(t *testing.T) {
+	accept := func(h http.Handler, key string) *httptest.ResponseRecorder {
+		t.Helper()
+		return request(h, "POST", "/api/v1/test/accept", "", "X-Api-Key", key)
+	}
+	t.Run("the fifth request of one caller is refused", func(t *testing.T) {
+		in, _, h, key := admitFixture(t, jobs.PruneHandler)
+		openInteractive(t, in, ownerID(t, in), 4)
+		w := accept(h, key)
+		if w.Code != http.StatusTooManyRequests || code(t, w) != "interactive_cap" || w.Header().Get("Retry-After") != "2" {
+			t.Fatalf("fifth admission = %d %q Retry-After %q, want 429 interactive_cap 2", w.Code, w.Body.String(), w.Header().Get("Retry-After"))
+		}
+		if rows := jobCount(t, in); rows != 4 {
+			t.Fatalf("rows after the refusal = %d, want 4: a refusal creates nothing", rows)
+		}
+		// One of the open rows finishes, so the caller's share returns and the
+		// same request is admitted.
+		if err := in.db.Write(t.Context(), func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(t.Context(), `UPDATE job SET state = 'succeeded', revision = revision + 1 WHERE id = (SELECT min(id) FROM job)`)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if w := accept(h, key); w.Code != http.StatusAccepted {
+			t.Fatalf("admission after a finished row = %d %q, want 202", w.Code, w.Body.String())
+		}
+		if rows := jobCount(t, in); rows != 5 {
+			t.Fatalf("rows after the admission = %d, want 5", rows)
+		}
+	})
+
+	t.Run("a request into a full optional queue is refused", func(t *testing.T) {
+		in, _, h, key := admitFixture(t, jobs.PruneHandler)
+		if err := in.db.Write(t.Context(), func(tx *sql.Tx) error {
+			for i := range 1024 {
+				id := fmt.Sprintf("http-bulk-%d", i)
+				// Not yet due, so no lane claims these rows while the test runs;
+				// the queue count reads the queued state alone.
+				if _, _, err := store.EnqueueJob(t.Context(), tx, store.JobIntent{
+					Kind: "http.bulk", Class: store.JobOptional, Lane: store.JobBackground,
+					DedupeKey: id, ConcurrencyKey: id, MaxAttempts: 1,
+					DueAt: time.Now().Add(time.Hour).Unix(),
+				}); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		w := accept(h, key)
+		if w.Code != http.StatusTooManyRequests || code(t, w) != "queue_full" || w.Header().Get("Retry-After") != "30" {
+			t.Fatalf("full queue = %d %q Retry-After %q, want 429 queue_full 30", w.Code, w.Body.String(), w.Header().Get("Retry-After"))
+		}
+		if rows := jobCount(t, in); rows != 1024 {
+			t.Fatalf("rows after the refusal = %d, want 1024", rows)
+		}
+	})
+
+	t.Run("a caller that disconnects after 202 leaves a completing job", func(t *testing.T) {
+		// The attempt is held until the caller has left, so the work that
+		// finishes was never the request's to cancel.
+		release := make(chan struct{})
+		held := func(*store.DB) jobs.Handler {
+			return jobs.Handler{
+				Kind: jobs.KindJobsPrune, Class: jobs.ClassOptional, Lane: jobs.LaneBackground,
+				RunNow: true, MaxAttempts: 1, Deadline: 30 * time.Second,
+				Run: func(ctx context.Context, _ *jobs.Attempt) jobs.Outcome {
+					select {
+					case <-release:
+						return jobs.Outcome{Result: jobs.Succeeded, Reason: "done"}
+					case <-ctx.Done():
+						return jobs.Outcome{}
+					}
+				},
+			}
+		}
+		in, _, h, key := admitFixture(t, held)
+		ts := httptest.NewServer(h)
+		defer ts.Close()
+		conn, err := net.Dial("tcp", ts.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		host := ts.Listener.Addr().String()
+		requestLine := "POST /api/v1/test/accept HTTP/1.1\r\nHost: " + host + "\r\nX-Api-Key: " + key + "\r\nContent-Length: 0\r\n\r\n"
+		if _, err := conn.Write([]byte(requestLine)); err != nil {
+			t.Fatal(err)
+		}
+		// The status line is the accepted work's answer; the caller then leaves
+		// without reading the rest of the response.
+		reader := bufio.NewReader(conn)
+		line, err := reader.ReadString('\n')
+		if err != nil || !strings.Contains(line, "202") {
+			t.Fatalf("accepted response = %q, %v; want 202", line, err)
+		}
+		_ = conn.Close()
+		var id int64
+		if err := in.db.Read(t.Context(), func(tx *sql.Tx) error {
+			return tx.QueryRowContext(t.Context(), `SELECT id FROM job ORDER BY id DESC LIMIT 1`).Scan(&id)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// The attempt is running while no client is waiting on it, and it
+		// completes once its own work is allowed to.
+		waitJobState(t, in, id, store.JobRunning)
+		close(release)
+		waitJobState(t, in, id, store.JobSucceeded)
+	})
+}
+
+// TestJobVisibilityHTTP proves the jobs route serves the job rows behind the
+// parent guard under the existing status right, that it pages by keyset, and that
+// the documented page bound is enforced before any read.
+func TestJobVisibilityHTTP(t *testing.T) {
+	in, _, h, _ := admitFixture(t, jobs.PruneHandler)
+	_, viewer := keyFor(t, in, "read")
+	if err := in.db.Write(t.Context(), func(tx *sql.Tx) error {
+		for _, key := range []string{"visible-1", "visible-2"} {
+			// Not yet due: the states below are the test's, not a lane's.
+			if _, _, err := store.EnqueueJob(t.Context(), tx, store.JobIntent{
+				Kind: "http.work", Class: store.JobOptional, Lane: store.JobBackground,
+				DedupeKey: key, ConcurrencyKey: key, MaxAttempts: 1,
+				DueAt: time.Now().Add(time.Hour).Unix(),
+			}); err != nil {
+				return err
+			}
+		}
+		_, err := tx.ExecContext(t.Context(), `UPDATE job SET state = 'succeeded', reason_code = 'done' WHERE dedupe_key = 'visible-1'`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Items []struct {
+			ID         int64  `json:"id"`
+			State      string `json:"state"`
+			ReasonCode string `json:"reasonCode"`
+		} `json:"items"`
+		NextCursor string `json:"nextCursor"`
+	}
+	w := request(h, "GET", "/api/v1/system/jobs?limit=500", "", "X-Api-Key", viewer)
+	if w.Code != http.StatusOK {
+		t.Fatalf("jobs page = %d %q", w.Code, w.Body.String())
+	}
+	// The contract's declared response header: a page of job rows is readable
+	// under existing rights and stays out of a shared cache.
+	if got := w.Header().Get("Cache-Control"); got != "private, no-cache" {
+		t.Errorf("jobs page Cache-Control = %q, want private, no-cache", got)
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("jobs page body %q: %v", w.Body.String(), err)
+	}
+	if len(body.Items) != 2 || body.Items[0].State != store.JobQueued || body.Items[1].State != store.JobSucceeded || body.Items[1].ReasonCode != "done" {
+		t.Fatalf("jobs page = %+v, want the queued and the succeeded row newest first", body.Items)
+	}
+	// The same route under the guard's own answers: no credential, and a bound
+	// over the maximum, which is a validation refusal before any read.
+	if w := request(h, "GET", "/api/v1/system/jobs", ""); w.Code != http.StatusUnauthorized || code(t, w) != "unauthenticated" {
+		t.Errorf("without a credential = %d %q", w.Code, w.Body.String())
+	}
+	if w := request(h, "GET", "/api/v1/system/jobs?limit=501", "", "X-Api-Key", viewer); w.Code != http.StatusUnprocessableEntity || code(t, w) != "validation_failed" {
+		t.Errorf("limit=501 = %d %q, want 422 validation_failed", w.Code, w.Body.String())
+	}
+	// One row per page, continued from the cursor the page returned.
+	first := request(h, "GET", "/api/v1/system/jobs?limit=1", "", "X-Api-Key", viewer)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first page = %d %q", first.Code, first.Body.String())
+	}
+	var page struct {
+		Items []struct {
+			ID int64 `json:"id"`
+		} `json:"items"`
+		NextCursor string `json:"nextCursor"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.NextCursor == "" {
+		t.Fatalf("first page = %+v, want one row and a cursor", page)
+	}
+	second := request(h, "GET", "/api/v1/system/jobs?limit=1&cursor="+page.NextCursor, "", "X-Api-Key", viewer)
+	if second.Code != http.StatusOK {
+		t.Fatalf("continued page = %d %q", second.Code, second.Body.String())
+	}
+	var rest struct {
+		Items []struct {
+			ID int64 `json:"id"`
+		} `json:"items"`
+		NextCursor string `json:"nextCursor"`
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &rest); err != nil {
+		t.Fatal(err)
+	}
+	if len(rest.Items) != 1 || rest.Items[0].ID == page.Items[0].ID || rest.NextCursor != "" {
+		t.Fatalf("continued page = %+v after %+v, want the other row and no cursor", rest, page.Items)
 	}
 }

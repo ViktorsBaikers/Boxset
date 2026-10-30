@@ -90,6 +90,31 @@ var crashScenarios = map[string]crashScenario{
 			return errors.New("crash scenario was not killed")
 		})
 	},
+	// activates a staging generation, which retires the active one and enqueues
+	// the required purge of the retired row in the same transaction.
+	// args: staging generation id.
+	"activate-generation": func(ctx context.Context, l *Library, args []string, ready func(tx *sql.Tx)) error {
+		id, err := strconv.ParseInt(args[0], 10, 64)
+		if err != nil {
+			return err
+		}
+		return l.db.Write(ctx, func(tx *sql.Tx) error {
+			if err := activateGeneration(ctx, tx, GenerationID(id)); err != nil {
+				return err
+			}
+			// The intent is in the same open transaction as the retire.
+			var intents int
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM job`).Scan(&intents); err != nil {
+				return err
+			}
+			if intents != 1 {
+				return fmt.Errorf("the activation wrote %d intents, want 1", intents)
+			}
+			ready(tx)
+			time.Sleep(2 * time.Minute) // the parent kills first; this only bounds an orphan
+			return errors.New("crash scenario was not killed")
+		})
+	},
 	// changes episode and movie state through the transaction-level slot-state
 	// writers, checks the rollups equal the recompute inside the open
 	// transaction, and waits. args: series slot id, movie slot id.
@@ -441,5 +466,64 @@ func TestKilledWriterProjectionMatchesOracle(t *testing.T) {
 	}
 	if i := slices.IndexFunc(r, func(x Rollup) bool { return x.SlotID == series }); i < 0 || r[i].SizeBytes != 1132 || r[i].OnDisk != 2 || r[i].Spine != "FLMFM" {
 		t.Fatalf("rollup after the replay = %+v, want 1132 bytes, 2 on disk, spine FLMFM", r)
+	}
+}
+
+// A writer killed inside the activation that retires a generation and writes its
+// purge intent leaves neither: the retired row keeps its state, the new one is
+// not active and no job row exists. A process kill proves application-crash
+// recovery only (ADR 0003).
+func TestKilledActivationLeavesNoIntent(t *testing.T) {
+	w := applyS2(t)
+	ctx := t.Context()
+	lib := w.lib
+	title := w.titles["tmdb:603"]
+	// One active generation with an alias, then a staging one over it.
+	active, err := lib.StageGeneration(ctx, "dataset-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.SetAliases(ctx, title, &active, []string{"Alpha Alias"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.ActivateGeneration(ctx, active); err != nil {
+		t.Fatal(err)
+	}
+	staging, err := lib.StageGeneration(ctx, "dataset-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.SetAliases(ctx, title, &staging, []string{"Bravo Alias"}); err != nil {
+		t.Fatal(err)
+	}
+	before := dump(t, w.db, `SELECT id, dataset, state FROM alias_generation ORDER BY id`)
+	if n := queryInt(t, w.db, `SELECT count(*) FROM job`); n != 0 {
+		t.Fatalf("jobs before the activation = %d, want none", n)
+	}
+
+	// The child reports only once the retire, the activation and its intent are
+	// written inside one open transaction; the kill comes before its commit.
+	killChild(t, "activate-generation", dbPath(t, w.db), strconv.FormatInt(int64(staging), 10))
+
+	db, err := store.Open(ctx, dbPath(t, w.db), store.Options{})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if after := dump(t, db, `SELECT id, dataset, state FROM alias_generation ORDER BY id`); !slices.Equal(before, after) {
+		t.Fatalf("the killed activation moved generation state:\n before %v\n after  %v", before, after)
+	}
+	if n := queryInt(t, db, `SELECT count(*) FROM job`); n != 0 {
+		t.Fatalf("the killed activation left %d job rows", n)
+	}
+	// The same call on the reopened file lands both, once.
+	if err := New(db).ActivateGeneration(ctx, staging); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if n := queryInt(t, db, `SELECT count(*) FROM job`); n != 1 {
+		t.Fatalf("jobs after the replay = %d, want one", n)
+	}
+	if n := queryInt(t, db, `SELECT count(*) FROM alias_generation WHERE state = 'active' AND id = ?`, int64(staging)); n != 1 {
+		t.Fatalf("the replay did not activate the staging generation")
 	}
 }

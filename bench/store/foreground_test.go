@@ -132,13 +132,7 @@ func (w *world) seedTitles(ctx context.Context) error {
 		}
 		w.titles = append(w.titles, target{id: r.TitleID, name: name, slots: r.SlotIDs, episodes: n})
 	}
-	return w.db.Write(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `CREATE TABLE bench_probe (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)`); err != nil {
-			return err
-		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO bench_probe (id, n) VALUES (1, 0)`)
-		return err
-	})
+	return CreateProbe(ctx, w.db)
 }
 
 var states = [...]string{"on_disk", "missing", "live", "upgrade", "unaired"}
@@ -199,25 +193,6 @@ func (w *world) read(ctx context.Context, r *rand.Rand, i int) error {
 	}
 	_, err := w.lib.Search(ctx, w.spec.name+" title", 10)
 	return err
-}
-
-// probe is one tiny write transaction queued behind the workload's writers.
-// Its wait is the time until the writer connection runs it (a retired
-// connection's reconnect is part of that), its commit the time Commit takes.
-// The clock (now, since) and the transaction call write are private function
-// values: measure passes time.Now, time.Since and w.db.Write, so the probe
-// keeps its four clock readings, first before the call, second and third
-// inside it around the UPDATE, and the elapsed one after the call returned.
-func (w *world) probe(ctx context.Context, now func() time.Time, since func(time.Time) time.Duration, write func(context.Context, func(*sql.Tx) error) error) (wait, commit time.Duration, err error) {
-	var begun, written time.Time
-	start := now()
-	err = write(ctx, func(tx *sql.Tx) error {
-		begun = now()
-		_, err := tx.ExecContext(ctx, `UPDATE bench_probe SET n = n + 1 WHERE id = 1`)
-		written = now()
-		return err
-	})
-	return begun.Sub(start), since(written), err
 }
 
 // procField reads one integer of a /proc file whose lines are "key value" or "key: value [unit]".
@@ -465,7 +440,7 @@ func measure(t *testing.T, sp spec, p proc, facts *Facts) Workload {
 			recording.Store(true)
 		},
 		func(k int) { round.Store(int64(k)) },
-		func() (time.Duration, time.Duration, error) { return w.probe(ctx, time.Now, time.Since, w.db.Write) })
+		func() (time.Duration, time.Duration, error) { return Probe(ctx, time.Now, time.Since, w.db.Write) })
 	if err != nil {
 		fail(err)
 	}
@@ -1388,7 +1363,7 @@ func TestForegroundProducer(t *testing.T) {
 				func() bool { return stopAfter > 0 && r.writes >= stopAfter },
 				func() { begins, beganAfter = begins+1, r.writes },
 				func(k int) { rounds = append(rounds, k) },
-				func() (time.Duration, time.Duration, error) { return w.probe(ctx, r.now, r.since, r.write) })
+				func() (time.Duration, time.Duration, error) { return Probe(ctx, r.now, r.since, r.write) })
 			done := r.writes
 			if err != nil {
 				if rollbackAt < 0 {

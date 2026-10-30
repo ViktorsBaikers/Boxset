@@ -1,6 +1,6 @@
 # Each recipe is one command that runs the same without make; the comment above it names it. They
 # call only docker, docker compose, git and scripts/dev-run.sh: the host needs nothing else.
-.PHONY: dev test lint build
+.PHONY: dev test lint build fixtures-record
 
 # docker compose -f compose.dev.yaml up --build --renew-anon-volumes
 dev:
@@ -17,3 +17,7 @@ lint:
 # docker build -f deploy/dev/Dockerfile --target binary --output type=local,dest=bin .
 build:
 	docker build -f deploy/dev/Dockerfile --target binary --output type=local,dest=bin .
+
+# scripts/dev-run.sh --write internal/outbound/testdata/fixtures/$(SET) -- env CGO_ENABLED=0 go run ./internal/fixture/record -set $(SET)
+fixtures-record:
+	scripts/dev-run.sh --write 'internal/outbound/testdata/fixtures/$(SET)' -- env CGO_ENABLED=0 go run ./internal/fixture/record -set '$(SET)'

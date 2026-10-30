@@ -26,6 +26,9 @@ set -u
 set -f
 LC_ALL=C
 export LC_ALL
+# No benchmark value of the caller's shell reaches a gate: every benchmark case names its own, so a
+# caller-exported placement cannot move a measurement or mask a refusal.
+unset BOXSET_BENCH_CPUSET BOXSET_BENCH_CONFIG BOXSET_BENCH_CGROUP_PARENT
 
 SELFCHECK_ONLY=0
 case "${1:-}" in
@@ -2550,6 +2553,10 @@ bg_end() { # bg_end NAME: wait for the background runner, sets RS and copies its
 CBAR='touch /tmp/ready; n=0; while [ ! -e /tmp/go ] && [ "$n" -lt 900 ]; do sleep 1; n=$((n + 1)); done'
 classifier_self_check
 META=0
+# The three benchmark values are scrubbed above; this control fails if a caller's value survived to a gate.
+rg_reset
+reached
+expect "the caller's benchmark environment is scrubbed" "${BOXSET_BENCH_CPUSET-}:${BOXSET_BENCH_CONFIG-}:${BOXSET_BENCH_CGROUP_PARENT-}" "::"
 if [ "$SELFCHECK_ONLY" = 1 ]; then
 	if [ "$FAILS" -eq 0 ]; then
 		printf 'DEV-RUN-TEST-SELFCHECK-PASS controls=%s\n' "$PASSES"
@@ -2731,6 +2738,37 @@ for w in testdata/parser '../x' '/tmp/x' 'testdata/parser/../../x' './testdata/p
 	if [ "$RS" = 125 ] && ! grep -Eq "$RUNNER_STARTED_RE" "$TMP/rerr"; then pass "write path '$w' refused ($(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | head -n 1))"; else fail "write path '$w'" "status $RS"; fi
 done
 expect "refused paths changed nothing on the host" "$(tree_hash)" "$before"
+# ===== 3b. fixture-set publication and its refused roots ======================================================
+# --write internal/outbound/testdata/fixtures/<set> publishes exactly exchanges.json, at most 8 MiB, and only when the
+# child exited 0. The set name is the runner's own predicate: one lower-case [a-z0-9-] word of at most 32 characters,
+# never a path.
+FIXDIR=$ISO/internal/outbound/testdata/fixtures/outbound-contract
+FIXORIG=$TMP/fixture-orig.json
+if [ -f "$FIXDIR/exchanges.json" ]; then cp "$FIXDIR/exchanges.json" "$FIXORIG" || exit 125; fi
+MKFIX='mkdir -p /src/internal/outbound/testdata/fixtures/outbound-contract'
+rr --write internal/outbound/testdata/fixtures/outbound-contract -- sh -c "$MKFIX && printf '{\"schema\":1}' >/src/internal/outbound/testdata/fixtures/outbound-contract/exchanges.json"
+expect "a fixture set the child wrote is published on exit 0" "$RS:$(cat "$FIXDIR/exchanges.json" 2>/dev/null)" '0:{"schema":1}'
+rr -s 7 --write internal/outbound/testdata/fixtures/outbound-contract -- sh -c "$MKFIX && printf changed >/src/internal/outbound/testdata/fixtures/outbound-contract/exchanges.json; exit 7"
+expect "a nonzero recording publishes nothing and keeps the set" "$RS:$(cat "$FIXDIR/exchanges.json" 2>/dev/null)" '7:{"schema":1}'
+rr -w draft_overflow --write internal/outbound/testdata/fixtures/outbound-contract -- sh -c "$MKFIX && yes a | head -c 8388609 >/src/internal/outbound/testdata/fixtures/outbound-contract/exchanges.json"
+expect "a fixture file over 8 MiB is refused" "$RS" 125
+reason "fixture overflow reason" draft_overflow
+expect "an oversize fixture publishes nothing" "$(cat "$FIXDIR/exchanges.json" 2>/dev/null)" '{"schema":1}'
+rr --write internal/outbound/testdata/fixtures/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -- sh -c 'mkdir -p /src/internal/outbound/testdata/fixtures/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa && printf set >/src/internal/outbound/testdata/fixtures/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/exchanges.json'
+expect "a 32-character set name is a write root" "$RS:$(cat "$ISO/internal/outbound/testdata/fixtures/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/exchanges.json" 2>/dev/null)" "0:set"
+rm -rf "$ISO/internal/outbound/testdata/fixtures/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+for w in internal/outbound/testdata/fixtures/Outbound-Contract internal/outbound/testdata/fixtures internal/outbound/testdata/fixtures/ internal/outbound/testdata/fixtures/a/b internal/outbound/testdata/fixtures/../outbound-contract internal/outbound/testdata/fixtures/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
+	rr -w write_path_invalid --write "$w" -- true
+	if [ "$RS" = 125 ] && ! grep -Eq "$RUNNER_STARTED_RE" "$TMP/rerr"; then pass "fixture write path '$w' refused ($(grep -o 'dev-run: [a-z_]*' "$TMP/rerr" | head -n 1))"; else fail "fixture write path '$w'" "status $RS"; fi
+done
+# a symlinked set is a linked root, refused before Docker
+ln -s "$CANARY" "$ISO/internal/outbound/testdata/fixtures/linked-set"
+rr -w write_root_invalid --write internal/outbound/testdata/fixtures/linked-set -- true
+expect "symlinked fixture set refused" "$RS" 125
+reason "symlinked fixture set reason" write_root_invalid
+rm -f "$ISO/internal/outbound/testdata/fixtures/linked-set"
+if [ -f "$FIXORIG" ]; then cp "$FIXORIG" "$FIXDIR/exchanges.json" || exit 125; else rm -rf "$FIXDIR"; fi
+
 # a symlinked write root or ancestor is refused before Docker as write_root_invalid
 mkdir -p "$ISO/docs/spikes"
 ln -s "$CANARY" "$DRAFTDIR"
@@ -3109,6 +3147,54 @@ variant mut-benchdata-shape 'docs/spikes/data/bench-[0-9][0-9][0-9][0-9][0-9][0-
 redgreen "bench-data path shape (the pattern, not the same-stamp rule)" a_benchdata_shape "$MUT/mut-benchdata-shape.sh" "$RUNNER"
 holds "bench-data path shape is refused by the pattern alone" a_benchdata_shape "$MUT/mut-benchdata-stamp.sh"
 expect "--bench-data and --timeout refusals changed nothing on the host" "$(tree_hash)|$(find "$CANARY" | LC_ALL=C sort | tr '\n' ' ')" "$bbefore|$cbefore"
+# A benchmark placement is one top-level `*.slice` of this machine whose effective cpuset is exactly the
+# reserved set: a path, `..`, whitespace, a leading dash, an empty stem, a non-slice name and an absent
+# slice are all bench_invalid side=cgroup, never the opaque create_failed. The cgroup stage follows the
+# configuration stage, so every row carries a real configuration directory.
+mkdir -p "$TMP/benchcfg" || exit 125
+bench_cg_refusal() { # $1 description: the run stopped before Docker as bench_invalid side=cgroup
+	if [ "$RS" = 125 ] && grep -Fq 'dev-run: bench_invalid side=cgroup' "$TMP/rerr" && ! grep -Eq "$RUNNER_STARTED_RE" "$TMP/rerr"; then
+		pass "$1"
+	else
+		fail "$1" "status $RS, $(head -c 200 "$TMP/rerr")"
+	fi
+}
+for bad in 'foo/bar.slice' 'foo..slice' 'foo bar.slice' '-foo.slice' '.slice' 'foo' "$(printf 'a\nb.slice')" 'boxset-test-absent.slice'; do
+	rrp -w bench_invalid "$ISO" env BOXSET_BENCH_CONFIG="$TMP/benchcfg" BOXSET_BENCH_CGROUP_PARENT="$bad" "$RUNNER" \
+		--bench 0 --write "$bdata/bench-20260101T000060Z/samples" -- true
+	bench_cg_refusal "benchmark placement '$bad' is refused as side=cgroup before Docker"
+done
+# The effective cpuset is what keeps the child off other cores: a slice that exists but holds other cores
+# is refused too. The fixture root replaces the host's /sys/fs/cgroup in a copy, so the row does not depend
+# on this host's own slices.
+mkdir -p "$TMP/fakecg/bench-other.slice" || exit 125
+printf '0-1\n' >"$TMP/fakecg/bench-other.slice/cpuset.cpus.effective" || exit 125
+cp "$RUNNER" "$TMP/cg-runner.sh" || exit 125
+chmod +x "$TMP/cg-runner.sh" || exit 125
+mutate_file "$TMP/cg-runner.sh" '/sys/fs/cgroup/$BENCHCG/cpuset.cpus.effective' "$TMP/fakecg/\$BENCHCG/cpuset.cpus.effective" || exit 125
+rrp -w bench_invalid "$ISO" env BOXSET_BENCH_CONFIG="$TMP/benchcfg" BOXSET_BENCH_CGROUP_PARENT=bench-other.slice "$TMP/cg-runner.sh" \
+	--bench 0 --write "$bdata/bench-20260101T000061Z/samples" -- true
+bench_cg_refusal "a placement whose effective cpuset holds other cores is refused as side=cgroup"
+# The mount-table fallback reads the field after the `-` separator, never a fixed position: a bind's
+# mountinfo line without optional fields carries the mount source (/dev/md4) in field 9, which the old
+# parse read as the filesystem word and turned into data_mounted=false. The runner's own parser is
+# extracted and handed fixture tables, and the mutant is that old parse.
+a_mountinfo_fstype() { # $1 runner: both fixture shapes parse to "8:5 xfs"
+	_s=$TMP/mountinfo-fns.sh
+	_f=$TMP/mountinfo.table
+	cleanup_extract "$_s" "$1" bench_mount_devfs 2>/dev/null || { OBS="parser extraction failed"; return 1; }
+	_sf=0
+	for _opt in '' 'shared:12 '; do
+		printf '36 35 8:5 /work /bench-data rw,relatime %s- xfs /dev/md4 rw\n' "$_opt" >"$_f" || { OBS="fixture setup failed"; return 1; }
+		_got=$(sh -c '. "$1"; bench_mount_devfs "$2"' sh "$_s" "$_f")
+		OBS="${OBS}[$_opt: '$_got']"
+		[ "$_got" = '8:5 xfs' ] || _sf=1
+	done
+	reached
+	[ "$_sf" = 0 ]
+}
+variant mut-mountinfo-source 'print $3, $(i + 1); exit }' 'print $9; exit }'
+redgreen "mount-table fallback reads the fstype after '-' and the mount's device" a_mountinfo_fstype "$MUT/mut-mountinfo-source.sh" "$RUNNER"
 mkdir -p "$TMP/shim"
 for t in sh docker id mkdir rmdir ln rm mv head tail wc cat sha256sum timeout date grep find tr od dirname; do
 	p=$(command -v "$t") && ln -sf "$p" "$TMP/shim/$t"

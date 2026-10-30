@@ -77,6 +77,29 @@ type InstallationKey struct {
 	KeyID string
 }
 
+type Job struct {
+	ID               int64
+	Kind             string
+	Class            string
+	Lane             string
+	DedupeKey        string
+	ConcurrencyKey   string
+	Params           string
+	State            string
+	ReasonCode       sql.NullString
+	ReasonParams     sql.NullString
+	Attempts         int64
+	MaxAttempts      int64
+	DueAt            int64
+	ExpiresAt        sql.NullInt64
+	LeaseOwner       sql.NullString
+	AttemptStartedAt sql.NullInt64
+	CreatedBy        sql.NullInt64
+	CreatedAt        int64
+	UpdatedAt        int64
+	Revision         int64
+}
+
 type Library struct {
 	ID                    int64
 	Name                  string
@@ -114,6 +137,18 @@ type ReviewHold struct {
 	TitleID    sql.NullInt64
 	SlotID     sql.NullInt64
 	Params     string
+}
+
+type Schedule struct {
+	ID        int64
+	Name      string
+	Kind      string
+	Rule      string
+	IntervalS sql.NullInt64
+	LocalTime sql.NullString
+	Zone      sql.NullString
+	NextDueAt int64
+	Revision  int64
 }
 
 type SearchTerm struct {

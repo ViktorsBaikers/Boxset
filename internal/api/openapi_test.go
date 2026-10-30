@@ -15,6 +15,8 @@ import (
 	"testing"
 
 	"github.com/ViktorsBaikers/Boxset/internal/auth"
+	"github.com/ViktorsBaikers/Boxset/internal/events"
+	"github.com/ViktorsBaikers/Boxset/internal/jobs"
 )
 
 // committed is the checked-in document, the one contract both the server and
@@ -111,6 +113,7 @@ type docSchema struct {
 	Properties map[string]docSchema `json:"properties"`
 	Items      *docSchema           `json:"items"`
 	Enum       []string             `json:"enum"`
+	Pattern    string               `json:"pattern"`
 	WriteOnly  bool                 `json:"writeOnly"`
 	Required   []string             `json:"required"`
 }
@@ -159,6 +162,21 @@ var expected = map[string]struct {
 		"400": {"secret_in_url"},
 		"401": {"unauthenticated", "credential_invalid"},
 		"403": {"forbidden"},
+		"500": {"internal_error"},
+	}},
+	"GET /api/v1/events": {ClassPrincipal, auth.RightStatusRead, "200", map[string][]string{
+		"401": {"unauthenticated", "credential_invalid"},
+		"403": {"forbidden"},
+		"429": {"stream_cap"},
+		"500": {"internal_error"},
+		"503": {"draining"},
+	}},
+	"GET /api/v1/system/jobs": {ClassPrincipal, auth.RightStatusRead, "200", map[string][]string{
+		"400": {"cursor_invalid", "secret_in_url"},
+		"401": {"unauthenticated", "credential_invalid"},
+		"403": {"forbidden"},
+		"409": {"cursor_stale"},
+		"422": {"validation_failed"},
 		"500": {"internal_error"},
 	}},
 }
@@ -246,8 +264,26 @@ func TestOpenAPISemantics(t *testing.T) {
 	if rights := schemas["Session"].Properties["rights"]; rights.Items == nil || !slices.Equal(rights.Items.Enum, []string{"status:read", "users:read", "users:write"}) {
 		t.Error("Session.rights must enumerate current rights on each array item")
 	}
+	// installId is additive: it is present on every real response, and a client
+	// that predates it keeps decoding the same document.
 	if got := schemas["Session"].Required; !slices.Equal(got, []string{"rights", "credential", "restoreEpoch", "localBypassEnabled", "canLogout"}) {
 		t.Errorf("Session required fields %v", got)
+	}
+	// The installation identity is public and non-secret, and its shape is the
+	// one the hello frame carries: 12 lowercase hex digits.
+	if got := schemas["Session"].Properties["installId"].Pattern; got != "^[0-9a-f]{12}$" {
+		t.Errorf("Session.installId pattern %q", got)
+	}
+	if got := schemas["EventHello"].Properties["installId"].Pattern; got != "^[0-9a-f]{12}$" {
+		t.Errorf("EventHello.installId pattern %q", got)
+	}
+	for _, name := range []string{"EventHello", "EventResync", "EventJob", "EventUsers", "EventSystem"} {
+		if schemas[name].Type == nil {
+			t.Errorf("event component %s is not in the document", name)
+		}
+	}
+	if job := schemas["EventJob"].Properties["job"]; job.Ref != "#/components/schemas/Job" {
+		t.Errorf("EventJob.job ref %q, want the jobs read model", job.Ref)
 	}
 	// user is optional so the direct-peer grant can answer without inventing a
 	// user; the warning and logout facts are always present.
@@ -326,6 +362,16 @@ func (f fakeService) CreateFirstAdmin(context.Context, auth.Principal, string, s
 	return auth.User{ID: 1, Username: "admin", Role: auth.RoleAdmin, Revision: 1}, f.err
 }
 func (f fakeService) Status(context.Context) (Status, error) { return Status{}, f.err }
+
+func (f fakeService) ListJobs(context.Context, jobs.Query) (jobs.Page, error) {
+	return jobs.Page{}, f.err
+}
+
+func (f fakeService) Events() *events.Hub { return nil }
+
+func (f fakeService) Installation(context.Context) (string, error) {
+	return "123456abcdef", f.err
+}
 
 // Huma's own errors and the domain errors map to their documented problems,
 // and none echoes the submitted values.

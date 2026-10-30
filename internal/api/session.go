@@ -17,6 +17,7 @@ type Session struct {
 	Rights             []string  `json:"rights" maxItems:"3" uniqueItems:"true" nullable:"false" enum:"status:read,users:read,users:write"`
 	Credential         string    `json:"credential" enum:"cookie,key,local_bypass"`
 	RestoreEpoch       int64     `json:"restoreEpoch" minimum:"1"`
+	InstallID          string    `json:"installId,omitempty" pattern:"^[0-9a-f]{12}$"`
 	ExpiresAt          time.Time `json:"expiresAt,omitzero"`
 	LocalBypassEnabled bool      `json:"localBypassEnabled"`
 	CanLogout          bool      `json:"canLogout"`
@@ -61,7 +62,14 @@ func (h *handlers) session(ctx context.Context, _ *struct{}) (*SessionOutput, er
 	if !ok {
 		return nil, NewProblem(401, "unauthenticated")
 	}
-	body := Session{Rights: s.Rights, Credential: s.Credential, RestoreEpoch: s.RestoreEpoch, ExpiresAt: s.ExpiresAt, LocalBypassEnabled: s.LocalBypassEnabled, CanLogout: s.CanLogout}
+	// installId is the installation's own identity, the same value the stream's
+	// hello frame and the cookie name carry, so a tab can confirm the stream it
+	// shares without reading a credential it cannot see.
+	installID, err := h.svc.Installation(ctx)
+	if err != nil {
+		return nil, NewProblem(http.StatusInternalServerError, "internal_error")
+	}
+	body := Session{Rights: s.Rights, Credential: s.Credential, RestoreEpoch: s.RestoreEpoch, InstallID: installID, ExpiresAt: s.ExpiresAt, LocalBypassEnabled: s.LocalBypassEnabled, CanLogout: s.CanLogout}
 	if s.Credential != auth.CredentialLocalBypass {
 		user := userOf(s.User)
 		body.User = &user

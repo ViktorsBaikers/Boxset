@@ -80,7 +80,7 @@ SNAP_EXTRA=
 [ "$MODE" != live-dev ] || SNAP_EXTRA='compose.dev.yaml .devcontainer Makefile deploy/dev/watch.ts'
 LIVE=
 # No owner benchmark value is ever read here: the checks give the runner their own synthetic ones.
-unset BOXSET_BENCH_CPUSET BOXSET_BENCH_CONFIG
+unset BOXSET_BENCH_CPUSET BOXSET_BENCH_CONFIG BOXSET_BENCH_CGROUP_PARENT
 
 { [ -f scripts/dev-run.sh ] && [ -f deploy/dev/Dockerfile ] && [ -f .dockerignore ]; } || {
 	echo 'dev-run-smoke: run from the repository root' >&2
@@ -214,7 +214,9 @@ r1_bench() {
 }
 BRUN=docs/spikes/data/bench-20260101T000000Z
 r1() {
-	r1_one usage true &&
+	# The caller's benchmark placement never reaches a gate: every benchmark case below names its own.
+	[ -z "${BOXSET_BENCH_CPUSET-}${BOXSET_BENCH_CONFIG-}${BOXSET_BENCH_CGROUP_PARENT-}" ] &&
+		r1_one usage true &&
 		r1_one timeout_invalid --timeout 0 -- true &&
 		r1_one write_path_invalid --write ../x -- true &&
 		r1_one usage --ref -- true &&
